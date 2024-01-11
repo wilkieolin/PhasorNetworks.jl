@@ -78,10 +78,10 @@ function train_test(model, args, ps, st, train_loader, test_loader)
     # if CUDA.functional() && args.use_cuda
     #     @info "Training on CUDA GPU"
     #     CUDA.allowscalar(false)
-    #     device = gpu
+    #     device = gpu_device()
     # else
         @info "Training on CPU"
-        device = cpu_device
+        device = cpu_device()
     # end
 
     ## Construct model
