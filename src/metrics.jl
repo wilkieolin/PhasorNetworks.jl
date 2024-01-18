@@ -59,8 +59,13 @@ function spiking_accuracy(data_loader, model, ps, st;
     return acc
 end
 
-function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
+function predict_quadrature(phases::AbstractMatrix)
     predictions = getindex.(argmin(abs.(phases .- 0.5), dims=1), 1)'
+    return predictions
+end
+
+function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
+    predictions = predict_quadrature(phases)
     labels = getindex.(findall(truth), 1)
     return predictions .== labels
 end
