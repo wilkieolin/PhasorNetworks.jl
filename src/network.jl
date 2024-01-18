@@ -24,7 +24,6 @@ function (a::MakeSpiking)(x::AbstractArray)
 end
 
 
-
 ###
 ### Phasor Dense definitions
 ###
