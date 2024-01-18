@@ -6,6 +6,25 @@ include("vsa.jl")
 
 LuxParams = Union{NamedTuple, ComponentArray}
 
+struct MakeSpiking <: Lux.AbstractExplicitLayer
+    spk_args::SpikingArgs
+    repeats::Int
+    tspan::Tuple{<:Real, <:Real}
+    offset::Real
+end
+
+function MakeSpiking(spk_args::SpikingArgs, repeats::Int)
+    return MakeSpiking(spk_args, repeats, (0.0, 1.0 * repeats), 0.0)
+end
+
+function (a::MakeSpiking)(x::AbstractArray)
+    train = phase_to_train(x, a.spk_args, repeats = a.repeats, offset = a.offset)
+    call = SpikingCall(train, a.spk_args, a.tspan)
+    return call
+end
+
+
+
 ###
 ### Phasor Dense definitions
 ###
