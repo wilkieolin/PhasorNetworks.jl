@@ -23,29 +23,30 @@ function in_tolerance(x)
     return abs(x) < epsilon ? true : false
 end
 
+function bullseye_data(n_s::Int, rng::AbstractRNG)
+    d = Normal(0.0, 0.08)
+    #determine the class labels
+    y = rand(rng, (0, 1), n_s)
+    #determine the polar coordinates
+    r = rand(rng, d, n_s) .+ (0.4 .* y)
+    phi = (rand(rng, Float64, n_s) .- 1) .* (2 * pi)
+    #convert to cartesian
+    x_x = r .* cos.(phi)
+    x_y = r .* sin.(phi)
+
+    return cat(x_x, x_y, dims=2)', onehotbatch(y, 0:1)
+end
+
 function getdata(args)
-    ENV["DATADEPS_ALWAYS_ACCEPT"] = "true"
-
-    ## Load dataset
-    xtrain, ytrain = MLDatasets.FashionMNIST(:train)[:]
-    xtest, ytest = MLDatasets.FashionMNIST(:test)[:]
-
-    ## Reshape input data to flatten each image into a linear array
-    xtrain = MLUtils.flatten(xtrain)
-    xtest = MLUtils.flatten(xtest)
-
-    ## One-hot-encode the labels
-    ytrain, ytest = onehotbatch(ytrain, 0:9), onehotbatch(ytest, 0:9)
-
-    ## Create two DataLoader objects (mini-batch iterators)
-    train_loader = DataLoader((xtrain, ytrain), batchsize=args.batchsize, rng=args.rng, shuffle=true)
-    test_loader = DataLoader((xtest, ytest), batchsize=args.batchsize)
+    #make synthetic bullseye data (no needing an external data repository)
+    train_loader = [bullseye_data(args.batchsize, args.rng) for i in 1:100];
+    test_loader = [bullseye_data(args.batchsize, args.rng) for i in 1:10];
 
     return train_loader, test_loader
 end
 
 function build_mlp(args)
-    phasor_model = Chain(PhasorDense(784 => 128), PhasorDense(128 => 10))
+    phasor_model = Chain(LayerNorm((2,)), PhasorDense(2 => 128), PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end

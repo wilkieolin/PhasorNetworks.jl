@@ -44,6 +44,7 @@ variance_scaling,
 #metrics
 cycle_correlation,
 cor_realvals,
+predict_quadrature,
 accuracy_quadrature,
 quadrature_loss,
 similarity_loss,
