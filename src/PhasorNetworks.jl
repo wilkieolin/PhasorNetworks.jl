@@ -5,6 +5,7 @@ export
 PhasorDense, 
 PhasorODE,
 SpikeTrain, 
+MakeSpiking,
 LocalCurrent,
 SpikingArgs, 
 SpikingCall, 
