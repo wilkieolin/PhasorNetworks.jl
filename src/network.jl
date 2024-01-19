@@ -20,7 +20,7 @@ end
 function (a::MakeSpiking)(x::AbstractArray, params::LuxParams, state::NamedTuple)
     train = phase_to_train(x, a.spk_args, repeats = a.repeats, offset = a.offset)
     call = SpikingCall(train, a.spk_args, a.tspan)
-    return call
+    return call, state
 end
 
 
