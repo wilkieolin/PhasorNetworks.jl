@@ -16,19 +16,17 @@ function similarity_loss(phases::AbstractArray, truth::AbstractArray, dim::Int)
 end
 
 function loss_and_accuracy(data_loader, model, ps, st; 
-                            mode="static", 
-                            spk_args::SpikingArgs = default_spk_args(), 
-                            t_span::Tuple{<:Real, <:Real} = (0.0, 6.0))
+                            mode="static", )
 
     acc = 0
     ls = 0.0f0
     num = 0
     for (x, y) in data_loader
-        if mode != "static"
-            x = phase_to_train(x, spk_args, repeats=repeats)
-            x = SpikingCall(x, spk_args, t_span)
-        end
         ŷ, _ = model(x, ps, st)
+
+        if mode != "static"
+            ŷ, _ = train_to_phase(ŷ)
+        end
         
         ls += sum(quadrature_loss(ŷ, y))
         acc += sum(accuracy_quadrature(ŷ, y)) ## Decode the output of the model
@@ -37,22 +35,17 @@ function loss_and_accuracy(data_loader, model, ps, st;
     return ls/num, acc/num
 end
 
-function spiking_accuracy(data_loader, model, ps, st;
-                         spk_args::SpikingArgs = default_spk_args(),
-                         t_span::Tuple{<:Real, <:Real} = (0.0, 6.0),
-                         repeats::Int = 6)
+function spiking_accuracy(data_loader, model, ps, st, repeats::Int)
     acc = []
     n_phases = []
     num = 0
 
     for (x, y) in data_loader
-        train = phase_to_train(x, spk_args, repeats=repeats)
-        call = SpikingCall(train, spk_args, t_span)
-        spk_output, _ = model(call, ps, st)
+        spk_output, _ = model(x, ps, st)
         ŷ = train_to_phase(spk_output)
         
         append!(acc, sum.(accuracy_quadrature(ŷ, y))) ## Decode the output of the model
-        num +=  size(x)[end]
+        num += size(x)[end]
     end
 
     acc = sum(reshape(acc, repeats, :), dims=2) ./ num
@@ -62,6 +55,11 @@ end
 function predict_quadrature(phases::AbstractMatrix)
     predictions = getindex.(argmin(abs.(phases .- 0.5), dims=1), 1)'
     return predictions
+end
+
+function predict_quadrature(spikes::SpikingCall)
+    phases = train_to_phase(spikes)[end-1, :, :]
+    return predict_quadrature(phases)
 end
 
 function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
