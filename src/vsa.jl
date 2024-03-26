@@ -9,24 +9,24 @@ function angle_to_complex(x::AbstractArray)
     return exp.(k .* x)
 end
 
-function bind(x::AbstractArray; dims)
+function v_bind(x::AbstractArray; dims)
     bz = sum(x, dims = dims)
     y = remap_phase(bz)
     return y
 end
 
-function bind(x::AbstractArray, y::AbstractArray)
+function v_bind(x::AbstractArray, y::AbstractArray)
     y = remap_phase(x + y)
     return y
 end
 
-function bind(x::SpikingCall, y::SpikingCall; kwargs...)
-    train = bind(x.train, y.train; tspan=x.t_span, spk_args=x.spk_args, kwargs...)
+function v_bind(x::SpikingCall, y::SpikingCall; kwargs...)
+    train = v_bind(x.train, y.train; tspan=x.t_span, spk_args=x.spk_args, kwargs...)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call
 end
 
-function bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args(), return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
+function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args(), return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
     if !automatch
         if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -44,54 +44,44 @@ function bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0,
     sol_x = phase_memory(x, tspan=tspan, spk_args=spk_args)
     sol_y = phase_memory(y, tspan=tspan, spk_args=spk_args)
 
-    to_array = x -> normalize_potential.(Array(x))
-    u_x = to_array(sol_x)
-    u_y = to_array(sol_y)
-
-    n_t = length(sol_x.t)
-    ref_shape = (ones(Int, length(output_shape))..., n_t)
     #create a reference oscillator to generate complex values for each moment in time
-    u_ref = phase_to_potential(0.0, sol_x.t, x.offset, spk_args)
-    u_ref = reshape(u_ref, ref_shape)
+    u_ref = t -> phase_to_potential(0.0, t, x.offset, spk_args)
 
-    #return u_x, u_y, u_ref
-    
     #find the first chord
-    chord_x = u_x
+    chord_x = t -> sol_x(t)
     #find the second chord
     if unbind
-        chord_y = u_x .* conj.((u_y .- u_ref)) .* u_ref
+        chord_y = t -> sol_x(t) .* conj.((sol_y(t) .- u_ref(t))) .* u_ref(t)
     else
-        chord_y = u_x .* (u_y .- u_ref) .* conj(u_ref)
+        chord_y = t -> sol_x(t) .* (sol_y(t) .- u_ref(t)) .* conj(u_ref(t))
     end
 
-    u_output = chord_x .+ chord_y
+    sol_output = t -> chord_x(t) .+ chord_y(t)
     
     if return_solution
-        return u_output
+        return sol_output
     end
     
-    indices, times = find_spikes_rf(u_output, tbase, spk_args, dim=ndims(u_output))
+    indices, times = find_spikes_rf(sol_output, tbase, spk_args, dim=ndims(u_output))
     #construct the spike train and call for the next layer
     train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
     return train
-
 end
 
-function bundle(x::AbstractArray; dims::Int)
+function v_bundle(x::AbstractArray; dims::Int)
     xz = angle_to_complex(x)
     bz = sum(xz, dims = dims)
     y = complex_to_angle(bz)
     return y
 end
 
-function bundle(x::SpikingCall; dims::Int)
-    train = bundle(x.train, dims=dims, tspan=x.t_span, spk_args=x.spk_args)
+function v_bundle(x::SpikingCall; dims::Int)
+    train = v_bundle(x.train, dims=dims, tspan=x.t_span, spk_args=x.spk_args)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call
 end
 
-function bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs=default_spk_args(), return_solution::Bool=false)
+function v_bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs=default_spk_args(), return_solution::Bool=false)
     #let compartments resonate in sync with inputs
     sol = phase_memory(x, tspan=tspan, spk_args=spk_args)
     #extract their potentials
@@ -248,11 +238,11 @@ function similarity_outer(x::AbstractArray, y::AbstractArray; dims, reduce_dim::
     return s
 end
 
-function unbind(x::AbstractArray, y::AbstractArray)
+function v_unbind(x::AbstractArray, y::AbstractArray)
     y = remap_phase(x .- y)
     return y
 end
 
-function unbind(x::SpikeTrain, y::SpikeTrain; kwargs...)
-    return bind(x, y, unbind=true; kwargs...)
+function v_unbind(x::SpikeTrain, y::SpikeTrain; kwargs...)
+    return v_bind(x, y, unbind=true; kwargs...)
 end

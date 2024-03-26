@@ -57,17 +57,17 @@ function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDense)
 end
 
 function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
-    y = bundle_project(x, params.weight, params.bias)
+    y = v_bundle_project(x, params.weight, params.bias)
     return y, state
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = bundle_project(x.train, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
+    y = v_bundle_project(x.train, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
     return y, state
 end
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = bundle_project(x.current, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
+    y = v_bundle_project(x.current, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
     return y, state
 end
 
