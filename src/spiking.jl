@@ -23,6 +23,7 @@ struct SpikingArgs
     t_window::Real
     threshold::Real
     dt::Real
+    solver
 end
 
 
@@ -30,8 +31,9 @@ function SpikingArgs(; leakage::Real = -0.2,
                     t_period::Real = 1.0,
                     t_window::Real = 0.01,
                     threshold::Real = 0.02,
-                    dt::Real = 0.01)
-    return SpikingArgs(leakage, t_period, t_window, threshold, dt)
+                    dt::Real = 0.01,
+                    solver = Heun(),)
+    return SpikingArgs(leakage, t_period, t_window, threshold, dt, solver)
 end
 
 function default_spk_args()
@@ -268,19 +270,24 @@ function period_to_angfreq(t_period::Real)
     return angular_frequency
 end
 
-function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args())
-    #set up functions to define the neuron's differential equations
-    k = neuron_constant(spk_args)
+function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
+    #get constants
+    t_window = spk_args.t_window
+    dt = spk_args.dt
 
-    #set up compartments for each sample
-    u0 = zeros(ComplexF32, x.shape)
-    #resonate in time with the input spikes
-    dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
-    #solve the memory compartment
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, Heun(), adaptive=false, dt=spk_args.dt)
+    #find which channels are active 
+    times = train.times
+    active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
+    active_inds = train.indices[active]
 
-    return sol
+    #add currents into the active synapses
+    current_kernel = x -> exp(-1 * (t - x)^2 / (2 * t_window))
+    impulses = current_kernel.(train.times[active])
+    
+    current = zeros(Float32, train.shape)
+    current[active_inds] .+= impulses
+
+    return current
 end
 
 """

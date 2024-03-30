@@ -43,6 +43,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
     #find the complex state induced by the spikes
     sol_x = phase_memory(x, tspan=tspan, spk_args=spk_args)
     sol_y = phase_memory(y, tspan=tspan, spk_args=spk_args)
+    tbase = sol_x.t
 
     #create a reference oscillator to generate complex values for each moment in time
     u_ref = t -> phase_to_potential(0.0, t, x.offset, spk_args)
@@ -62,6 +63,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
         return sol_output
     end
     
+    u = 
     indices, times = find_spikes_rf(sol_output, tbase, spk_args, dim=ndims(u_output))
     #construct the spike train and call for the next layer
     train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
@@ -117,7 +119,7 @@ function bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, t
     dzdt(u, p, t) = k .* u + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
     #solve the ODE over the given time span
     prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, Heun(), adaptive=false, dt=spk_args.dt)
+    sol = solve(prob, spk_args.solver, adaptive=false, dt=spk_args.dt)
     #option for early exit (mostly for debug)
     if return_solution return sol end
 
@@ -138,7 +140,7 @@ function bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat,
     dzdt(u, p, t) = k .* u + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
     #solve the ODE over the given time span
     prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, Heun(), adaptive=false, dt=spk_args.dt)
+    sol = solve(prob, spk_args.solver, adaptive=false, dt=spk_args.dt)
     #option for early exit (mostly for debug)
     if return_solution return sol end
     
