@@ -85,7 +85,7 @@ function test_outer()
     #check the spiking implementation
     st_x = phase_to_train(phase_x, spk_args, repeats = repeats)
     st_y = phase_to_train(phase_y, spk_args, repeats = repeats)
-    sims_2 = stack(similarity_outer(st_x, st_y, dims=2, reduce_dim=3, tspan=tspan));
+    sims_2 = stack(similarity_outer(st_x, st_y, dims=2, reduce_dim=3, tspan=tspan, spk_args = spk_args));
     #check at the last time step
     sims_spk = sims_2[1,1,end,:,:]
     v1s, v2s = check_phase(sims_spk)
@@ -115,28 +115,28 @@ function test_binding()
     #check binding via oscillators
     st_x = phase_to_train(phases[1:1,1:1,:], spk_args, repeats = repeats)
     st_y = phase_to_train(phases[1:1,2:2,:], spk_args, repeats = repeats)
-    uout = v_bind(st_x, st_y, tspan=tspan, return_solution=true);
-    decoded = potential_to_phase(uout, tbase, dim=4, spk_args=spk_args);
+    soln = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=true);
+    decoded = solution_to_phase(soln, tbase, spk_args=spk_args);
     u_err = mean(decoded[1,:,:,:] .- b[1,:,:], dims=(1,2))[end]
     u_check = in_tolerance(u_err)
     @test u_check
 
     #check with spiking outputs
-    b2 = v_bind(st_x, st_y, tspan=tspan, return_solution=false)
+    b2 = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
     b2d = train_to_phase(b2, spk_args)
     enc_error = remove_nan(vec(b2d[5,:,:,:]) .- vec(b)) |> mean
     enc_check = in_tolerance(enc_error)
     @test enc_check 
 
     #check unbinding operation
-    ubout = v_unbind(st_x, st_y, tspan=tspan, return_solution=true)
-    decoded = potential_to_phase(ubout, tbase, dim=4, spk_args=spk_args)
+    ub_soln = v_unbind(st_x, st_y, tspan=tspan, spk_args=spk_args, return_solution=true)
+    decoded = solution_to_phase(ub_soln, tbase, spk_args=spk_args)
     err = mean(decoded[1,:,:,:] .- ub[1,:,:], dims=(1,2))[end]
     unbind_chk = in_tolerance(err)
     @test unbind_chk 
 
     #check unbinding with spiking outputs
-    ub2 = v_unbind(st_x, st_y, tspan=tspan, return_solution=false)
+    ub2 = v_unbind(st_x, st_y, spk_args = spk_args, tspan=tspan, return_solution=false)
     ub2d = train_to_phase(ub2, spk_args)
     ub_enc_error = remove_nan(vec(ub2d[5,:,:,:]) .- vec(ub)) |> mean
     ub_enc_check = in_tolerance(ub_enc_error)
@@ -155,7 +155,7 @@ function test_bundling()
     st = phase_to_train(phases, spk_args, repeats=6)
     #check potential encodings
     b2_sol = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=true)
-    b2_phase = potential_to_phase(b2_sol, tbase, dim=4, spk_args=spk_args, offset=0.0)
+    b2_phase = solution_to_phase(b2_sol, tbase, spk_args=spk_args, offset=0.0)
     b2_phase_error = vec(b2_phase[1,1,:,end]) .- vec(b) |> mean
     b2_phase_check = in_tolerance(b2_phase_error)
     @test b2_phase_check 

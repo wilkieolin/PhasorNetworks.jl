@@ -26,7 +26,7 @@ function v_bind(x::SpikingCall, y::SpikingCall; kwargs...)
     return next_call
 end
 
-function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args(), return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
+function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
     if !automatch
         if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -63,8 +63,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
         return sol_output
     end
 
-    u_output = Array(sol_output.(tbase))
-    u_output = stack(u_output, dims=ndims(u_output) + 1)
+    u_output = functional_solution_to_potential(sol_output, tbase)
     indices, times = find_spikes_rf(u_output, tbase, spk_args, dim=ndims(u_output))
     #construct the spike train and call for the next layer
     train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
@@ -84,34 +83,35 @@ function v_bundle(x::SpikingCall; dims::Int)
     return next_call
 end
 
-function v_bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs=default_spk_args(), return_solution::Bool=false)
+function v_bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool=false)
     #let compartments resonate in sync with inputs
     sol = phase_memory(x, tspan=tspan, spk_args=spk_args)
-    #extract their potentials
-    u = Array(sol)
-    nu = normalize_potential.(u)
+    tbase = sol.t
     #combine the potentials (interfere) along the bundling axis
-    bundled = sum(nu, dims=dims)
+    f_sol = x -> sum(normalize_potential.(sol(x)), dims=dims)
+
     if return_solution
-        return bundled
+        return f_sol
     end
     
+    #extract the potential
+    u_output = functional_solution_to_potential(f_sol, tbase)
     #detect spiking outputs
-    out_shape = size(bundled)[1:end-1]
-    out_inds, out_tms = find_spikes_rf(bundled, sol.t, spk_args)
+    out_shape = size(u_output)[1:end-1]
+    out_inds, out_tms = find_spikes_rf(u_output, tbase, spk_args)
     out_offset = x.offset + spiking_offset(spk_args)
     out_train = SpikeTrain(out_inds, out_tms, out_shape, out_offset)
     return out_train
 end
 
-function bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOrMat)
+function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = w * angle_to_complex(x) .+ b
     y = complex_to_angle(xz)
     return y
 end
 
 #TODO - make dimensions constant with static call
-function bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
+function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
     #get the number of batches & output neurons
@@ -120,7 +120,7 @@ function bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, t
     dzdt(u, p, t) = k .* u + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
     #solve the ODE over the given time span
     prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver, adaptive=false, dt=spk_args.dt)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
     #option for early exit (mostly for debug)
     if return_solution return sol end
 
@@ -132,7 +132,7 @@ function bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, t
     return next_call
 end
 
-function bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
+function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     angular_frequency = 2 * pi / spk_args.t_period
     k = (spk_args.leakage + 1im * angular_frequency)
@@ -141,7 +141,7 @@ function bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat,
     dzdt(u, p, t) = k .* u + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
     #solve the ODE over the given time span
     prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver, adaptive=false, dt=spk_args.dt)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
     #option for early exit (mostly for debug)
     if return_solution return sol end
     
@@ -206,7 +206,7 @@ function interference_similarity(interference::AbstractArray; dim::Int=-1)
     return avg_sim
 end
 
-function similarity_outer(x::SpikeTrain, y::SpikeTrain; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args(), automatch::Bool=true)
+function similarity_outer(x::SpikeTrain, y::SpikeTrain; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
     if !automatch
         if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
