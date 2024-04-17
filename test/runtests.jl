@@ -8,6 +8,7 @@ using Statistics: mean
 using LinearAlgebra: diag
 using PhasorNetworks: bind
 using Distributions: Normal
+using DifferentialEquations: Heun, Tsit5
 
 #global args for all tests
 n_x = 101
@@ -15,8 +16,12 @@ n_y = 101
 n_vsa = 1
 epsilon = 0.10
 repeats = 10
-epsilon = 0.02
-spk_args = default_spk_args()
+epsilon = 0.025
+solver_args = Dict(:adaptive => true, :abstol => 1e-6, :reltol => 1e-6)
+spk_args = SpikingArgs(t_window = 0.01, 
+                    threshold = 0.001,
+                    solver=Tsit5(), 
+                    solver_args = solver_args)
 tspan = (0.0, repeats*1.0)
 tbase = collect(tspan[1]:spk_args.dt:tspan[2])
 

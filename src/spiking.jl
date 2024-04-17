@@ -24,6 +24,7 @@ struct SpikingArgs
     threshold::Real
     dt::Real
     solver
+    solver_args::Dict
 end
 
 
@@ -32,8 +33,11 @@ function SpikingArgs(; leakage::Real = -0.2,
                     t_window::Real = 0.01,
                     threshold::Real = 0.02,
                     dt::Real = 0.01,
-                    solver = Heun(),)
-    return SpikingArgs(leakage, t_period, t_window, threshold, dt, solver)
+                    solver = Heun(),
+                    solver_args = Dict(:abstol => 1e-6,
+                                    :reltol => 1e-6,
+                                    :adaptive => true,))
+    return SpikingArgs(leakage, t_period, t_window, threshold, dt, solver, solver_args)
 end
 
 function default_spk_args()
@@ -113,19 +117,25 @@ function vcat_trains(trains::Array{<:SpikeTrain,1})
     return new_train
 end
 
-function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
-    #get constants
-    t_window = spk_args.t_window
-    dt = spk_args.dt
+function gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
+    i = exp.(-1 .* ((t .- x) / (2 .* t_sigma)).^2)
+    return i
+end
 
+function is_active(times::AbstractArray, t::Real, t_window::Real; sigma::Real=9.0)
+    active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
+    return active
+end
+
+function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
     #find which channels are active 
     times = train.times
-    active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
+    active = is_active(times, t, spk_args.t_window, sigma=sigma)
     active_inds = train.indices[active]
 
     #add currents into the active synapses
-    current_kernel = x -> exp(-1 * (t - x)^2 / (2 * t_window))
-    impulses = current_kernel.(train.times[active])
+    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+    impulses = current_kernel(train.times[active])
     
     current = zeros(Float32, train.shape)
     current[active_inds] .+= impulses
@@ -133,20 +143,21 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
     return current
 end
 
-function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs)
-    #get constants
-    t_bias = spk_args.t_period / 2.0
-    t_window = spk_args.t_window
+function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
+    #what times to the bias values correlate to?
+    times = phase_to_time(bias, spk_args.t_period, t_offset)
     #determine the time within the cycle
     t_relative = mod((t - t_offset), spk_args.t_period)
-    #determine if the bias is active
-    active = (t_relative > (t_bias - t_window)) && (t_relative < (t_bias + t_window))
+    #determine which biases are active
+    active = is_active(times, t_relative, spk_args.t_window, sigma=sigma)
 
-    if active
-        return bias
-    else
-        return zero(bias)
-    end
+    #add the active currents, scaled by the gaussian kernel
+    current_kernel = x -> gaussian_kernel(x, t_relative, spk_args.t_window)
+    impulses = current_kernel(times[active])
+
+    bias = zeros(Float32, size(bias))
+    bias[active] += impulses
+    return bias
 end
 
 function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args())
@@ -159,7 +170,7 @@ function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0),
     dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
     #solve the memory compartment
     prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver, adaptive=true, abstol = 1e-6, reltol = 1e-6,)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
 
     return sol
 end
@@ -167,7 +178,7 @@ end
 function find_spikes_rf(sol::ODESolution, spk_args::SpikingArgs; dim::Int=-1)
     @assert typeof(sol.u) <: Vector{<:Array{<:Complex}} "This method is for R&F neurons with complex potential"    
     t = sol.t
-    u = Array(sol)
+    u = solution_to_potential(sol)
 
     return find_spikes_rf(u, t, spk_args, dim=dim)
 end
@@ -303,6 +314,32 @@ function phase_to_potential(phase::Real, t::Real, offset::Real, spk_args::Spikin
     return potential
 end
 
+function solution_to_potential(sol::ODESolution)
+    return Array(sol)
+end
+
+function functional_solution_to_potential(func_sol::Function, t::Array)
+    u = func_sol.(t)
+    d = ndims(u[1])
+    #stack the vector of solutions along a new final axis
+    u = stack(u, dims = d + 1)
+    return u
+end
+
+function solution_to_phase(sol::ODESolution; offset::Real=0.0, spk_args::SpikingArgs)
+    u = solution_to_potential(sol)
+    dim = ndims(u)
+    p = potential_to_phase(u, sol.t, offset=offset, spk_args=spk_args, dim=dim)
+    return p
+end
+
+function solution_to_phase(func_sol::Function, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
+    u = functional_solution_to_potential(func_sol, t)
+    dim = ndims(u)
+    p = potential_to_phase(u, t, dim=dim, offset=offset, spk_args=spk_args)
+    return p
+end
+
 """
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
@@ -322,6 +359,7 @@ function potential_to_phase(potential::AbstractArray, t::AbstractVector; dim::In
     
     return phases
 end
+
 """
 Converts a matrix of phases into a spike train via phase encoding
 
@@ -347,6 +385,12 @@ end
 function time_to_phase(times::AbstractArray, period::Real, offset::Real)
     times = mod.((times .- offset), period) ./ period
     times = (times .- 0.5) .* 2.0
+    return times
+end
+
+function phase_to_time(phases::AbstractArray, period::Real, offset::Real)
+    phases = (phases ./ 2.0) .+ 0.5
+    times = phases .* period
     return times
 end
 
