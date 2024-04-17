@@ -113,22 +113,22 @@ function vcat_trains(trains::Array{<:SpikeTrain,1})
     return new_train
 end
 
-function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs)
+function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
     #get constants
     t_window = spk_args.t_window
     dt = spk_args.dt
 
-    #determine which synapses will have incoming currents
-    #snap spike times to the grid points
-    times = train.times .- mod.(train.times, dt)
-    active = (times .> (t - 2 * t_window)) .* (times .< (t))
-    # relative_time = abs.(times .- t)
-    # active = relative_time .<= t_window
+    #find which channels are active 
+    times = train.times
+    active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
     active_inds = train.indices[active]
 
     #add currents into the active synapses
+    current_kernel = x -> exp(-1 * (t - x)^2 / (2 * t_window))
+    impulses = current_kernel.(train.times[active])
+    
     current = zeros(Float32, train.shape)
-    current[active_inds] .+= (1.0)
+    current[active_inds] .+= impulses
 
     return current
 end
@@ -147,6 +147,21 @@ function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::Sp
     else
         return zero(bias)
     end
+end
+
+function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args())
+    #set up functions to define the neuron's differential equations
+    k = neuron_constant(spk_args)
+
+    #set up compartments for each sample
+    u0 = zeros(ComplexF32, x.shape)
+    #resonate in time with the input spikes
+    dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
+    #solve the memory compartment
+    prob = ODEProblem(dzdt, u0, tspan)
+    sol = solve(prob, spk_args.solver, adaptive=true, abstol = 1e-6, reltol = 1e-6,)
+
+    return sol
 end
 
 function find_spikes_rf(sol::ODESolution, spk_args::SpikingArgs; dim::Int=-1)
@@ -268,26 +283,6 @@ end
 function period_to_angfreq(t_period::Real)
     angular_frequency = 2 * pi / t_period
     return angular_frequency
-end
-
-function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
-    #get constants
-    t_window = spk_args.t_window
-    dt = spk_args.dt
-
-    #find which channels are active 
-    times = train.times
-    active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
-    active_inds = train.indices[active]
-
-    #add currents into the active synapses
-    current_kernel = x -> exp(-1 * (t - x)^2 / (2 * t_window))
-    impulses = current_kernel.(train.times[active])
-    
-    current = zeros(Float32, train.shape)
-    current[active_inds] .+= impulses
-
-    return current
 end
 
 """
