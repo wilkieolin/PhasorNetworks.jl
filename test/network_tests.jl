@@ -5,7 +5,7 @@ function network_tests()
     x, y = first(train_loader)
 
     model, ps, st = build_mlp(args)
-    spk_model, _, _ = build_spiking_mlp(args)
+    spk_model, _, _ = build_spiking_mlp(args, spk_args)
 
     pretrain_chk = correlation_test(model, spk_model, ps, st, x)
     train_chk, ps_train, st_train = train_test(model, args, ps, st, train_loader, test_loader)
@@ -53,7 +53,7 @@ function build_mlp(args)
     return phasor_model, ps, st
 end
 
-function build_spiking_mlp(args)
+function build_spiking_mlp(args, spk_args)
     spk_model = Chain(LayerNorm((2,)), MakeSpiking(spk_args, repeats), PhasorDense(2 => 128), PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, spk_model)
     return spk_model, ps, st

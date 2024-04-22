@@ -64,15 +64,16 @@ end
 
 function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     #what times to the bias values correlate to?
-    times = phase_to_time(bias, spk_args.t_period, t_offset)
+    times = phase_to_time(complex_to_angle(bias), spk_args.t_period, t_offset)
+    mag = abs.(bias)
     #determine the time within the cycle
     t_relative = mod((t - t_offset), spk_args.t_period)
     #determine which biases are active
     active = is_active(times, t_relative, spk_args.t_window, sigma=sigma)
 
-    #add the active currents, scaled by the gaussian kernel
+    #add the active currents, scaled by the gaussian kernel & bias magnitude
     current_kernel = x -> gaussian_kernel(x, t_relative, spk_args.t_window)
-    impulses = current_kernel(times[active])
+    impulses = mag[active] .* current_kernel(times[active])
 
     bias = zeros(Float32, size(bias))
     bias[active] += impulses
