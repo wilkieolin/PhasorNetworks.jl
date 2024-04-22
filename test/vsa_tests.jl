@@ -157,6 +157,7 @@ function test_bundling()
     b2_sol = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=true)
     b2_phase = solution_to_phase(b2_sol, tbase, spk_args=spk_args, offset=0.0)
     b2_phase_error = vec(b2_phase[1,1,:,end]) .- vec(b) |> mean
+    @info b2_phase_error
     b2_phase_check = in_tolerance(b2_phase_error)
     @test b2_phase_check 
 
@@ -164,6 +165,7 @@ function test_bundling()
     b2 = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=false)
     decoded = train_to_phase(b2, spk_args)
     b2_error = remove_nan(vec(decoded[end-1,:,:,:]) .- vec(b)) |> sin_error
+    @info b2_error
     b2_spike_check = in_tolerance(b2_error)
     @test b2_spike_check
 
