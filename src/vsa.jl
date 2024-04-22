@@ -63,10 +63,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
         return sol_output
     end
 
-    u_output = functional_solution_to_potential(sol_output, tbase)
-    indices, times = find_spikes_rf(u_output, tbase, spk_args, dim=ndims(u_output))
-    #construct the spike train and call for the next layer
-    train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
+    train = solution_to_train(sol_output, tspan, spk_args=spk_args, offset=x.offset)
     return train
 end
 
@@ -94,13 +91,7 @@ function v_bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0,
         return f_sol
     end
     
-    #extract the potential
-    u_output = functional_solution_to_potential(f_sol, tbase)
-    #detect spiking outputs
-    out_shape = size(u_output)[1:end-1]
-    out_inds, out_tms = find_spikes_rf(u_output, tbase, spk_args)
-    out_offset = x.offset + spiking_offset(spk_args)
-    out_train = SpikeTrain(out_inds, out_tms, out_shape, out_offset)
+    out_train = solution_to_train(f_sol, tspan, spk_args=spk_args, offset=x.offset)
     return out_train
 end
 
