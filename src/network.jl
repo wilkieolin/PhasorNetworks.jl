@@ -41,7 +41,7 @@ struct PhasorDense{M<:AbstractMatrix, B} <: Lux.AbstractExplicitLayer
 end
   
 function PhasorDense(W::AbstractMatrix)
-    b = zeros(axes(W,1))
+    b = ones(ComplexF32, axes(W,1))
     return PhasorDense(W, b)
 end
 
