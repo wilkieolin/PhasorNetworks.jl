@@ -1,7 +1,7 @@
 name = "PhasorNetworks"
 uuid = "c32d742c-e486-48f1-8804-9f6fb4d3f42c"
 authors = ["Wilkie Olin-Ammentorp"]
-version = "1.0.0-DEV"
+version = "1.0.1-DEV"
 
 [deps]
 ComponentArrays = "b0b7db55-cfe3-40fc-9ded-d10e2dbeff66"
