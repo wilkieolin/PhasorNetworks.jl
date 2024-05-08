@@ -371,7 +371,7 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     cycles = generate_cycles(tspan, spk_args, offset)
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
-    spiking = imag.(u) .> spk_args.threshold
+    spiking = abs.(u) .> spk_args.threshold
     
     #convert the phase represented by that potential to a spike time
     p = potential_to_phase(u, cycles, dim=ndims(u), offset=offset, spk_args=spk_args)
