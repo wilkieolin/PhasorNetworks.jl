@@ -192,6 +192,53 @@ function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::
     return p
 end
 
+###
+### POTENTIAL - TIME
+###
+
+function period_to_angfreq(t_period::Real)
+    angular_frequency = 2 * pi / t_period
+    return angular_frequency
+end
+
+function neuron_constant(spk_args::SpikingArgs)
+    angular_frequency = period_to_angfreq(spk_args.t_period)
+    k = (spk_args.leakage + 1im * angular_frequency)
+    return k
+end
+
+function offset_to_angle(offset::Real; spk_args::SpikingArgs)
+    return (2 * pi) * (offset / spk_args.t_period)
+end
+
+function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs, offset::Real = 0.0)
+    spiking_angle = pi / 2 + offset_to_angle(offset, spk_args=spk_args)
+    spiking_angle = mod(2*pi, spiking_angle)
+
+    #find out given this potential, how much time until the neuron spikes (ideally)
+    angles = angle.(u)
+    arc_to_spike = angles .- spiking_angle
+    time_to_spike = arc_to_spike ./ period_to_angfreq(spk_args.t_period)
+    spikes = t .- time_to_spike
+    #make all times positive
+    spikes[findall(x -> x < 0.0, spikes)] .+= spk_args.t_period
+    return spikes
+end
+
+function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, dim::Int=-1)
+    if dim == -1
+        dim = ndims(u)
+    end
+    @assert size(u, dim) == length(ts) "Time dimension of array must match list of times"
+
+    u_slices = eachslice(u, dims=dim)
+    spikes = [potential_to_time(x[1], x[2], spk_args=spk_args, offset=offset) for x in zip(u_slices, ts)]
+    spikes = stack(spikes, dims=dim)
+    return spikes
+end
+
+
+
 function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
