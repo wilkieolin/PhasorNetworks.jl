@@ -46,7 +46,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
     tbase = unique!(sort(cat(sol_x.t, sol_y.t, dims=1)))
 
     #create a reference oscillator to generate complex values for each moment in time
-    u_ref = t -> phase_to_potential(0.0, t, x.offset, spk_args)
+    u_ref = t -> phase_to_potential(0.0, t, offset = x.offset, spk_args = spk_args)
 
     #find the first chord
     chord_x = t -> sol_x(t)

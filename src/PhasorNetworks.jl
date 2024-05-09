@@ -11,14 +11,19 @@ SpikingArgs,
 SpikingCall, 
 CurrentCall,
 
-#spiking
-default_spk_args,
+#domain conversions
 phase_to_train,
 phase_to_potential,
 solution_to_potential,
 solution_to_phase,
 potential_to_phase,
 train_to_phase,
+time_to_phase,
+phase_to_time,
+arc_error,
+
+#spiking
+default_spk_args,
 count_nans,
 zero_nans,
 stack_trains,

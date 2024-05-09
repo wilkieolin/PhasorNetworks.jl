@@ -1,70 +1,10 @@
 using DifferentialEquations: ODESolution
 
-struct SpikeTrain
-    indices::Array{<:Union{Int, CartesianIndex},1}
-    times::Array{<:Real,1}
-    shape::Tuple
-    offset::Real
-end
-
-struct LocalCurrent
-    current_fn::Function
-    shape::Tuple
-    offset::Real
-end
-
-function Base.show(io::IO, train::SpikeTrain)
-    print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
-end
-
-struct SpikingArgs
-    leakage::Real
-    t_period::Real
-    t_window::Real
-    threshold::Real
-    dt::Real
-    solver
-    solver_args::Dict
-end
-
-
-function SpikingArgs(; leakage::Real = -0.2, 
-                    t_period::Real = 1.0,
-                    t_window::Real = 0.01,
-                    threshold::Real = 0.001,
-                    dt::Real = 0.01,
-                    solver = Heun(),
-                    solver_args = Dict(:abstol => 1e-6,
-                                    :reltol => 1e-6,
-                                    :adaptive => true,))
-    return SpikingArgs(leakage, t_period, t_window, threshold, dt, solver, solver_args)
-end
-
-function default_spk_args()
-    return SpikingArgs()
-end
-
-function Base.show(io::IO, spk_args::SpikingArgs)
-    print(io, "Neuron parameters: Period ", spk_args.t_period, " (s)\n")
-    print(io, "Current kernel duration: ", spk_args.t_window, " (s)\n")
-    print(io, "Threshold: ", spk_args.threshold, " (V)\n")
-end
-
-struct SpikingCall
-    train::SpikeTrain
-    spk_args::SpikingArgs
-    t_span::Tuple{<:Real, <:Real}
-end
-
-struct CurrentCall
-    current::LocalCurrent
-    spk_args::SpikingArgs
-    t_span::Tuple{<:Real, <:Real}
-end
+include("domains.jl")
 
 function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     #what times to the bias values correlate to?
-    times = phase_to_time(complex_to_angle(bias), spk_args.t_period, t_offset)
+    times = phase_to_time(complex_to_angle(bias), spk_args=spk_args, offset=t_offset)
     mag = abs.(bias)
     #determine the time within the cycle
     t_relative = mod((t - t_offset), spk_args.t_period)
@@ -264,7 +204,7 @@ function period_to_angfreq(t_period::Real)
     return angular_frequency
 end
 
-function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs = default_spk_args())
+function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
 
@@ -277,152 +217,6 @@ function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0),
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
 
     return sol
-end
-
-"""
-Converts a matrix of phases into a spike train via phase encoding
-
-phase_to_train(phases::AbstractMatrix, spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
-"""
-function phase_to_train(phases::AbstractArray, spk_args::SpikingArgs; repeats::Int = 1, offset::Real = 0.0)
-    t_phase0 = spk_args.t_period / 2.0
-    shape = phases |> size
-    indices = collect(CartesianIndices(shape)) |> vec
-    times = phases .* t_phase0 .+ t_phase0 |> vec
-
-    if repeats > 1
-        n_t = times |> length
-        offsets = repeat(0:repeats-1, inner=n_t)
-        times = repeat(times, repeats) .+ offsets
-        indices = repeat(indices, repeats)
-    end
-
-    train = SpikeTrain(indices, times, shape, offset)
-    return train
-end
-
-function phase_to_time(phases::AbstractArray, offset::Real; spk_args::SpikingArgs)
-    return phase_to_time(phases, spk_args.t_period, offset)
-end
-
-function phase_to_time(phases::AbstractArray, period::Real, offset::Real)
-    phases = (phases ./ 2.0) .+ 0.5
-    times = phases .* period
-    return times
-end
-
-"""
-Convert a static phase to the complex potential of an R&F neuron
-"""
-function phase_to_potential(phase::Real, ts::AbstractVector, offset::Real, spk_args::SpikingArgs)
-    return [phase_to_potential(phase, t, offset, spk_args) for t in ts]
-end
-
-function phase_to_potential(phase::AbstractArray, ts::AbstractVector, offset::Real, spk_args::SpikingArgs)
-    return [phase_to_potential(p, t, offset, spk_args) for p in phase, t in ts]
-end
-
-function phase_to_potential(phase::Real, t::Real, offset::Real, spk_args::SpikingArgs)
-    period = spk_args.t_period
-    k = 1im * imag(neuron_constant(spk_args))
-    potential = exp.(k .* ((t .+ offset) .- (phase - 1)/2))
-    return potential
-end
-
-"""
-Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
-"""
-function potential_to_phase(potential::AbstractArray, t::Real, offset::Real, spk_args::SpikingArgs)
-    #find the angle of a neuron representing 0 phase at the current moment in time
-    current_zero = phase_to_potential(0.0, t, offset, spk_args)
-    #get the arc subtended in the complex plane between that reference and our neuron potentials
-    arc = angle(current_zero) .- angle.(potential) 
-    #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
-end
-
-function potential_to_phase(potential::AbstractArray, t::AbstractVector; dim::Int, spk_args::SpikingArgs, offset::Real=0.0)
-    @assert size(potential, dim) == length(t) "Time dimensions must match"
-    phases = [potential_to_phase(uslice, t[i], offset, spk_args) for (i, uslice) in enumerate(eachslice(potential, dims=dim))]
-    phases = stack(phases)
-    
-    return phases
-end
-
-function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
-    u = func_sol.(t)
-    d = ndims(u[1])
-    #stack the vector of solutions along a new final axis
-    u = stack(u, dims = d + 1)
-    return u
-end
-
-function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
-    #call the solution at the provided times
-    u = solution_to_potential(sol, t)
-    dim = ndims(u)
-    #calculate the phase represented by that potential
-    p = potential_to_phase(u, t, dim=dim, offset=offset, spk_args=spk_args)
-    return p
-end
-
-function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
-    #determine the ending time of each cycle
-    cycles = generate_cycles(tspan, spk_args, offset)
-    #sample the potential at the end of each cycle
-    u = solution_to_potential(sol, cycles)
-    spiking = abs.(u) .> spk_args.threshold
-    
-    #convert the phase represented by that potential to a spike time
-    p = potential_to_phase(u, cycles, dim=ndims(u), offset=offset, spk_args=spk_args)
-    t = phase_to_time(p, offset, spk_args = spk_args)
-    nd = ndims(t)
-    shift = x -> permutedims(x, (nd, 1:(nd-1)...))
-    unshift = x -> permutedims(x, (2:nd..., 1))
-    t = unshift(shift(t) .+ cycles)
-
-    #return only the times where the neuron is spiking
-    cut_index = i -> CartesianIndex(Tuple(i)[1:end-1])
-    inds = findall(spiking)
-    tms = t[inds] .+ spiking_offset(spk_args)
-    
-    inds = cut_index.(inds)
-    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset + spiking_offset(spk_args))
-    return train
-end
-
-function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
-    if length(train.times) == 0
-        return missing
-    end
-
-    #decode each spike's phase within a cycle
-    relative_phase = time_to_phase(train.times, spk_args.t_period, train.offset)
-    relative_time = train.times .- train.offset
-    #what is the number of cycles in this train?
-    n_cycles = maximum(relative_time) ÷ spk_args.t_period + 1
-    #what is the cycle in which each spike occurs?
-    cycle = floor.(Int, relative_time .÷ spk_args.t_period .+ 1)
-    phases = [NaN .* zeros(train.shape...) for i in 1:n_cycles]
-
-    for i in eachindex(relative_phase)
-        phases[cycle[i]][train.indices[i]] = relative_phase[i]
-    end
-
-    #stack the arrays to cycle, batch, neuron
-    phases = mapreduce(x->reshape(x, 1, train.shape...), vcat, phases)
-    return phases
-
-end
-
-function train_to_phase(call::SpikingCall)
-    return train_to_phase(call.train, call.spk_args)
-end
-
-function time_to_phase(times::AbstractArray, period::Real, offset::Real)
-    times = mod.((times .- offset), period) ./ period
-    times = (times .- 0.5) .* 2.0
-    return times
 end
 
 function vcat_trains(trains::Array{<:SpikeTrain,1})
