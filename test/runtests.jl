@@ -33,10 +33,12 @@ tbase = collect(tspan[1]:spk_args.dt:tspan[2])
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 
+include("domain_tests.jl")
 include("vsa_tests.jl")
 include("network_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
+    domain_tests()
     vsa_tests()
     network_tests()
 end
