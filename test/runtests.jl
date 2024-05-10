@@ -6,7 +6,6 @@ using LuxDeviceUtils: cpu_device, gpu_device
 using Optimisers, ComponentArrays
 using Statistics: mean
 using LinearAlgebra: diag
-using PhasorNetworks: bind
 using Distributions: Normal
 using DifferentialEquations: Heun, Tsit5
 
@@ -39,6 +38,6 @@ include("network_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
     domain_tests()
-    #vsa_tests()
-    #network_tests()
+    vsa_tests()
+    network_tests()
 end

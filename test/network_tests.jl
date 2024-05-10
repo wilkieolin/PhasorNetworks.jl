@@ -18,13 +18,6 @@ function network_tests()
     return all_pass
 end
 
-"""
-Check if a value is within the bounds determined by epsilon
-"""
-function in_tolerance(x)
-    return abs(x) < epsilon ? true : false
-end
-
 function bullseye_data(n_s::Int, rng::AbstractRNG)
     d = Normal(0.0, 0.08)
     #determine the class labels
@@ -134,7 +127,7 @@ end
 
 function spiking_accuracy_test(model, ps, st, test_batch)
     @info "Running spiking accuracy test..."
-    acc = spiking_accuracy(test_batch, model, ps, st, repeats)
+    acc = spiking_accuracy(test_batch, model, ps, st, repeats, spk_args)
     #make sure accuracy is above the baseline (~70% for spiking)
     acc_check = acc[end-1] > 0.70
     @test acc_check
