@@ -42,7 +42,7 @@ function spiking_accuracy(data_loader, model, ps, st, repeats::Int, spk_args::Sp
 
     for (x, y) in data_loader
         spk_output, _ = model(x, ps, st)
-        ŷ = train_to_phase(spk_output, spk_args=spk_args)
+        ŷ = train_to_phase(spk_output)
         
         append!(acc, sum.(accuracy_quadrature(ŷ, y))) ## Decode the output of the model
         num += size(x)[end]
