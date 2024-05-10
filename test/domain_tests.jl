@@ -2,6 +2,7 @@ phases = -1.0:0.01:1.0 |> collect
 offsets = 0.0:0.25:1.0 |> collect
 
 function domain_tests()
+    @info "Running domain tests..."
     phase_time_test()
     phase_train_test()
     potential_phase_test()

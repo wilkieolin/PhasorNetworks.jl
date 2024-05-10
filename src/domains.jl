@@ -119,6 +119,10 @@ function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::I
     return train
 end
 
+function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs)
+    return train_to_phase(train, spk_args)
+end
+
 function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
     if length(train.times) == 0
         return missing
