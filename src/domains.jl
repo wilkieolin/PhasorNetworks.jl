@@ -216,37 +216,55 @@ function neuron_constant(spk_args::SpikingArgs)
     return k
 end
 
-function offset_to_angle(offset::Real; spk_args::SpikingArgs)
-    return (2 * pi) * (offset / spk_args.t_period)
-end
-
-function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs, offset::Real = 0.0)
-    spiking_angle = pi / 2 + offset_to_angle(offset, spk_args=spk_args)
-    spiking_angle = mod(2*pi, spiking_angle)
+function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
+    spiking_angle = pi / 2
 
     #find out given this potential, how much time until the neuron spikes (ideally)
-    angles = angle.(u)
-    arc_to_spike = angles .- spiking_angle
+    angles = mod.(-1 .* angle.(u), 2*pi) #flip angles and move onto the positive domain
+    arc_to_spike = spiking_angle .+ angles
     time_to_spike = arc_to_spike ./ period_to_angfreq(spk_args.t_period)
-    spikes = t .- time_to_spike
+    spikes = t .+ time_to_spike
+    
     #make all times positive
     spikes[findall(x -> x < 0.0, spikes)] .+= spk_args.t_period
     return spikes
 end
 
-function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, dim::Int=-1)
+function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
     if dim == -1
         dim = ndims(u)
     end
     @assert size(u, dim) == length(ts) "Time dimension of array must match list of times"
 
     u_slices = eachslice(u, dims=dim)
-    spikes = [potential_to_time(x[1], x[2], spk_args=spk_args, offset=offset) for x in zip(u_slices, ts)]
+    spikes = [potential_to_time(x[1], x[2], spk_args=spk_args) for x in zip(u_slices, ts)]
     spikes = stack(spikes, dims=dim)
     return spikes
 end
 
+function time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs)
+    spiking_angle = pi / 2
 
+    #find out given this time, what is the (normalized) potential at a given moment?
+    time_from_spike = spikes .- t
+    arc_from_spike = time_from_spike .* period_to_angfreq(spk_args.t_period)
+    angles = -1 .* (arc_from_spike .- spiking_angle)
+    potentials = angle_to_complex(angles ./ pi)
+
+    return potentials
+end
+
+function time_to_potential(spikes::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
+    if dim == -1
+        dim = ndims(spikes)
+    end
+    @assert size(spikes, dim) == length(ts) "Time dimension of array must match list of times"
+
+    t_slices = eachslice(spikes, dims=dim)
+    potential = [time_to_potential(x[1], x[2], spk_args=spk_args) for x in zip(t_slices, ts)]
+    potential = stack(potential, dims=dim)
+    return potential
+end
 
 function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
