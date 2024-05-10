@@ -35,14 +35,14 @@ function loss_and_accuracy(data_loader, model, ps, st;
     return ls/num, acc/num
 end
 
-function spiking_accuracy(data_loader, model, ps, st, repeats::Int)
+function spiking_accuracy(data_loader, model, ps, st, repeats::Int, spk_args::SpikingArgs)
     acc = []
     n_phases = []
     num = 0
 
     for (x, y) in data_loader
         spk_output, _ = model(x, ps, st)
-        ŷ = train_to_phase(spk_output)
+        ŷ = train_to_phase(spk_output, spk_args=spk_args)
         
         append!(acc, sum.(accuracy_quadrature(ŷ, y))) ## Decode the output of the model
         num += size(x)[end]

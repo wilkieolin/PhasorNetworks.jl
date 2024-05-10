@@ -83,8 +83,8 @@ function test_outer()
     @test v2
 
     #check the spiking implementation
-    st_x = phase_to_train(phase_x, spk_args, repeats = repeats)
-    st_y = phase_to_train(phase_y, spk_args, repeats = repeats)
+    st_x = phase_to_train(phase_x, spk_args = spk_args, repeats = repeats)
+    st_y = phase_to_train(phase_y, spk_args = spk_args, repeats = repeats)
     sims_2 = stack(similarity_outer(st_x, st_y, dims=2, reduce_dim=3, tspan=tspan, spk_args = spk_args));
     #check at the last time step
     sims_spk = sims_2[1,1,end,:,:]
@@ -113,8 +113,8 @@ function test_binding()
     ub = v_unbind(phases[1:1,1:1,:], phases[1:1,2:2,:])
 
     #check binding via oscillators
-    st_x = phase_to_train(phases[1:1,1:1,:], spk_args, repeats = repeats)
-    st_y = phase_to_train(phases[1:1,2:2,:], spk_args, repeats = repeats)
+    st_x = phase_to_train(phases[1:1,1:1,:], spk_args=spk_args, repeats = repeats)
+    st_y = phase_to_train(phases[1:1,2:2,:], spk_args=spk_args, repeats = repeats)
     soln = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=true);
     decoded = solution_to_phase(soln, tbase, spk_args=spk_args);
     u_err = mean(decoded[1,:,:,:] .- b[1,:,:], dims=(1,2))[end]
@@ -123,7 +123,7 @@ function test_binding()
 
     #check with spiking outputs
     b2 = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
-    b2d = train_to_phase(b2, spk_args)
+    b2d = train_to_phase(b2, spk_args=spk_args)
     enc_error = remove_nan(vec(b2d[5,:,:,:]) .- vec(b)) |> mean
     enc_check = in_tolerance(enc_error)
     @test enc_check 
@@ -136,7 +136,7 @@ function test_binding()
     @test unbind_chk 
 
     #check unbinding with spiking outputs
-    ub2 = v_unbind(st_x, st_y, spk_args = spk_args, tspan=tspan, return_solution=false)
+    ub2 = v_unbind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
     ub2d = train_to_phase(ub2, spk_args)
     ub_enc_error = remove_nan(vec(ub2d[5,:,:,:]) .- vec(ub)) |> mean
     ub_enc_check = in_tolerance(ub_enc_error)
@@ -152,7 +152,7 @@ function test_bundling()
     #check bundling function
     b = v_bundle(phases, dims=2);
 
-    st = phase_to_train(phases, spk_args, repeats=6)
+    st = phase_to_train(phases, spk_args=spk_args, repeats=6)
     #check potential encodings
     b2_sol = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=true)
     b2_phase = solution_to_phase(b2_sol, tbase, spk_args=spk_args, offset=0.0)

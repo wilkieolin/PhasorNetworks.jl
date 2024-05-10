@@ -106,7 +106,7 @@ end
 function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
     shape = phases |> size
     indices = collect(CartesianIndices(shape)) |> vec
-    times = phase_to_time(phases, spk_args=spk_args, offset=offset)
+    times = phase_to_time(phases, spk_args=spk_args, offset=offset) |> vec
 
     if repeats > 1
         n_t = times |> length
@@ -279,7 +279,7 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     spiking = abs.(u) .> spk_args.threshold
     
     #convert the phase represented by that potential to a spike time
-    tms = potential_to_time(u, cycles, spk_args = sa)
+    tms = potential_to_time(u, cycles, spk_args = spk_args)
 
     #return only the times where the neuron is spiking
     cut_index = i -> CartesianIndex(Tuple(i)[1:end-1])
@@ -287,6 +287,6 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     tms = tms[inds]
     inds = cut_index.(inds)
     train = SpikeTrain(inds, tms, size(u)[1:end-1], offset + spiking_offset(spk_args))
-    
+
     return train
 end
