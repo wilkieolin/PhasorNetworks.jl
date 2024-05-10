@@ -4,11 +4,6 @@ using DifferentialEquations
 
 include("spiking.jl")
 
-function angle_to_complex(x::AbstractArray)
-    k = convert(ComplexF32, pi * (0.0 + 1.0im))
-    return exp.(k .* x)
-end
-
 function v_bind(x::AbstractArray; dims)
     bz = sum(x, dims = dims)
     y = remap_phase(bz)
@@ -142,10 +137,6 @@ function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMa
     train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
     next_call = SpikingCall(train, spk_args, tspan)
     return next_call
-end
-
-function complex_to_angle(x::AbstractArray)
-    return angle.(x) ./ pi
 end
 
 function chance_level(nd::Int, samples::Int)

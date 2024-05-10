@@ -142,6 +142,10 @@ function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
     return phases
 end
 
+function train_to_phase(call::SpikingCall)
+    return train_to_phase(call.train, call.spk_args)
+end
+
 ###
 ### PHASE - POTENTIAL
 ###
@@ -269,29 +273,20 @@ end
 function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
+
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
     spiking = abs.(u) .> spk_args.threshold
-    new_offset = offset + spiking_offset(spk_args)
     
     #convert the phase represented by that potential to a spike time
-    p = potential_to_phase(u, cycles, dim=ndims(u), offset=offset, spk_args=spk_args)
-    t = phase_to_time(p, new_offset, spk_args = spk_args)
-    nd = ndims(t)
-    shift = x -> permutedims(x, (nd, 1:(nd-1)...))
-    unshift = x -> permutedims(x, (2:nd..., 1))
-    t = unshift(shift(t) .+ cycles)
+    tms = potential_to_time(u, cycles, spk_args = sa)
 
     #return only the times where the neuron is spiking
     cut_index = i -> CartesianIndex(Tuple(i)[1:end-1])
     inds = findall(spiking)
-    tms = t[inds]
-    
+    tms = tms[inds]
     inds = cut_index.(inds)
-    train = SpikeTrain(inds, tms, size(u)[1:end-1], new_offset)
+    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset + spiking_offset(spk_args))
+    
     return train
-end
-
-function train_to_phase(call::SpikingCall)
-    return train_to_phase(call.train, call.spk_args)
 end
