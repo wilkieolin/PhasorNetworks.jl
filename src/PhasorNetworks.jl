@@ -20,6 +20,8 @@ potential_to_phase,
 train_to_phase,
 time_to_phase,
 phase_to_time,
+potential_to_time,
+time_to_potential,
 arc_error,
 
 #spiking

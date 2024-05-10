@@ -136,12 +136,6 @@ function match_offsets(x::Vector{<:SpikeTrain})
     return new_trains
 end
 
-function neuron_constant(spk_args::SpikingArgs)
-    angular_frequency = period_to_angfreq(spk_args.t_period)
-    k = (spk_args.leakage + 1im * angular_frequency)
-    return k
-end
-
 function normalize_potential(u::Complex)
     a = abs(u)
     if a == 0.0
@@ -196,12 +190,6 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
 
     new_train = SpikeTrain(all_indices, all_times, new_shape, offset)
     return new_train
-end
-
-
-function period_to_angfreq(t_period::Real)
-    angular_frequency = 2 * pi / t_period
-    return angular_frequency
 end
 
 function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
