@@ -63,6 +63,15 @@ function arc_error(phases::AbstractArray)
     return arc_error.(phases)
 end
 
+function angle_to_complex(x::AbstractArray)
+    k = convert(ComplexF32, pi * (0.0 + 1.0im))
+    return exp.(k .* x)
+end
+
+function complex_to_angle(x::AbstractArray)
+    return angle.(x) ./ pi
+end
+
 ###
 ### PHASE - SPIKE
 ###
