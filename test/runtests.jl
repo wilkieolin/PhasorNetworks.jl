@@ -16,7 +16,7 @@ n_vsa = 1
 epsilon = 0.10
 repeats = 10
 epsilon = 0.025
-solver_args = Dict(:adaptive => true, :abstol => 1e-6, :reltol => 1e-6)
+solver_args = Dict(:adaptive => false, :dt => 0.01)
 spk_args = SpikingArgs(t_window = 0.01, 
                     threshold = 0.001,
                     solver=Tsit5(), 
