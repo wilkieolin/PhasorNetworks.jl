@@ -28,9 +28,8 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
         x, y = match_offsets(x, y)
     end
 
-    #set up functions to define the neuron'sa differential equations
+    #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
-    tbase = tspan[1]:spk_args.dt:tspan[2]
 
     #get the number of batches & output neurons
     output_shape = x.shape
@@ -38,8 +37,7 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
     #find the complex state induced by the spikes
     sol_x = phase_memory(x, tspan=tspan, spk_args=spk_args)
     sol_y = phase_memory(y, tspan=tspan, spk_args=spk_args)
-    tbase = unique!(sort(cat(sol_x.t, sol_y.t, dims=1)))
-
+    
     #create a reference oscillator to generate complex values for each moment in time
     u_ref = t -> phase_to_potential(0.0, t, offset = x.offset, spk_args = spk_args)
 

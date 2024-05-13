@@ -14,7 +14,6 @@ struct SpikingArgs
     t_period::Real
     t_window::Real
     threshold::Real
-    dt::Real
     solver
     solver_args::Dict
 end
@@ -23,12 +22,10 @@ function SpikingArgs(; leakage::Real = -0.2,
                     t_period::Real = 1.0,
                     t_window::Real = 0.01,
                     threshold::Real = 0.001,
-                    dt::Real = 0.01,
                     solver = Heun(),
-                    solver_args = Dict(:abstol => 1e-6,
-                                    :reltol => 1e-6,
-                                    :adaptive => true,))
-    return SpikingArgs(leakage, t_period, t_window, threshold, dt, solver, solver_args)
+                    solver_args = Dict(:dt => 0.01,
+                                    :adaptive => false,))
+    return SpikingArgs(leakage, t_period, t_window, threshold, solver, solver_args)
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)

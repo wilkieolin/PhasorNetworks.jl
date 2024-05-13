@@ -22,7 +22,7 @@ spk_args = SpikingArgs(t_window = 0.01,
                     solver=Tsit5(), 
                     solver_args = solver_args)
 tspan = (0.0, repeats*1.0)
-tbase = collect(tspan[1]:spk_args.dt:tspan[2])
+tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
 
 @kwdef mutable struct Args
     η::Float64 = 3e-4       ## learning rate
