@@ -41,13 +41,13 @@ function getdata(args)
 end
 
 function build_mlp(args)
-    phasor_model = Chain(LayerNorm((2,)), x -> x, PhasorDense(2 => 128), PhasorDense(128 => 2))
+    phasor_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), x -> x, PhasorDense(2 => 128), PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
 
 function build_spiking_mlp(args, spk_args)
-    spk_model = Chain(LayerNorm((2,)), MakeSpiking(spk_args, repeats), PhasorDense(2 => 128), PhasorDense(128 => 2))
+    spk_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), MakeSpiking(spk_args, repeats), PhasorDense(2 => 128), PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, spk_model)
     return spk_model, ps, st
 end
