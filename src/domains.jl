@@ -87,7 +87,11 @@ function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0)
     phases = (phases ./ 2.0) .+ 0.5
     times = phases .* period
     #add any additional offset
-    return times .+ offset
+    times .+= offset
+    #make all times positive
+    times = mod.(times, period)
+   
+    return times
 end
 
 function time_to_phase(times::AbstractArray; spk_args::SpikingArgs, offset::Real)
