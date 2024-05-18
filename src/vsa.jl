@@ -94,7 +94,6 @@ function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOr
     return y
 end
 
-#TODO - make dimensions constant with static call
 function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
@@ -109,20 +108,21 @@ function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat,
     if return_solution return sol end
 
     #convert the full solution (potentials) to spikes
-    indices, times = find_spikes_rf(sol, spk_args)
-    #construct the spike train and call for the next layer
-    train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
+    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
     next_call = SpikingCall(train, spk_args, tspan)
     return next_call
 end
 
-function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
+function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; offset::Real = 0.0, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     angular_frequency = 2 * pi / spk_args.t_period
     k = (spk_args.leakage + 1im * angular_frequency)
     output_shape = (size(w, 1), x.shape[2])
-    u0 = zeros(ComplexF32, output_shape)
-    dzdt(u, p, t) = k .* u + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+    #make the initial potential the bias value
+    u0 = deepcopy(b)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ offset
+    dzdt(u, p, t) = k .* u + w * x.current_fn(t)
     #solve the ODE over the given time span
     prob = ODEProblem(dzdt, u0, tspan)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
@@ -130,9 +130,7 @@ function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMa
     if return_solution return sol end
     
     #convert the full solution (potentials) to spikes
-    indices, times = find_spikes_rf(sol, spk_args)
-    #construct the spike train and call for the next layer
-    train = SpikeTrain(indices, times, output_shape, x.offset + spiking_offset(spk_args))
+    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
     next_call = SpikingCall(train, spk_args, tspan)
     return next_call
 end
