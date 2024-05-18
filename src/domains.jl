@@ -129,13 +129,17 @@ function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
         return missing
     end
 
+    @assert reduce(*, train.times .>= 0.0) "Spike train times must be positive"
+
     #decode each spike's phase within a cycle
     relative_phase = time_to_phase(train.times, spk_args.t_period, train.offset)
     relative_time = train.times .- train.offset
-    #what is the number of cycles in this train?
-    n_cycles = maximum(relative_time) ÷ spk_args.t_period + 1
     #what is the cycle in which each spike occurs?
-    cycle = floor.(Int, relative_time .÷ spk_args.t_period .+ 1)
+    cycle = floor.(Int, relative_time .÷ spk_args.t_period)
+    #re-number cycles to be positive
+    cycle = cycle .+ (1 - minimum(cycle))
+    #what is the number of cycles in this train?
+    n_cycles = maximum(cycle)
     phases = [NaN .* zeros(train.shape...) for i in 1:n_cycles]
 
     for i in eachindex(relative_phase)

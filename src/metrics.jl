@@ -91,9 +91,11 @@ function cor_realvals(x, y)
     x_real = is_real(x)
     y_real = is_real(y)
     reals = x_real .* y_real
-    
-    cor_val = cor(x[reals], y[reals])
-    return cor_val
+    if sum(reals) == 0
+        return 0.0
+    else
+        return cor(x[reals], y[reals])
+    end
 end
 
 function OvR_matrices(predictions, labels, threshold::Real)
