@@ -2,8 +2,6 @@ using DifferentialEquations: ODESolution
 
 include("domains.jl")
 
-#test - should bias just be U0 instead of an injected current??
-#should solve start at the offset of each spike train?
 function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     #what times to the bias values correlate to?
     times = phase_to_time(complex_to_angle(bias), spk_args=spk_args, offset=t_offset)
@@ -14,7 +12,7 @@ function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::Sp
     active = is_active(times, t, spk_args.t_window, sigma=sigma)
 
     #add the active currents, scaled by the gaussian kernel & bias magnitude
-    current_kernel = x -> gaussian_kernel(x, t_relative, spk_args.t_window)
+    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
     impulses = mag[active] .* current_kernel(times[active])
 
     bias = zeros(Float32, size(bias))
