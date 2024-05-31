@@ -171,6 +171,24 @@ function similarity(x::AbstractArray, y::AbstractArray; dim::Int = -1)
     return s
 end
 
+function similarity(x::SpikeTrain, y::SpikeTrain; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}, automatch::Bool=true)
+    if !automatch
+        if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
+    else
+        x, y = match_offsets(x, y)
+    end
+
+    sol_x = phase_memory(x, tspan = tspan, spk_args = spk_args)
+    sol_y = phase_memory(y, tspan = tspan, spk_args = spk_args)
+
+    u_x = normalize_potential.(Array(sol_x))
+    u_y = normalize_potential.(Array(sol_y))
+
+    interference = abs.(u_x .+ u_y)
+    avg_sim = interference_similarity(interference, dim=1)
+    return avg_sim
+end
+
 function interference_similarity(interference::AbstractArray; dim::Int=-1)
     if dim == -1
         dim = ndims(interference)
