@@ -138,7 +138,7 @@ end
 
 function match_tspans(spans::Tuple{<:Real, <:Real}...)
     start = minimum([s[1] for s in spans])
-    stop = maximum(s[2] for s in spans])
+    stop = maximum([s[2] for s in spans])
     return (start, stop)
 end
 
