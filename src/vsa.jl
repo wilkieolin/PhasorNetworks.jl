@@ -95,7 +95,9 @@ function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOr
 end
 
 function v_bundle_project(x::SpikingCall, w::AbstractMatrix, b::AbstractVecOrMat; return_solution::Bool=false)
-    return v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args)
+    train = v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args)
+    next_call = SpikingCall(train, x.spk_args, x.t_span)
+    return next_call
 end
 
 function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
@@ -113,8 +115,7 @@ function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat;
 
     #convert the full solution (potentials) to spikes
     train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
-    next_call = SpikingCall(train, spk_args, tspan)
-    return next_call
+    return train
 end
 
 function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, offset::Real = 0.0, return_solution::Bool=false)
