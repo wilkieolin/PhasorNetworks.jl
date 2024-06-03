@@ -9,6 +9,41 @@ function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
 end
 
+function Base.size(x::SpikeTrain)
+    return x.shape
+end
+
+function remap(indices::Vector{<:CartesianIndex})
+    #find the dimensions of unique elements for the new array
+    n_dims = length(indices[1])
+    elements = [map(x -> getindex(x, i), indices) for i in 1:n_dims]
+    unique_elements = unique.(elements)
+    new_ranges = [1:length(e) for e in unique_elements]
+    #for each dimension and element, construct the map of old to new elements
+    match = (x, i) -> x => new_ranges[i][findfirst(unique_elements[i] .== x)[1]]
+    mapping = [Dict(match.(elements[i], i)) for i in 1:n_dims]
+
+    #map each old index to the new index
+    new_indices = map(idx -> CartesianIndex([mapping[i][idx[i]] for i in 1:n_dims]...), indices)
+    new_shape = Tuple([r[end] for r in new_ranges])
+    return new_indices, new_shape
+end
+
+function Base.getindex(x::SpikeTrain, inds...)
+    #find the relevant entries
+    idxs = CartesianIndices(size(x))
+    selected = idxs[inds...]
+    matches = [idx in selected for idx in x.indices]
+    #downselect
+    sel_indices = x.indices[matches]
+    sel_times = x.times[matches]
+    #map the old indicies to new values
+    new_inds, new_shape = remap(sel_indices)
+    new_train = SpikeTrain(new_inds, sel_times, new_shape, x.offset)
+
+    return new_train
+end
+
 struct SpikingArgs
     leakage::Real
     t_period::Real
