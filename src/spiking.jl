@@ -136,6 +136,12 @@ function match_offsets(x::Vector{<:SpikeTrain})
     return new_trains
 end
 
+function match_tspans(spans::Tuple{<:Real, <:Real}...)
+    start = minimum([s[1] for s in spans])
+    stop = maximum(s[2] for s in spans])
+    return (start, stop)
+end
+
 function normalize_potential(u::Complex)
     a = abs(u)
     if a == 0.0

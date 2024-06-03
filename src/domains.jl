@@ -81,6 +81,12 @@ struct SpikingCall
     t_span::Tuple{<:Real, <:Real}
 end
 
+function Base.getindex(x::SpikingCall, inds...)
+    new_train = getindex(x.train, inds...)
+    new_call = SpikingCall(new_train, x.spk_args, x.t_span)
+    return new_call
+end
+
 struct CurrentCall
     current::LocalCurrent
     spk_args::SpikingArgs

@@ -94,7 +94,11 @@ function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOr
     return y
 end
 
-function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; return_solution::Bool=false)
+function v_bundle_project(x::SpikingCall, w::AbstractMatrix, b::AbstractVecOrMat; return_solution::Bool=false)
+    return v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args)
+end
+
+function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
     #get the number of batches & output neurons
@@ -113,7 +117,7 @@ function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat,
     return next_call
 end
 
-function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat, tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs; offset::Real = 0.0, return_solution::Bool=false)
+function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, offset::Real = 0.0, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     angular_frequency = 2 * pi / spk_args.t_period
     k = (spk_args.leakage + 1im * angular_frequency)
@@ -200,6 +204,12 @@ function interference_similarity(interference::AbstractArray; dim::Int=-1)
     avg_sim = mean(sim, dims=dim)
     
     return avg_sim
+end
+
+function similarity_outer(x::SpikingCall, y::SpikingCall; dims, reduce_dim::Int=-1, automatch::Bool=true)
+    @assert x.spk_args == y.spk_args "Spiking arguments must be identical to calculate similarity"
+    new_span = match_tspans(x.t_span, y.t_span)
+    return similarity_outer(x.train, y.train, dims=dims, reduce_dim=reduce_dim, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
 end
 
 function similarity_outer(x::SpikeTrain, y::SpikeTrain; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
