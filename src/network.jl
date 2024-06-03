@@ -62,7 +62,7 @@ function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTu
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = v_bundle_project(x.train, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
+    y = v_bundle_project(x, params.weight, params.bias, return_solution=return_solution)
     return y, state
 end
 
