@@ -77,6 +77,59 @@ function Base.show(io::IO, l::PhasorDense)
 end
 
 ###
+### Same as PhasorDense, but made with F32 parameters so ComponentArrays doesn't get confused and lead to the gradients getting mixed up
+###
+struct PhasorDenseF32{M<:AbstractMatrix, B} <: Lux.AbstractExplicitLayer
+    shape::Tuple{<:Int, <:Int}
+    in_dims::Int
+    out_dims::Int
+    init_weight::Function
+    init_bias_real::Function
+    init_bias_imag::Function
+
+    function PhasorDenseF32(W::M, b_real::B, b_imag::B) where {M<:AbstractMatrix, B<:AbstractVector}
+      new{M,typeof(b_real)}(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag))
+    end
+end
+  
+function PhasorDenseF32(W::AbstractMatrix)
+    b_real = ones(Float32, axes(W,1))
+    b_imag = zeros(Float32, axes(W,1))
+    return PhasorDenseF32(W, b_real, b_imag)
+end
+
+function PhasorDenseF32((in, out)::Pair{<:Integer, <:Integer};
+                init = variance_scaling)
+
+    w = init(out, in)
+    PhasorDenseF32(w)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDenseF32)
+    params = (weight = layer.init_weight(), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
+end
+
+function (a::PhasorDenseF32)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
+    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag)
+    return y, state
+end
+
+function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
+    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution=return_solution)
+    return y, state
+end
+
+function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
+    y = v_bundle_project(x.current, params.weight, params.bias_real .+ 1im .* params.bias_imag, x.t_span, x.spk_args, return_solution=return_solution)
+    return y, state
+end
+
+function Base.show(io::IO, l::PhasorDenseF32)
+    print(io, "PhasorDenseF32(", l.shape)
+    print(io, ")")
+end
+
+###
 ### PhasorODE Layer
 ###
 
