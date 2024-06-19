@@ -3,6 +3,7 @@ module PhasorNetworks
 export 
 #types
 PhasorDense, 
+PhasorDenseF32,
 PhasorODE,
 SpikeTrain, 
 MakeSpiking,
