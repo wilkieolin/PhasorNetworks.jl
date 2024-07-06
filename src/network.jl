@@ -28,33 +28,40 @@ end
 ### Phasor Dense definitions
 ###
 
-struct PhasorDense{M<:AbstractMatrix, B} <: Lux.AbstractExplicitLayer
+struct PhasorDense <: Lux.AbstractExplicitLayer
     shape::Tuple{<:Int, <:Int}
     in_dims::Int
     out_dims::Int
-    init_weight::Function
-    init_bias::Function
+    init_weight
+    init_bias
 
-    function PhasorDense(W::M, b::B) where {M<:AbstractMatrix, B<:AbstractVector}
-      new{M,typeof(b)}(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b))
-    end
+    PhasorDense(shape, init_weight, init_bias) = new(shape, shape[1], shape[2], init_weight, init_bias)
 end
-  
+
+## Constructors
+
+#instantiate a layer from a passed weight and bias
+function PhasorDense(W::AbstractMatrix, b::AbstractVecOrMat)
+    return PhasorDense(size(W), () -> copy(W), () -> copy(b))
+end
+
 function PhasorDense(W::AbstractMatrix)
     b = ones(ComplexF32, axes(W,1))
     return PhasorDense(W, b)
 end
 
+#setup the layer with a shape and initializers
 function PhasorDense((in, out)::Pair{<:Integer, <:Integer};
                 init = variance_scaling)
 
-    w = init(out, in)
-    PhasorDense(w)
+    return PhasorDense((in, out), variance_scaling, () -> ones(ComplexF32, out))
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDense)
-    params = (weight = layer.init_weight(), bias = layer.init_bias())
+    params = (weight = layer.init_weight(rng, layer.out_dims, layer.in_dims), bias = layer.init_bias())
 end
+
+# Calls
 
 function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x, params.weight, params.bias)
@@ -79,19 +86,23 @@ end
 ###
 ### Same as PhasorDense, but made with F32 parameters so ComponentArrays doesn't get confused and lead to the gradients getting mixed up
 ###
-struct PhasorDenseF32{M<:AbstractMatrix, B} <: Lux.AbstractExplicitLayer
+struct PhasorDenseF32 <: Lux.AbstractExplicitLayer
     shape::Tuple{<:Int, <:Int}
     in_dims::Int
     out_dims::Int
-    init_weight::Function
-    init_bias_real::Function
-    init_bias_imag::Function
+    init_weight
+    init_bias_real
+    init_bias_imag
 
-    function PhasorDenseF32(W::M, b_real::B, b_imag::B) where {M<:AbstractMatrix, B<:AbstractVector}
-      new{M,typeof(b_real)}(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag))
-    end
+    PhasorDenseF32(shape, init_weight, init_bias_real, init_bias_imag) = new(shape, shape[1], shape[2], init_weight, init_bias_real, init_bias_imag)
 end
-  
+
+## Constructors
+
+function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat)
+    return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag))
+end
+
 function PhasorDenseF32(W::AbstractMatrix)
     b_real = ones(Float32, axes(W,1))
     b_imag = zeros(Float32, axes(W,1))
@@ -101,13 +112,14 @@ end
 function PhasorDenseF32((in, out)::Pair{<:Integer, <:Integer};
                 init = variance_scaling)
 
-    w = init(out, in)
-    PhasorDenseF32(w)
+    return PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out))
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDenseF32)
-    params = (weight = layer.init_weight(), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
+    params = (weight = layer.init_weight(rng, layer.out_dims, layer.in_dims), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
 end
+
+# Calls
 
 function (a::PhasorDenseF32)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag)
@@ -253,7 +265,7 @@ end
 Other utilities
 """
 
-function variance_scaling(shape::Integer...; mode::String = "fan_in", scale::Real = 1.0)
+function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "fan_in", scale::Real = 1.0)
     fan_in = shape[1]
     fan_out = shape[end]
 
@@ -266,5 +278,5 @@ function variance_scaling(shape::Integer...; mode::String = "fan_in", scale::Rea
     end
 
     stddev = sqrt(scale) / 0.87962566103423978
-    return truncated_normal(shape..., mean = 0.0, std = stddev)
+    return truncated_normal(rng, shape..., mean = 0.0, std = stddev)
 end
