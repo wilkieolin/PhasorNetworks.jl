@@ -166,7 +166,7 @@ function PhasorODE(model::Lux.AbstractExplicitLayer;
 end
 
 #forward pass
-function (n::PhasorODE)(currents, ps, st)
+function (n::PhasorODE)(currents, ps, st; dense::Bool = false)
     #define the function which updates neurons' potentials
     function dudt(u, p, t)
         du_real, _ = n.model(currents(t), p, st)
@@ -180,12 +180,22 @@ function (n::PhasorODE)(currents, ps, st)
     y0, _ = n.model(i0, ps, st)
     u0 = zeros(ComplexF32, size(y0))
     prob = ODEProblem(dudt, u0, n.tspan, ps)
-    soln = solve(prob, n.solver, 
-        adaptive = false, 
-        dt = n.dt, 
-        saveat = n.tspan[2], 
-        sensealg = n.sensealg,
-        save_start = false)
+    if dense
+        #save the full solution with interpolation
+        soln = solve(prob, n.solver, 
+            adaptive = false, 
+            dt = n.dt, 
+            saveat = n.tspan[1]:n.dt:n.tspan[2], 
+            sensealg = n.sensealg,
+            save_start = true)
+    else
+        #only save the final output (used with backprop)
+        soln = solve(prob, n.solver, 
+            adaptive = false, 
+            dt = n.dt, 
+            saveat = n.tspan[2], 
+            sensealg = n.sensealg,
+            save_start = false)
     return soln, st
 end
 
