@@ -196,6 +196,8 @@ function (n::PhasorODE)(currents, ps, st; dense::Bool = false)
             saveat = n.tspan[2], 
             sensealg = n.sensealg,
             save_start = false)
+    end
+    
     return soln, st
 end
 
