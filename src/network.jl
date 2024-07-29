@@ -152,6 +152,7 @@ struct PhasorODE{M <: Lux.AbstractExplicitLayer, So, Se, T} <: Lux.AbstractExpli
     tspan::T
     spk_args::SpikingArgs
     dt::Real
+    dense::Bool
 end
 
 #constructor
@@ -160,13 +161,14 @@ function PhasorODE(model::Lux.AbstractExplicitLayer;
     sensealg=InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
     tspan=(0.0, 30.0),
     spk_args=SpikingArgs(),
-    dt=0.1)
+    dt=0.1,
+    dense=false)
 
-    return PhasorODE(model, solver, sensealg, tspan, spk_args, dt)
+    return PhasorODE(model, solver, sensealg, tspan, spk_args, dt, dense)
 end
 
 #forward pass
-function (n::PhasorODE)(currents, ps, st; dense::Bool = false)
+function (n::PhasorODE)(currents, ps, st)
     #define the function which updates neurons' potentials
     function dudt(u, p, t)
         du_real, _ = n.model(currents(t), p, st)
@@ -180,7 +182,7 @@ function (n::PhasorODE)(currents, ps, st; dense::Bool = false)
     y0, _ = n.model(i0, ps, st)
     u0 = zeros(ComplexF32, size(y0))
     prob = ODEProblem(dudt, u0, n.tspan, ps)
-    if dense
+    if n.dense
         #save the full solution with interpolation
         soln = solve(prob, n.solver, 
             adaptive = false, 
@@ -240,9 +242,6 @@ struct PhasorAttention{M<:AbstractArray, B} <: Lux.AbstractExplicitLayer
     init_weight::Function
     init_bias::Function
 end
-
-
-
 
 function (a::PhasorAttention)(query::AbstractArray, keyvalue::AbstractArray)
     q = a.query_network(query)

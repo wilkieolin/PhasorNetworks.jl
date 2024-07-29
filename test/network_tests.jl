@@ -109,7 +109,7 @@ function loss(x, y, model, ps, st)
 end
 
 
-function train(model, ps, st, train_loader, args)
+function train(model, ps, st, train_loader, args; verbose::Bool = false)
      # if CUDA.functional() && args.use_cuda
     #     @info "Training on CUDA GPU"
     #     CUDA.allowscalar(false)
@@ -128,6 +128,9 @@ function train(model, ps, st, train_loader, args)
         for (x, y) in train_loader
             lf = p -> loss(x, y, model, p, st)[1]
             lossval, gs = withgradient(lf, ps)
+            if verbose
+                println(reduce(*, ["Epoch ", string(epoch), " loss: ", string(lossval)]))
+            end
             append!(losses, lossval)
             opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
         end
