@@ -1,3 +1,5 @@
+using ChainRulesCore: ignore_derivativess
+
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}
     times::Array{<:Real,1}
@@ -222,10 +224,15 @@ end
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
 function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs)
-    #find the angle of a neuron representing 0 phase at the current moment in time
-    current_zero = phase_to_potential(0.0, t, offset=offset, spk_args=spk_args)
+    current_zero = ones(ComplexF32, (1))
+
+    ignore_derivatives() do
+        #find the angle of a neuron representing 0 phase at the current moment in time
+        current_zero = phase_to_potential(0.0, t, offset=offset, spk_args=spk_args)
+    end
     #get the arc subtended in the complex plane between that reference and our neuron potentials
     arc = angle(current_zero) .- angle.(potential) 
+
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
 end
@@ -246,9 +253,28 @@ function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
     return u
 end
 
+function solution_to_potential(ode_sol::ODESolution)
+    return Array(ode_sol)
+end
+
+function solution_to_phase(sol::ODESolution; final_t::Bool=true, offset::Real=0.0, spk_args::SpikingArgs)
+    #convert the ODE solution's saved points to an array
+    u = solution_to_potential(sol)
+    if final_t
+        u = u[:,:,end]
+        p = potential_to_phase(u, sol.t[end], offset=offset, spk_args=spk_args)
+    else
+        dim = ndims(u)
+        #calculate the phase represented by that potential
+        p = potential_to_phase(u, sol.t, dim=dim, offset=offset, spk_args=spk_args)
+    end
+
+    return p
+end
+
 function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
     #call the solution at the provided times
-    u = solution_to_potential(sol, t)
+    u = solution_to_potential(sol)
     dim = ndims(u)
     #calculate the phase represented by that potential
     p = potential_to_phase(u, t, dim=dim, offset=offset, spk_args=spk_args)
