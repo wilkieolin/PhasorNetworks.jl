@@ -1,4 +1,4 @@
-using ChainRulesCore: ignore_derivativess
+using ChainRulesCore: ignore_derivatives
 
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}
