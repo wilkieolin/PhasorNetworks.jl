@@ -274,7 +274,7 @@ end
 
 function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
     #call the solution at the provided times
-    u = solution_to_potential(sol)
+    u = solution_to_potential(sol, t)
     dim = ndims(u)
     #calculate the phase represented by that potential
     p = potential_to_phase(u, t, dim=dim, offset=offset, spk_args=spk_args)
