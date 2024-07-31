@@ -2,6 +2,13 @@ using DifferentialEquations: ODESolution
 
 include("domains.jl")
 
+function angular_mean(phases::AbstractArray; dims)
+    u = exp.(pi * 1im .* phases)
+    u_mean = mean(u, dims=dims)
+    phase = angle.(u_mean) ./ pi
+    return phase
+end
+
 function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     #what times to the bias values correlate to?
     times = phase_to_time(complex_to_angle(bias), spk_args=spk_args, offset=t_offset)
@@ -140,6 +147,17 @@ function match_tspans(spans::Tuple{<:Real, <:Real}...)
     start = minimum([s[1] for s in spans])
     stop = maximum([s[2] for s in spans])
     return (start, stop)
+end
+
+function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0)
+    inds = solution.t .> (i_warmup * spk_args.t_period)
+
+    u = Array(solution)[:,:,inds]
+    t = solution.t[inds]
+    phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args)
+    phase = angular_mean(phase, dims=(3))[:,:,1]
+
+    return phase
 end
 
 function normalize_potential(u::Complex)
