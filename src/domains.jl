@@ -167,7 +167,7 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs)
     return train_to_phase(train, spk_args)
 end
 
-function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
+function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs; offset::Real = 0.0)
     if length(train.times) == 0
         return missing
     end
@@ -176,7 +176,7 @@ function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs)
 
     #decode each spike's phase within a cycle
     relative_phase = time_to_phase(train.times, spk_args.t_period, train.offset)
-    relative_time = train.times .- train.offset
+    relative_time = train.times .- (train.offset + offset)
     #what is the cycle in which each spike occurs?
     cycle = floor.(Int, relative_time .÷ spk_args.t_period)
     #re-number cycles to be positive
@@ -237,6 +237,22 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
 end
 
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
+    current_zeros = ones(ComplexF32, (length(ts)))
+
+    ignore_derivatives() do
+        #find the angle of a neuron representing 0 phase at the current moment in time
+        current_zeros = phase_to_potential.(0.0, ts, offset=offset, spk_args=spk_args)
+    end
+    #get the arc subtended in the complex plane between that reference and our neuron potentials
+    potential = permutedims(potential, (3,2,1))
+    arc = angle.(current_zeros) .- angle.(potential) 
+    arc = permutedims(arc, (3,2,1))
+
+    #normalize by pi and shift to -1, 1
+    phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+end
+
 function potential_to_phase(potential::AbstractArray, t::AbstractVector; dim::Int, spk_args::SpikingArgs, offset::Real=0.0)
     @assert size(potential, dim) == length(t) "Time dimensions must match"
     phases = [potential_to_phase(uslice, t[i], offset=offset, spk_args=spk_args) for (i, uslice) in enumerate(eachslice(potential, dims=dim))]
@@ -266,7 +282,7 @@ function solution_to_phase(sol::ODESolution; final_t::Bool=true, offset::Real=0.
     else
         dim = ndims(u)
         #calculate the phase represented by that potential
-        p = potential_to_phase(u, sol.t, dim=dim, offset=offset, spk_args=spk_args)
+        p = potential_to_phase(u, sol.t, offset=offset, spk_args=spk_args)
     end
 
     return p

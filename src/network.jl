@@ -23,6 +23,12 @@ function (a::MakeSpiking)(x::AbstractArray, params::LuxParams, state::NamedTuple
     return call, state
 end
 
+function (a::MakeSpiking)(x::ODESolution, params::LuxParams, state::NamedTuple)
+    train = solution_to_train(x, a.tspan, spk_args = a.spk_args, offset = 0.0)
+    call = SpikingCall(train, a.spk_args, a.tspan)
+    return call, state
+end
+
 
 ###
 ### Phasor Dense definitions
