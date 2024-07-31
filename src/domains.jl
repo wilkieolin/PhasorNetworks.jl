@@ -257,28 +257,22 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
 end
 
-function potential_to_phase(potential::AbstractArray{<:Real,3}, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0)
+    @assert size(potential)[end] == length(ts) "Time dimensions must match"
     current_zeros = ones(ComplexF32, (length(ts)))
+    dims = collect(1:ndims(potential))
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
         current_zeros = phase_to_potential.(0.0, ts, offset=offset, spk_args=spk_args)
     end
     #get the arc subtended in the complex plane between that reference and our neuron potentials
-    potential = permutedims(potential, (3,2,1))
+    potential = permutedims(potential, reverse(dims))
     arc = angle.(current_zeros) .- angle.(potential) 
-    arc = permutedims(arc, (3,2,1))
+    arc = permutedims(arc, reverse(dims))
 
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
-end
-
-function potential_to_phase(potential::AbstractArray, t::AbstractVector; dim::Int, spk_args::SpikingArgs, offset::Real=0.0)
-    @assert size(potential, dim) == length(t) "Time dimensions must match"
-    phases = [potential_to_phase(uslice, t[i], offset=offset, spk_args=spk_args) for (i, uslice) in enumerate(eachslice(potential, dims=dim))]
-    phases = stack(phases)
-    
-    return phases
 end
 
 function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
@@ -311,9 +305,8 @@ end
 function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
     #call the solution at the provided times
     u = solution_to_potential(sol, t)
-    dim = ndims(u)
     #calculate the phase represented by that potential
-    p = potential_to_phase(u, t, dim=dim, offset=offset, spk_args=spk_args)
+    p = potential_to_phase(u, t, offset=offset, spk_args=spk_args)
     return p
 end
 
