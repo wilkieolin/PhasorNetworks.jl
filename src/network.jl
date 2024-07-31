@@ -168,7 +168,7 @@ function PhasorODE(model::Lux.AbstractExplicitLayer;
     tspan=(0.0, 30.0),
     spk_args=SpikingArgs(),
     dt=0.1,
-    dense=false)
+    dense=true)
 
     return PhasorODE(model, solver, sensealg, tspan, spk_args, dt, dense)
 end

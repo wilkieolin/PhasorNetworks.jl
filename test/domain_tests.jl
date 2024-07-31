@@ -29,7 +29,7 @@ end
 function potential_phase_test()
     tms = 0.0:0.1:6.0 |> collect
     us = [phase_to_potential(phases, tms, offset = o, spk_args=spk_args) for o in offsets]
-    rec_phases = [potential_to_phase(us[i], tms, dim=2, offset=offsets[i], spk_args=spk_args) for i in axes(offsets,1)]
+    rec_phases = [potential_to_phase(us[i], tms, offset=offsets[i], spk_args=spk_args) for i in axes(offsets,1)]
     errors = map(y -> arc_error.(mapslices(x -> abs.(x .- phases), y, dims=1)), rec_phases)
     max_error = maximum(maximum.(errors))
     @test max_error < 1e-6
