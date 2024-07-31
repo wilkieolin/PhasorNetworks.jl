@@ -257,7 +257,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
 end
 
-function potential_to_phase(potential::AbstractArray, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
+function potential_to_phase(potential::AbstractArray{<:Real,3}, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
     current_zeros = ones(ComplexF32, (length(ts)))
 
     ignore_derivatives() do
