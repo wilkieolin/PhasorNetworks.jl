@@ -15,6 +15,7 @@ CurrentCall,
 #domain conversions
 phase_to_train,
 phase_to_potential,
+phase_to_current,
 solution_to_potential,
 solution_to_phase,
 solution_to_train,
@@ -34,6 +35,7 @@ stack_trains,
 vcat_trains,
 delay_train,
 match_offsets,
+mean_phase,
 
 #vsa
 v_bundle,
