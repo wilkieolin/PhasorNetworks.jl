@@ -20,15 +20,11 @@ function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, 
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
     t = mod(t, spk_args.t_period)
-    #determine which biases are active
-    active = is_active(times, t, spk_args.t_window, sigma=sigma)
 
     #add the active currents, scaled by the gaussian kernel & bias magnitude
     current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-    impulses = mag[active] .* current_kernel(times[active])
+    bias = mag .* current_kernel(times)
 
-    bias = zeros(Float32, size(phase))
-    bias[active] += impulses
     return bias
 end
 

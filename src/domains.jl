@@ -128,9 +128,7 @@ end
 function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0)
     #convert a potential to the time at which the voltage is maximum - 90* behind phase
     phases = (phases ./ 2.0) .+ 0.5
-    times = phases .* period
-    #add any additional offset
-    times .+= offset
+    times = phases .* period .+ offset
     #make all times positive
     times = mod.(times, period)
    
