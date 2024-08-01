@@ -10,7 +10,7 @@ function angular_mean(phases::AbstractArray; dims)
 end
 
 function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
-    phase = angle.(bias)
+    phase = complex_to_angle(bias)
     mag = abs.(bias)
     return bias_current(phase, mag, t, t_offset, spk_args, sigma=sigma)
 end
@@ -27,7 +27,7 @@ function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, 
     current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
     impulses = mag[active] .* current_kernel(times[active])
 
-    bias = zeros(Float32, size(bias))
+    bias = zeros(Float32, size(phase))
     bias[active] += impulses
     return bias
 end

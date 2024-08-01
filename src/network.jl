@@ -163,7 +163,6 @@ struct PhasorODE{M <: Lux.AbstractExplicitLayer, So, Se, T} <: Lux.AbstractExpli
     dense::Bool
 end
 
-#constructor
 function PhasorODE(model::Lux.AbstractExplicitLayer; 
     solver = Tsit5(),
     sensealg = InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
