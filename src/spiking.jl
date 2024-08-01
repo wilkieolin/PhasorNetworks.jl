@@ -9,10 +9,15 @@ function angular_mean(phases::AbstractArray; dims)
     return phase
 end
 
-function bias_current(bias::AbstractArray, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
-    #what times to the bias values correlate to?
-    times = phase_to_time(complex_to_angle(bias), spk_args=spk_args, offset=t_offset)
+function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
+    phase = angle.(bias)
     mag = abs.(bias)
+    return bias_current(phase, mag, t, t_offset, spk_args, sigma=sigma)
+end
+
+function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
+    #what times to the bias values correlate to?
+    times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
     t = mod(t, spk_args.t_period)
     #determine which biases are active
@@ -167,6 +172,26 @@ function normalize_potential(u::Complex)
     else
         return u / a
     end
+end
+
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs)
+    function inner(t::Real)
+        output = zero(phases)
+
+        ignore_derivatives() do
+            times = phases .* spk_args.t_period
+            times = mod.(times, spk_args.t_period)
+
+            #add currents into the active synapses
+            current_kernel = x -> gaussian_kernel(x, mod(t, spk_args.t_period), spk_args.t_window)
+            impulses = current_kernel(times)
+            output .+= impulses
+        end
+
+        return output
+    end
+
+    return inner
 end
 
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)

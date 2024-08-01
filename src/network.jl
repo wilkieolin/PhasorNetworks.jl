@@ -158,35 +158,42 @@ struct PhasorODE{M <: Lux.AbstractExplicitLayer, So, Se, T} <: Lux.AbstractExpli
     tspan::T
     spk_args::SpikingArgs
     dt::Real
+    offset::Real
+    static_bias::Function
     dense::Bool
 end
 
 #constructor
 function PhasorODE(model::Lux.AbstractExplicitLayer; 
-    solver=Tsit5(),
-    sensealg=InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
-    tspan=(0.0, 30.0),
-    spk_args=SpikingArgs(),
-    dt=0.1,
-    dense=true)
+    solver = Tsit5(),
+    sensealg = InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
+    tspan::Tuple{<:Real, <:Real} = (0.0, 30.0),
+    spk_args::SpikingArgs = SpikingArgs(),
+    dt::Real = 0.1,
+    offset::Real = 0.0,
+    static_bias::Function = x -> ones(ComplexF32, size(x)),
+    dense::Bool = true,)
 
-    return PhasorODE(model, solver, sensealg, tspan, spk_args, dt, dense)
+    return PhasorODE(model, solver, sensealg, tspan, spk_args, dt, offset, static_bias, dense)
 end
 
 #forward pass
 function (n::PhasorODE)(currents, ps, st)
-    #define the function which updates neurons' potentials
-    function dudt(u, p, t)
-        du_real, _ = n.model(currents(t), p, st)
-        constant = n.spk_args.leakage + 2*pi*im / n.spk_args.t_period
-        du = constant .* u .+ du_real
-        return du
-    end
-
     #sample the input & output to determine size of the state
     i0 = currents(0.0)
     y0, _ = n.model(i0, ps, st)
     u0 = zeros(ComplexF32, size(y0))
+    bias = n.static_bias(u0)
+
+    #define the function which updates neurons' potentials
+    function dudt(u, p, t)
+        du_real, _ = n.model(currents(t), p, st)
+        constant = n.spk_args.leakage + 2*pi*im / n.spk_args.t_period
+        du = constant .* u .+ du_real .+ bias_current(bias, t, n.offset, n.spk_args)
+        return du
+    end
+
+    
     prob = ODEProblem(dudt, u0, n.tspan, ps)
     if n.dense
         #save the full solution with interpolation

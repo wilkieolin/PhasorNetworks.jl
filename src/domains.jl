@@ -137,26 +137,6 @@ function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0)
     return times
 end
 
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs)
-    function inner(t::Real)
-        output = zero(phases)
-
-        ignore_derivatives() do
-            times = phases .* spk_args.t_period
-            times = mod.(times, spk_args.t_period)
-
-            #add currents into the active synapses
-            current_kernel = x -> gaussian_kernel(x, mod(t, spk_args.t_period), spk_args.t_window)
-            impulses = current_kernel(times)
-            output .+= impulses
-        end
-
-        return output
-    end
-
-    return inner
-end
-
 function time_to_phase(times::AbstractArray; spk_args::SpikingArgs, offset::Real)
     return time_to_phase(times, spk_args.t_period, offset)
 end
