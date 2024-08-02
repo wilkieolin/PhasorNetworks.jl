@@ -109,6 +109,8 @@ function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::Abs
     return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag))
 end
 
+function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat)
+
 function PhasorDenseF32(W::AbstractMatrix)
     b_real = ones(Float32, axes(W,1))
     b_imag = zeros(Float32, axes(W,1))
@@ -289,8 +291,8 @@ Other utilities
 """
 
 function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "fan_in", scale::Real = 1.0)
-    fan_in = shape[1]
-    fan_out = shape[end]
+    fan_in = shape[end]
+    fan_out = shape[1]
 
     if mode == "fan_in"
         scale /= max(1.0, fan_in)
