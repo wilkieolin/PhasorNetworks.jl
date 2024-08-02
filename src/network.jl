@@ -99,28 +99,40 @@ struct PhasorDenseF32 <: Lux.AbstractExplicitLayer
     init_weight
     init_bias_real
     init_bias_imag
+    return_solution::Bool
 
-    PhasorDenseF32(shape, init_weight, init_bias_real, init_bias_imag) = new(shape, shape[1], shape[2], init_weight, init_bias_real, init_bias_imag)
+    PhasorDenseF32(shape, 
+                    init_weight, 
+                    init_bias_real, 
+                    init_bias_imag,
+                    return_solution) = 
+                        new(shape,
+                        shape[1],
+                        shape[2],
+                        init_weight,
+                        init_bias_real,
+                        init_bias_imag,
+                        return_solution
+                        )
 end
 
 ## Constructors
 
-function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat)
-    return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag))
+function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat; return_solution=false)
+    return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag), return_solution)
 end
 
-function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat)
-
-function PhasorDenseF32(W::AbstractMatrix)
+function PhasorDenseF32(W::AbstractMatrix; return_solution::Bool)
     b_real = ones(Float32, axes(W,1))
     b_imag = zeros(Float32, axes(W,1))
-    return PhasorDenseF32(W, b_real, b_imag)
+    return PhasorDenseF32(W, b_real, b_imag, return_solution=return_solution)
 end
 
 function PhasorDenseF32((in, out)::Pair{<:Integer, <:Integer};
-                init = variance_scaling)
+                init = variance_scaling,
+                return_solution::Bool = false)
 
-    return PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out))
+    return PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDenseF32)
@@ -134,13 +146,13 @@ function (a::PhasorDenseF32)(x::AbstractVecOrMat, params::LuxParams, state::Name
     return y, state
 end
 
-function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution=return_solution)
+function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution=a.return_solution)
     return y, state
 end
 
-function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = v_bundle_project(x.current, params.weight, params.bias_real .+ 1im .* params.bias_imag, x.t_span, x.spk_args, return_solution=return_solution)
+function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    y = v_bundle_project(x.current, params.weight, params.bias_real .+ 1im .* params.bias_imag, tspan = x.t_span, spk_args = x.spk_args, return_solution=a.return_solution)    
     return y, state
 end
 
@@ -194,7 +206,6 @@ function (n::PhasorODE)(currents, ps, st)
         return du
     end
 
-    
     prob = ODEProblem(dudt, u0, n.tspan, ps)
     if n.dense
         #save the full solution with interpolation
@@ -290,7 +301,7 @@ end
 Other utilities
 """
 
-function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "fan_in", scale::Real = 1.0)
+function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "avg", scale::Real = 0.66)
     fan_in = shape[end]
     fan_out = shape[1]
 
