@@ -170,7 +170,9 @@ function normalize_potential(u::Complex)
     end
 end
 
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs)
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0, tspan::Tuple{<:Real, <:Real})
+    shape = size(phases)
+    
     function inner(t::Real)
         output = zero(phases)
 
@@ -187,21 +189,27 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs)
         return output
     end
 
-    return inner
+    current = LocalCurrent(inner, shape, offset)
+    call = CurrentCall(current, spk_args, tspan)
+
+    return call
 end
 
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
-    #find which channels are active 
-    times = train.times
-    active = is_active(times, t, spk_args.t_window, sigma=sigma)
-    active_inds = train.indices[active]
-
-    #add currents into the active synapses
-    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-    impulses = current_kernel(train.times[active])
-    
     current = zeros(Float32, train.shape)
-    current[active_inds] .+= impulses
+
+    ignore_derivatives() do
+        #find which channels are active 
+        times = train.times
+        active = is_active(times, t, spk_args.t_window, sigma=sigma)
+        active_inds = train.indices[active]
+
+        #add currents into the active synapses
+        current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+        impulses = current_kernel(train.times[active])
+        
+        current[active_inds] .+= impulses
+    end
 
     return current
 end

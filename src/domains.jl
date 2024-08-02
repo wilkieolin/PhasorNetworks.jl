@@ -71,11 +71,6 @@ function Base.show(io::IO, spk_args::SpikingArgs)
     print(io, "Threshold: ", spk_args.threshold, " (V)\n")
 end
 
-struct LocalCurrent
-    current_fn::Function
-    shape::Tuple
-    offset::Real
-end
 
 struct SpikingCall
     train::SpikeTrain
@@ -87,6 +82,12 @@ function Base.getindex(x::SpikingCall, inds...)
     new_train = getindex(x.train, inds...)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
     return new_call
+end
+
+struct LocalCurrent
+    current_fn::Function
+    shape::Tuple
+    offset::Real
 end
 
 struct CurrentCall
