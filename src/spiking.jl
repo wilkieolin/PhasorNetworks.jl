@@ -177,8 +177,7 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
         output = zero(phases)
 
         ignore_derivatives() do
-            times = phases .* spk_args.t_period
-            times = mod.(times, spk_args.t_period)
+            times = phase_to_time(phases, spk_args = spk_args, offset = offset)
 
             #add currents into the active synapses
             current_kernel = x -> gaussian_kernel(x, mod(t, spk_args.t_period), spk_args.t_window)
