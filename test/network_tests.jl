@@ -15,10 +15,12 @@ function network_tests()
 
     #repeat tests with F32 Dense
     modelf32, ps, st = build_mlp_f32(args)
+    ode_modelf32, _, _ = build_ode_mlp_f32(args, spk_args)
     spk_modelf32, _, _ = build_spiking_mlp_f32(args, spk_args)
 
     pretrain_chk2 = correlation_test(modelf32, spk_modelf32, ps, st, x)
     train_chk2, ps_train, st_train = train_test(modelf32, args, ps, st, train_loader, test_loader)
+    y_cor_chk, lval_chk, grad_chk = ode_correlation(modelf32, ode_modelf32, ps, st, x, y)
     acc_chk2 = accuracy_test(modelf32, ps_train, st_train, test_loader)
     posttrain_chk2 = correlation_test(modelf32, spk_modelf32, ps_train, st_train, x)
     spk_acc_chk2 = spiking_accuracy_test(spk_modelf32, ps_train, st_train, [(x, y),])
@@ -32,7 +34,10 @@ function network_tests()
                         train_chk2,
                         acc_chk2,
                         posttrain_chk2,
-                        spk_acc_chk2,])
+                        spk_acc_chk2,
+                        y_cor_chk,
+                        lval_chk,
+                        grad_chk])
 
     return all_pass
 end
@@ -72,15 +77,54 @@ function build_spiking_mlp(args, spk_args)
 end
 
 function build_mlp_f32(args)
-    phasor_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), x -> x, PhasorDenseF32(2 => 128), PhasorDenseF32(128 => 2))
+    phasor_model = Chain(LayerNorm((2,)), 
+                x -> tanh_fast.(x), 
+                x -> x, 
+                PhasorDenseF32(2 => 128), 
+                x -> x,
+                PhasorDenseF32(128 => 2))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
 
+function build_ode_mlp_f32(args, spk_args)
+    ode_model = Chain(LayerNorm((2,)),
+                x -> tanh_fast.(x),
+                x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0, 10.0)),
+                PhasorDenseF32(2 => 128, return_solution=true),
+                x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0),
+                PhasorDenseF32(128 => 2))
+    ps, st = Lux.setup(args.rng, ode_model)
+    return ode_model, ps, st
+end
+
 function build_spiking_mlp_f32(args, spk_args)
-    spk_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), MakeSpiking(spk_args, repeats), PhasorDenseF32(2 => 128), PhasorDenseF32(128 => 2))
+    spk_model = Chain(LayerNorm((2,)), 
+                    x -> tanh_fast.(x), 
+                    MakeSpiking(spk_args, repeats), 
+                    PhasorDenseF32(2 => 128), 
+                    x -> x,
+                    PhasorDenseF32(128 => 2))
     ps, st = Lux.setup(args.rng, spk_model)
     return spk_model, ps, st
+end
+
+function ode_correlation(model, ode_model, ps, st, x, y)
+    @info "Running ODE correlation test..."
+    y_f, _ = model(x, ps, st)
+    y_ode, _ = ode_model(x, ps, st)
+    y_cor_chk = cor_realvals(vec(y_f), vec(y_ode)) > 0.90
+    @test y_cor_chk
+
+    psf = ComponentArray(ps)
+    lval, grads = withgradient(p -> mean(quadrature_loss(model(x, p, st)[1], y)), psf)
+    lval_ode, grads_ode = withgradient(p -> mean(quadrature_loss(ode_model(x, p, st)[1], y)), psf)
+    lval_chk = abs(lval_ode - lval) < 0.02
+    grad_chk = cor_realvals(vec(grads[1].layer_4.weight), vec(grads_ode[1].layer_4.weight)) > 0.95
+    @test lval_chk
+    @test grad_chk
+
+    return y_cor_chk, lval_chk, grad_chk
 end
 
 function test_correlation(model, spk_model, ps, st, x)
