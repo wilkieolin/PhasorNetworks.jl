@@ -118,18 +118,18 @@ function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat;
     return train
 end
 
-function v_bundle_project(x::LocalCurrent, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     angular_frequency = 2 * pi / spk_args.t_period
     k = (spk_args.leakage + 1im * angular_frequency)
-    output_shape = (size(w, 1), x.shape[2])
+    output_shape = (size(params.weight, 1), x.shape[2])
     #make the initial potential the bias value
     u0 = zeros(ComplexF32, output_shape)
     #shift the solver span by the function's time offset
     tspan = tspan .+ x.offset
-    dzdt(u, p, t) = k .* u + p * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+    dzdt(u, p, t) = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
     #solve the ODE over the given time span
-    prob = ODEProblem(dzdt, u0, tspan, w)
+    prob = ODEProblem(dzdt, u0, tspan, params)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
     #return full solution
     if return_solution return sol end
