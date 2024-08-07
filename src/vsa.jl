@@ -95,7 +95,7 @@ function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOr
 end
 
 function v_bundle_project(x::SpikingCall, w::AbstractMatrix, b::AbstractVecOrMat; return_solution::Bool=false)
-    train = v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args)
+    train = v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args, return_solution = return_solution)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call
 end
@@ -116,6 +116,28 @@ function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat;
     #convert the full solution (potentials) to spikes
     train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
     return train
+end
+
+function v_bundle_project(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1}; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+    #set up functions to define the neuron's differential equations
+    angular_frequency = 2 * pi / spk_args.t_period
+    k = (spk_args.leakage + 1im * angular_frequency)
+    output_shape = (size(w, 1), x.shape[2])
+    #make the initial potential the bias value
+    u0 = zeros(ComplexF32, output_shape)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ x.offset
+    dzdt(u, p, t) = k .* u + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+    #solve the ODE over the given time span
+    prob = ODEProblem(dzdt, u0, tspan)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    #return full solution
+    if return_solution return sol end
+    
+    #convert the full solution (potentials) to spikes
+    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
+    next_call = SpikingCall(train, spk_args, tspan)
+    return next_call
 end
 
 function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
