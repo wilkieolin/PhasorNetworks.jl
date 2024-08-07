@@ -4,7 +4,7 @@ export
 #types
 PhasorDense, 
 PhasorDenseF32,
-PhasorODE,
+PhasorResonant,
 SpikeTrain, 
 MakeSpiking,
 LocalCurrent,

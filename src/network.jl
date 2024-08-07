@@ -1,6 +1,7 @@
 using ComponentArrays, SciMLSensitivity, DifferentialEquations, Lux
 using Random: AbstractRNG
 using Lux: glorot_uniform, truncated_normal
+using LinearAlgebra: I
 
 include("vsa.jl")
 
@@ -152,7 +153,7 @@ function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTupl
 end
 
 function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x.current, params, tspan = x.t_span, spk_args = x.spk_args, return_solution=a.return_solution)    
+    y = v_bundle_project(x.current, params, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)    
     return y, state
 end
 
@@ -162,70 +163,37 @@ function Base.show(io::IO, l::PhasorDenseF32)
 end
 
 ###
-### PhasorODE Layer
+### Layer which resonates with incoming input currents
 ###
-
-struct PhasorODE{M <: Lux.AbstractExplicitLayer, So, Se, T} <: Lux.AbstractExplicitContainerLayer{(:model,)}
-    model::M
-    solver::So
-    sensealg::Se
-    tspan::T
-    spk_args::SpikingArgs
-    dt::Real
-    offset::Real
-    static_bias::Function
-    dense::Bool
+struct PhasorResonant <: Lux.AbstractExplicitLayer
+    shape::Int
+    init_bias_real
+    init_bias_imag
+    return_solution::Bool
 end
 
-function PhasorODE(model::Lux.AbstractExplicitLayer; 
-    solver = Tsit5(),
-    sensealg = InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
-    tspan::Tuple{<:Real, <:Real} = (0.0, 30.0),
-    spk_args::SpikingArgs = SpikingArgs(),
-    dt::Real = 0.1,
-    offset::Real = 0.0,
-    static_bias::Function = x -> ones(ComplexF32, size(x)),
-    dense::Bool = true,)
-
-    return PhasorODE(model, solver, sensealg, tspan, spk_args, dt, offset, static_bias, dense)
+function PhasorResonant(n::Int, return_solution::Bool = true)
+    b_real = () -> zeros(Float32, n)
+    b_imag = () ->  zeros(Float32, n)
+    return PhasorResonant(n, b_real, b_imag, return_solution)
 end
 
-#forward pass
-function (n::PhasorODE)(currents, ps, st)
-    #sample the input & output to determine size of the state
-    i0 = currents(0.0)
-    y0, _ = n.model(i0, ps, st)
-    u0 = zeros(ComplexF32, size(y0))
-    bias = n.static_bias(u0)
+function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
+    params = (bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
+end
 
-    #define the function which updates neurons' potentials
-    function dudt(u, p, t)
-        du_real, _ = n.model(currents(t), p, st)
-        constant = n.spk_args.leakage + 2*pi*im / n.spk_args.t_period
-        du = constant .* u .+ du_real .+ bias_current(bias, t, n.offset, n.spk_args)
-        return du
-    end
+# Calls
 
-    prob = ODEProblem(dudt, u0, n.tspan, ps)
-    if n.dense
-        #save the full solution with interpolation
-        soln = solve(prob, n.solver, 
-            adaptive = false, 
-            dt = n.dt, 
-            saveat = n.tspan[1]:n.dt:n.tspan[2], 
-            sensealg = n.sensealg,
-            save_start = true)
-    else
-        #only save the final output (used with backprop)
-        soln = solve(prob, n.solver, 
-            adaptive = false, 
-            dt = n.dt, 
-            saveat = n.tspan[2], 
-            sensealg = n.sensealg,
-            save_start = false)
-    end
-    
-    return soln, st
+function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    w = I(a.shape)
+    y = v_bundle_project(x.current, w, params.bias_real .+ 1im .* params.bias_imag, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
+    return y
+end
+
+function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
+    w = I(a.shape)
+    y = v_bundle_project(x, w, params.bias_real .+ 1im .* params.bias_imag, return_solution = a.return_solution)
+    return y
 end
 
 """
