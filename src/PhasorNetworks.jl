@@ -4,7 +4,6 @@ export
 #types
 PhasorDense, 
 PhasorDenseF32,
-PhasorResonant,
 SpikeTrain, 
 MakeSpiking,
 LocalCurrent,
@@ -36,6 +35,7 @@ vcat_trains,
 delay_train,
 match_offsets,
 mean_phase,
+phase_memory,
 
 #vsa
 v_bundle,
