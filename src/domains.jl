@@ -61,7 +61,9 @@ function SpikingArgs(; leakage::Real = -0.2,
                     threshold::Real = 0.001,
                     solver = Heun(),
                     solver_args = Dict(:dt => 0.01,
-                                    :adaptive => false,))
+                                    :adaptive => false,
+                                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=true)),
+                                    :save_start => true))
     return SpikingArgs(leakage, t_period, t_window, threshold, solver, solver_args)
 end
 
