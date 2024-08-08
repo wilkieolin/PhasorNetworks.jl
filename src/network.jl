@@ -162,40 +162,6 @@ function Base.show(io::IO, l::PhasorDenseF32)
     print(io, ")")
 end
 
-###
-### Layer which resonates with incoming input currents
-###
-struct PhasorResonant <: Lux.AbstractExplicitLayer
-    shape::Int
-    init_bias_real
-    init_bias_imag
-    return_solution::Bool
-end
-
-function PhasorResonant(n::Int, return_solution::Bool = true)
-    b_real = () -> zeros(Float32, n)
-    b_imag = () ->  zeros(Float32, n)
-    return PhasorResonant(n, b_real, b_imag, return_solution)
-end
-
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
-    params = (bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
-end
-
-# Calls
-
-function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    w = I(a.shape)
-    y = v_bundle_project(x.current, w, params.bias_real .+ 1im .* params.bias_imag, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
-    return y
-end
-
-function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
-    w = I(a.shape)
-    y = v_bundle_project(x, w, params.bias_real .+ 1im .* params.bias_imag, return_solution = a.return_solution)
-    return y
-end
-
 """
 Phasor QKV Attention
 """
