@@ -259,6 +259,25 @@ function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0),
     return sol
 end
 
+function phase_memory(x::LocalCurrent; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
+    k = neuron_constant(spk_args)
+
+    #set up compartments for each sample
+    u0 = zeros(ComplexF32, x.shape)
+    #resonate in time with the input spikes
+    dzdt(u, p, t) = k .* u .+ x.current_fn(t)
+    #solve the memory compartment
+    prob = ODEProblem(dzdt, u0, tspan)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+
+    return sol
+end
+
+function phase_memory(x::CurrentCall)
+    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args)
+end
+
 function vcat_trains(trains::Array{<:SpikeTrain,1})
     check_offsets(trains...)
     n_t = length(trains)
