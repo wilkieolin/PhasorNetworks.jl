@@ -225,7 +225,7 @@ end
 """
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
-function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs, threshold::Bool=false, rng::AbstractRNG = GLOBAL_RNG)
+function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs, threshold::Bool=false)
     current_zero = ones(ComplexF32, (1))
 
     ignore_derivatives() do
@@ -243,8 +243,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                v = rand(rng, Float32) * 2 - 1
-                phase[i] = v
+                phase[i] = NaN
             end
         end
     end
@@ -252,7 +251,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     return phase
 end
 
-function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false, rng::AbstractRNG = GLOBAL_RNG)
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     current_zeros = ones(ComplexF32, (length(ts)))
     dims = collect(1:ndims(potential))
@@ -274,8 +273,7 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                v = rand(rng, Float32) * 2 - 1
-                phase[i] = v
+                phase[i] = NaN
             end
         end
     end
