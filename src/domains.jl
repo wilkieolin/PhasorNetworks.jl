@@ -1,4 +1,5 @@
 using ChainRulesCore: ignore_derivatives
+using Random: GLOBAL_RNG
 
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}
@@ -224,7 +225,7 @@ end
 """
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
-function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs)
+function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs, threshold::Bool=false, rng::AbstractRNG = GLOBAL_RNG)
     current_zero = ones(ComplexF32, (1))
 
     ignore_derivatives() do
@@ -236,9 +237,22 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
 
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+
+    #replace silent neurons with random values
+    ignore_derivatives() do
+        if threshold
+            silent = findall(abs.(potential) .<= spk_args.threshold)
+            for i in silent
+                v = rand(rng, Float32) * 2 - 1
+                phase[i] = v
+            end
+        end
+    end
+
+    return phase
 end
 
-function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0)
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false, rng::AbstractRNG = GLOBAL_RNG)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     current_zeros = ones(ComplexF32, (length(ts)))
     dims = collect(1:ndims(potential))
@@ -250,10 +264,24 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
     #get the arc subtended in the complex plane between that reference and our neuron potentials
     potential = permutedims(potential, reverse(dims))
     arc = angle.(current_zeros) .- angle.(potential) 
-    arc = permutedims(arc, reverse(dims))
+    
 
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+
+    #replace silent neurons with random values
+    ignore_derivatives() do
+        if threshold
+            silent = findall(abs.(potential) .<= spk_args.threshold)
+            for i in silent
+                v = rand(rng, Float32) * 2 - 1
+                phase[i] = v
+            end
+        end
+    end
+
+    phase = permutedims(phase, reverse(dims))
+    return phase
 end
 
 function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
@@ -268,26 +296,26 @@ function solution_to_potential(ode_sol::ODESolution)
     return Array(ode_sol)
 end
 
-function solution_to_phase(sol::ODESolution; final_t::Bool=true, offset::Real=0.0, spk_args::SpikingArgs)
+function solution_to_phase(sol::ODESolution; final_t::Bool=true, offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
     #convert the ODE solution's saved points to an array
     u = solution_to_potential(sol)
     if final_t
         u = u[:,:,end]
-        p = potential_to_phase(u, sol.t[end], offset=offset, spk_args=spk_args)
+        p = potential_to_phase(u, sol.t[end], offset=offset, spk_args=spk_args; kwargs...)
     else
         dim = ndims(u)
         #calculate the phase represented by that potential
-        p = potential_to_phase(u, sol.t, offset=offset, spk_args=spk_args)
+        p = potential_to_phase(u, sol.t, offset=offset, spk_args=spk_args; kwargs...)
     end
 
     return p
 end
 
-function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs)
+function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
     #call the solution at the provided times
     u = solution_to_potential(sol, t)
     #calculate the phase represented by that potential
-    p = potential_to_phase(u, t, offset=offset, spk_args=spk_args)
+    p = potential_to_phase(u, t, offset=offset, spk_args=spk_args; kwargs...)
     return p
 end
 
