@@ -155,7 +155,7 @@ function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs,
 
     u = Array(solution)[:,:,inds]
     t = solution.t[inds]
-    phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args, kwargs...)
+    phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args; kwargs...)
     phase = angular_mean(phase, dims=(3))[:,:,1]
 
     return phase
