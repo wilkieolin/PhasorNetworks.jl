@@ -188,12 +188,12 @@ end
 
 function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x.current, params.weight, params.bias_real .+ 1im .* params.bias_imag, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
-    return y
+    return y, state
 end
 
 function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
     y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution = a.return_solution)
-    return y
+    return y, state
 end
 
 """
