@@ -149,9 +149,15 @@ function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real},
     u0 = zeros(ComplexF32, output_shape)
     #shift the solver span by the function's time offset
     tspan = tspan .+ x.offset
-    dzdt(u, p, t) = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
-    #solve the ODE over the given time span
-    prob = ODEProblem(dzdt, u0, tspan, params)
+    #enable bias if used
+    if haskey(params, :bias_real) && haskey(params, :bias_imag)
+        dzdt(u, p, t) = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
+        prob = ODEProblem(dzdt, u0, tspan, params)
+    else
+        dzdt_nobias(u, p, t) = k .* u + p.weight * x.current_fn(t)
+        prob = ODEProblem(dzdt_nobias, u0, tspan, params)
+    end
+    
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
     #return full solution
     if return_solution return sol end
