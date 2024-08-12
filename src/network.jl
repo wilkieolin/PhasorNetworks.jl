@@ -1,7 +1,7 @@
 using ComponentArrays, SciMLSensitivity, DifferentialEquations, Lux
 using Random: AbstractRNG
 using Lux: glorot_uniform, truncated_normal
-using LinearAlgebra: I
+using LinearAlgebra: diagind
 
 include("vsa.jl")
 
@@ -162,6 +162,40 @@ function Base.show(io::IO, l::PhasorDenseF32)
     print(io, ")")
 end
 
+###
+### Layer which resonates with incoming input currents - mainly with one input and weakly with others
+###
+struct PhasorResonant <: Lux.AbstractExplicitLayer
+    shape::Int
+    init_weight
+    init_bias_real
+    init_bias_imag
+    return_solution::Bool
+end
+
+function PhasorResonant(n::Int, return_solution::Bool = true)
+    init_w = rng -> square_variance(rng, n)
+    b_real = () -> zeros(Float32, n)
+    b_imag = () ->  zeros(Float32, n)
+    return PhasorResonant(n, init_w, b_real, b_imag, return_solution)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
+    params = (weight = layer.init_weight(rng), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
+end
+
+# Calls
+
+function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    y = v_bundle_project(x.current, params.weight, params.bias_real .+ 1im .* params.bias_imag, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
+    return y
+end
+
+function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
+    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution = a.return_solution)
+    return y
+end
+
 """
 Phasor QKV Attention
 """
@@ -249,4 +283,10 @@ function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "a
 
     stddev = sqrt(scale) / 0.87962566103423978
     return truncated_normal(rng, shape..., mean = 0.0, std = stddev)
+end
+
+function square_variance(rng::AbstractRNG, shape::Integer; kwargs...)
+    weights = variance_scaling(rng, shape, shape; kwargs...)
+    weights[diagind(weights)] .= 1.0
+    return weights
 end
