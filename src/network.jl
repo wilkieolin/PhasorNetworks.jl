@@ -168,22 +168,26 @@ end
 struct PhasorResonant <: Lux.AbstractExplicitLayer
     shape::Int
     init_weight
+    init_leakage
+    init_t_period
     return_solution::Bool
 end
 
-function PhasorResonant(n::Int, return_solution::Bool = true)
+function PhasorResonant(n::Int, spk_args::SpikingArgs, return_solution::Bool = true)
     init_w = rng -> square_variance(rng, n)
-    return PhasorResonant(n, init_w, return_solution)
+    init_leakage = () -> [spk_args.leakage,]
+    init_t_period = () -> [spk_args.t_period,]
+    return PhasorResonant(n, init_w, init_leakage, init_t_period, return_solution)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
-    params = (weight = layer.init_weight(rng),)
+    params = (weight = layer.init_weight(rng), leakage = layer.init_leakage(), t_period = layer.init_t_period())
 end
 
 # Calls
 
 function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x.current, params, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
+    y = v_bundle_project(x.current, params, tspan = x.t_span, return_solution = a.return_solution)
     return y, state
 end
 
