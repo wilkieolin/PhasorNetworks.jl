@@ -2,6 +2,8 @@ using DifferentialEquations: ODESolution
 
 include("domains.jl")
 
+PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
+
 function angular_mean(phases::AbstractArray; dims)
     u = exp.(pi * 1im .* phases)
     u_mean = mean(u, dims=dims)
@@ -244,7 +246,15 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
     return new_train
 end
 
-function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function phase_memory(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #solve the memory compartment
+    prob = ODEProblem(dzdt, u0, tspan)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    
+    return sol
+end
+
+function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, nn_fn=:identity)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
 
@@ -252,30 +262,40 @@ function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0),
     u0 = zeros(ComplexF32, x.shape)
     #resonate in time with the input spikes
     dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
-    #solve the memory compartment
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    dzdt_nn(u, p, t) = k .* u .+ spike_current(x, t, spk_args) .+ nn_fn(u)
+
+    #use the common solver call
+    if nn_fn == :identity
+        sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
+    else
+        sol = phase_memory(u0, dzdt_nn, tspan=tspan, spk_args=spk_args)
+    end
 
     return sol
 end
 
-function phase_memory(x::LocalCurrent; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function phase_memory(x::LocalCurrent; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, nn_fn=:identity)
     #set up functions to define the neuron's differential equations
     k = neuron_constant(spk_args)
 
     #set up compartments for each sample
     u0 = zeros(ComplexF32, x.shape)
     #resonate in time with the input spikes
-    dzdt(u, p, t) = k .* u .+ x.current_fn(t)
-    #solve the memory compartment
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
+    dzdt_nn(u, p, t) = k .* u .+ spike_current(x, t, spk_args) .+ nn_fn(u)
+
+    #use the common solver call
+    if nn_fn == :identity
+        sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
+    else
+        sol = phase_memory(u0, dzdt_nn, tspan=tspan, spk_args=spk_args)
+    end
 
     return sol
 end
 
-function phase_memory(x::CurrentCall)
-    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args)
+function phase_memory(x::CurrentCall; nn_fn=:identity)
+    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args, nn_fn=nn_fn)
 end
 
 function vcat_trains(trains::Array{<:SpikeTrain,1})
