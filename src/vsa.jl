@@ -140,7 +140,7 @@ function v_bundle_project(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::Abstra
     return next_call
 end
 
-function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+function v_bundle_project(x::LocalCurrent, params, spk_args::SpikingArgs; tspan::Tuple{<:Real, <:Real}, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     angular_frequency = 2 * pi / spk_args.t_period[1]
     k = (spk_args.leakage[1] + 1im * angular_frequency)
