@@ -153,7 +153,7 @@ function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTupl
 end
 
 function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x.current, params, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)    
+    y = v_bundle_project(x.current, params, x.spk_args, tspan = x.t_span, return_solution = a.return_solution)    
     return y, state
 end
 
