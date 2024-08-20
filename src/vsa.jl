@@ -140,6 +140,42 @@ function v_bundle_project(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::Abstra
     return next_call
 end
 
+function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+    #set up functions to define the neuron's differential equations
+    angular_frequency = 2 * pi / spk_args.t_period[1]
+    k = (spk_args.leakage[1] + 1im * angular_frequency)
+    output_shape = (size(params.weight, 1), x.shape[2])
+    #make the initial potential the bias value
+    u0 = zeros(ComplexF32, output_shape)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ x.offset
+    #enable bias if used
+    if haskey(params, :bias_real) && haskey(params, :bias_imag)
+        function dzdt(u, p, t)
+            du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
+            return du
+        end
+
+        prob = ODEProblem(dzdt, u0, tspan, params)
+    else
+        function dzdt_nobias(u, p, t)
+            du = k .* u + p.weight * x.current_fn(t)
+            return du
+        end
+
+        prob = ODEProblem(dzdt_nobias, u0, tspan, params)
+    end
+    
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    #return full solution
+    if return_solution return sol end
+    
+    #convert the full solution (potentials) to spikes
+    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
+    next_call = SpikingCall(train, spk_args, tspan)
+    return next_call
+end
+
 function v_bundle_project(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     output_shape = (size(params.weight, 1), x.shape[2])
