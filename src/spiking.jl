@@ -172,7 +172,7 @@ function normalize_potential(u::Complex)
     end
 end
 
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0, tspan::Tuple{<:Real, <:Real})
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0, tspan::Tuple{<:Real, <:Real}, repeat::Bool=true)
     shape = size(phases)
     
     function inner(t::Real)
@@ -182,7 +182,10 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
             times = phase_to_time(phases, spk_args = spk_args, offset = offset)
 
             #add currents into the active synapses
-            current_kernel = x -> gaussian_kernel(x, mod(t, spk_args.t_period), spk_args.t_window)
+            if repeat
+                t = mod(t, spk_args.t_period)
+            end
+            current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
             impulses = current_kernel(times)
             output .+= impulses
         end
