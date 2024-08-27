@@ -1,7 +1,7 @@
 using ComponentArrays, SciMLSensitivity, DifferentialEquations, Lux
 using Random: AbstractRNG
 using Lux: glorot_uniform, truncated_normal
-using LinearAlgebra: diagind
+using LinearAlgebra: diagind, I
 
 include("vsa.jl")
 
