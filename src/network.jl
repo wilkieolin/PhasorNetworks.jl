@@ -5,7 +5,7 @@ using LinearAlgebra: diagind
 
 include("vsa.jl")
 
-LuxParams = Union{NamedTuple, ComponentArray}
+LuxParams = Union{NamedTuple, ComponentArray, SubArray}
 
 struct MakeSpiking <: Lux.AbstractExplicitLayer
     spk_args::SpikingArgs
@@ -168,31 +168,47 @@ end
 struct PhasorResonant <: Lux.AbstractExplicitLayer
     shape::Int
     init_weight
-    init_leakage
-    init_t_period
     return_solution::Bool
+    static::Bool
 end
 
-function PhasorResonant(n::Int, spk_args::SpikingArgs, return_solution::Bool = true)
-    init_w = rng -> square_variance(rng, n)
-    init_leakage = () -> [spk_args.leakage,]
-    init_t_period = () -> [spk_args.t_period,]
-    return PhasorResonant(n, init_w, init_leakage, init_t_period, return_solution)
+function PhasorResonant(n::Int, spk_args::SpikingArgs, return_solution::Bool = true, static::Bool = true)
+    if static
+        init_w = () -> Matrix(ones(Float32, 1) .* I(n))
+    else
+        init_w = rng -> square_variance(rng, n)
+    end
+        
+    return PhasorResonant(n, init_w, return_solution, static)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
-    params = (weight = layer.init_weight(rng), leakage = layer.init_leakage(), t_period = layer.init_t_period())
+    if layer.static
+        params = NamedTuple()
+    else
+        params = (weight = layer.init_weight(rng))
+    end
 end
 
 # Calls
 
 function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+    if a.static
+        y = v_bundle_project(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+    else    
+        y = v_bundle_project(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+    end
+
     return y, state
 end
 
 function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
-    y = v_bundle_project(x, params, spk_args = x.spk_args, return_solution = a.return_solution)
+    if a.static
+        y = v_bundle_project(x, a.init_weight(), zeros(ComplexF32, (a.shape)), return_solution = a.return_solution)
+    else
+        y = v_bundle_project(x, params, spk_args = x.spk_args, return_solution = a.return_solution)
+    end
+
     return y, state
 end
 
