@@ -11,19 +11,17 @@ function angular_mean(phases::AbstractArray; dims)
     return phase
 end
 
-function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
+function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     phase = complex_to_angle(bias)
     mag = abs.(bias)
-    return bias_current(phase, mag, t, t_offset, spk_args)
+    return bias_current(phase, mag, t, t_offset, spk_args, sigma=sigma)
 end
 
-function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs; repeat::Bool=true)
+function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
     #what times to the bias values correlate to?
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
-    if repeat
-        t = mod(t, spk_args.t_period)
-    end
+    t = mod(t, spk_args.t_period)
 
     #add the active currents, scaled by the gaussian kernel & bias magnitude
     current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
