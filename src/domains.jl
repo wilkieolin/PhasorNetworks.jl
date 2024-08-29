@@ -47,6 +47,47 @@ function Base.getindex(x::SpikeTrain, inds...)
     return new_train
 end
 
+function increment_indices(indices::Vector{CartesianIndex{N}}, dim::Int, value::Int) where N
+    # Check if the dimension is valid
+    if dim < 1 || dim > N
+        error("Invalid dimension. Must be between 1 and $N.")
+    end
+
+    # Increment the indices along the specified dimension
+    return [CartesianIndex(ntuple(i -> i == dim ? idx[i] + value : idx[i], Val(N))) for idx in indices]
+end
+
+function Base.cat(x::SpikeTrain...; dim)
+    n_trains = length(x)
+
+    inds = x[1].indices |> deepcopy
+    tms = x[1].times |> deepcopy
+    offset = x[1].offset
+    n_dims = length(x[1].shape)
+
+    if n_trains > 1
+        i = 2
+
+        for i in 2:n_trains
+            #calculate how far the indices need to be shifted
+            selected = getindex.(inds, dim)
+            idx_offset = maximum(selected)
+            
+            #offset the indices
+            new_inds = increment_indices(x[i].indices, dim, idx_offset)
+            #append them to the new train
+            append!(inds, new_inds)
+            append!(tms, x[i].times)
+            @assert x[i].offset == offset "Spike trains must have idential offset to concatentate"
+        end
+    end
+
+    shape = Tuple([maximum(getindex.(inds, i)) for i in 1:n_dims])
+
+    #create and return the new train
+    new_train = SpikeTrain(inds, tms, shape, offset)
+end
+
 struct SpikingArgs
     leakage::Real
     t_period::Real
