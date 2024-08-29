@@ -88,6 +88,14 @@ function Base.cat(x::SpikeTrain...; dim)
     new_train = SpikeTrain(inds, tms, shape, offset)
 end
 
+function Base.size(x::SpikeTrain)
+    return x.shape
+end
+
+function Base.size(x::SpikeTrain, d::Int)
+    return x.shape[d]
+end
+
 struct SpikingArgs
     leakage::Real
     t_period::Real
