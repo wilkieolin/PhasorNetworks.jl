@@ -96,6 +96,9 @@ end
 
 function v_bundle_project(x::SpikingCall, w::AbstractMatrix, b::AbstractVecOrMat; return_solution::Bool=false)
     train = v_bundle_project(x.train, w, b, tspan=x.t_span, spk_args=x.spk_args, return_solution = return_solution)
+    if return_solution
+        return train
+    end
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call
 end
