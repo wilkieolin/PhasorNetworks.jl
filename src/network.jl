@@ -4,7 +4,7 @@ using Lux: glorot_uniform, truncated_normal
 using LinearAlgebra: diagind, I
 import LuxLib: dropout
 
-include("vsa.jl")``
+include("vsa.jl")
 
 LuxParams = Union{NamedTuple, ComponentArray, SubArray}
 
@@ -32,15 +32,16 @@ function (a::MakeSpiking)(x::ODESolution, params::LuxParams, state::NamedTuple)
 end
 
 function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims) where {T}
-
     train = x.train
     n_s = length(train.indices)
+
     keep_inds = rand(rng, Float32, (n_s)) .>= p
     new_inds = train.indices[keep_inds]
     new_tms = train.times[keep_inds]
     new_train = SpikeTrain(new_inds, new_tms, train.shape, train.offset)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
-    return new_call
+    
+    return new_call, (), rng
 end
 
 ###
