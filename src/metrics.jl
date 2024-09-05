@@ -5,6 +5,7 @@ using LinearAlgebra: diag
 include("network.jl")
 
 function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
+    truth = 2.0 .* truth .- 1.0
     targets = 0.5 .* truth
     sim = similarity(phases, targets, dim = 1)
     return 1.0 .- sim
