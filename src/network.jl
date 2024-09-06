@@ -40,7 +40,7 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
     new_tms = train.times[keep_inds]
     new_train = SpikeTrain(new_inds, new_tms, train.shape, train.offset)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
-    
+
     return new_call, (), rng
 end
 
@@ -136,17 +136,28 @@ function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::Abs
     return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag), return_solution)
 end
 
-function PhasorDenseF32(W::AbstractMatrix; return_solution::Bool)
-    b_real = ones(Float32, axes(W,1))
+function PhasorDenseF32(W::AbstractMatrix; return_solution::Bool, phase_bias::Bool=true)
+    if phase_bias
+        b_real = ones(Float32, axes(W,1))
+    else
+        b_real = zeros(Float32, axes(W,1))
+    end
     b_imag = zeros(Float32, axes(W,1))
     return PhasorDenseF32(W, b_real, b_imag, return_solution=return_solution)
 end
 
 function PhasorDenseF32((in, out)::Pair{<:Integer, <:Integer};
                 init = variance_scaling,
-                return_solution::Bool = false)
+                return_solution::Bool = false,
+                phase_bias::Bool = true,)
 
-    return PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
+    if phase_bias
+        layer = PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
+    else
+        layer = PhasorDenseF32((in, out), variance_scaling, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
+    end
+
+    return layer
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDenseF32)
