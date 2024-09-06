@@ -144,14 +144,6 @@ struct CurrentCall
     t_span::Tuple{<:Real, <:Real}
 end
 
-function arc_error(phase::Real)
-    return sin(pi * phase)
-end
-
-function arc_error(phases::AbstractArray)
-    return arc_error.(phases)
-end
-
 function angle_to_complex(x::AbstractArray)
     k = convert(ComplexF32, pi * (0.0 + 1.0im))
     return exp.(k .* x)
