@@ -7,6 +7,7 @@ function domain_tests()
     phase_train_test()
     potential_phase_test()
     potential_time_test()
+    cmpx_real_tests()
 end
 
 function phase_time_test()
@@ -43,4 +44,12 @@ function potential_time_test()
     errors = [arc_error.(angle.(u[1]) .- angle.(u[2])) for u in zip(us, us_rec)]
     max_error = maximum(maximum.(errors))
     @test max_error < 1e-6
+end
+
+function cmpx_real_tests()
+    s = rand(ComplexF32, (10, 60))
+    sr = cmpx_to_realvec(s)
+    ss = realvec_to_cmpx(sr)
+    match = reduce(*, ss .== s)
+    @test match
 end

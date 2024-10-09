@@ -156,6 +156,21 @@ function complex_to_angle(x::AbstractArray)
     return angle.(x) ./ pi
 end
 
+function cmpx_to_realvec(u::Array{<:Complex})
+    nd = ndims(u)
+    reals = real.(u)
+    imags = imag.(u)
+    mat = stack((reals, imags), dims=1)
+    return mat
+end
+
+function realvec_to_cmpx(u::Array{<:Real})
+    @assert size(u)[1] == 2 "Must have first dimension contain real and imaginary values"
+    slices = eachslice(u, dims=1)
+    mat = slices[1] .+ 1im .* slices[2]
+    return mat
+end
+
 ###
 ### PHASE - SPIKE
 ###
