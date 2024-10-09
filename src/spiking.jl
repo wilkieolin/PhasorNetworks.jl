@@ -257,42 +257,15 @@ function phase_memory(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:
     return sol
 end
 
-function phase_memory(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, nn_fn=:identity)
-    #set up functions to define the neuron's differential equations
-    k = neuron_constant(spk_args)
+function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+    update_fn = spk_args.update_fn
 
     #set up compartments for each sample
     u0 = zeros(ComplexF32, x.shape)
     #resonate in time with the input spikes
-    dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
-    dzdt_nn(u, p, t) = k .* u .+ spike_current(x, t, spk_args) .+ nn_fn(u)
+    dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
 
-    #use the common solver call
-    if nn_fn == :identity
-        sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
-    else
-        sol = phase_memory(u0, dzdt_nn, tspan=tspan, spk_args=spk_args)
-    end
-
-    return sol
-end
-
-function phase_memory(x::LocalCurrent; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, nn_fn=:identity)
-    #set up functions to define the neuron's differential equations
-    k = neuron_constant(spk_args)
-
-    #set up compartments for each sample
-    u0 = zeros(ComplexF32, x.shape)
-    #resonate in time with the input spikes
-    dzdt(u, p, t) = k .* u .+ spike_current(x, t, spk_args)
-    dzdt_nn(u, p, t) = k .* u .+ spike_current(x, t, spk_args) .+ nn_fn(u)
-
-    #use the common solver call
-    if nn_fn == :identity
-        sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
-    else
-        sol = phase_memory(u0, dzdt_nn, tspan=tspan, spk_args=spk_args)
-    end
+    sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
 end

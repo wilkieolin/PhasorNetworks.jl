@@ -99,6 +99,7 @@ struct SpikingArgs
     threshold::Real
     solver
     solver_args::Dict
+    update_fn::Function
 end
 
 function SpikingArgs(; leakage::Real = -0.2, 
@@ -109,8 +110,10 @@ function SpikingArgs(; leakage::Real = -0.2,
                     solver_args = Dict(:dt => 0.01,
                                     :adaptive => false,
                                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                                    :save_start => true))
-    return SpikingArgs(leakage, t_period, t_window, threshold, solver, solver_args)
+                                    :save_start => true),
+                    update_fn = u -> neuron_constant(-0.2, 1.0) .* u,)
+                    
+    return SpikingArgs(leakage, t_period, t_window, threshold, solver, solver_args, update_fn)
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)
@@ -363,9 +366,14 @@ function period_to_angfreq(t_period::Real)
     return angular_frequency
 end
 
+function neuron_constant(leakage::Real, t_period::Real)
+    angular_frequency = period_to_angfreq(t_period)
+    k = (leakage + 1im * angular_frequency)
+    return k
+end
+
 function neuron_constant(spk_args::SpikingArgs)
-    angular_frequency = period_to_angfreq(spk_args.t_period)
-    k = (spk_args.leakage + 1im * angular_frequency)
+    k = neuron_constant(spk_args.leakage, spk_args.t_period)
     return k
 end
 
