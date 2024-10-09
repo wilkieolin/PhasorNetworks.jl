@@ -26,6 +26,8 @@ phase_to_time,
 potential_to_time,
 time_to_potential,
 arc_error,
+cmpx_to_realvec,
+realvec_to_cmpx,
 
 #spiking
 default_spk_args,
@@ -37,6 +39,7 @@ delay_train,
 match_offsets,
 mean_phase,
 phase_memory,
+neuron_constant,
 
 #vsa
 v_bundle,
