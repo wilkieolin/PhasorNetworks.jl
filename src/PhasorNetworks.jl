@@ -28,6 +28,8 @@ time_to_potential,
 arc_error,
 cmpx_to_realvec,
 realvec_to_cmpx,
+period_to_angfreq,
+angfreq_to_period,
 
 #spiking
 default_spk_args,

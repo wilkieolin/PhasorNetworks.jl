@@ -211,7 +211,8 @@ function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::I
 
     if repeats > 1
         n_t = times |> length
-        offsets = repeat(0:repeats-1, inner=n_t)
+        offsets = repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t)
+        print(offsets)
         times = repeat(times, repeats) .+ offsets
         indices = repeat(indices, repeats)
     end
@@ -379,6 +380,11 @@ end
 function period_to_angfreq(t_period::Real)
     angular_frequency = 2 * pi / t_period
     return angular_frequency
+end
+
+function angfreq_to_period(angfreq::Real)
+    #auto-inverting transform
+    return period_to_angfreq(angfreq)
 end
 
 function neuron_constant(leakage::Real, t_period::Real)
