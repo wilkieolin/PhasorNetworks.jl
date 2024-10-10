@@ -270,8 +270,8 @@ function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:
     return sol
 end
 
-function phase_memory(x::CurrentCall; nn_fn=:identity)
-    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args, nn_fn=nn_fn)
+function phase_memory(x::CurrentCall; )
+    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
 function vcat_trains(trains::Array{<:SpikeTrain,1})

@@ -110,10 +110,15 @@ function SpikingArgs(; leakage::Real = -0.2,
                     solver_args = Dict(:dt => 0.01,
                                     :adaptive => false,
                                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                                    :save_start => true),
-                    update_fn = u -> neuron_constant(-0.2, 1.0) .* u,)
+                                    :save_start => true))
                     
-    return SpikingArgs(leakage, t_period, t_window, threshold, solver, solver_args, update_fn)
+    return SpikingArgs(leakage,
+            t_period,
+            t_window,
+            threshold,
+            solver,
+            solver_args,
+            u -> neuron_constant(leakage, t_period) .* u,)
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)
@@ -212,7 +217,6 @@ function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::I
     if repeats > 1
         n_t = times |> length
         offsets = repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t)
-        print(offsets)
         times = repeat(times, repeats) .+ offsets
         indices = repeat(indices, repeats)
     end
