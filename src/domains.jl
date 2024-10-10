@@ -121,6 +121,26 @@ function SpikingArgs(; leakage::Real = -0.2,
             u -> neuron_constant(leakage, t_period) .* u,)
 end
 
+function SpikingArgs_NN(; leakage::Real = -0.2, 
+    t_period::Real = 1.0,
+    t_window::Real = 0.01,
+    threshold::Real = 0.001,
+    solver = Heun(),
+    solver_args = Dict(:dt => 0.01,
+                    :adaptive => false,
+                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
+                    :save_start => true),
+    update_fn::Function)
+    
+    return SpikingArgs(leakage,
+            t_period,
+            t_window,
+            threshold,
+            solver,
+            solver_args,
+            update_fn)
+end
+
 function Base.show(io::IO, spk_args::SpikingArgs)
     print(io, "Neuron parameters: Period ", spk_args.t_period, " (s)\n")
     print(io, "Current kernel duration: ", spk_args.t_window, " (s)\n")
