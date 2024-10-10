@@ -11,6 +11,7 @@ LocalCurrent,
 SpikingArgs, 
 SpikingCall, 
 CurrentCall,
+SpikingArgs_NN,
 
 #domain conversions
 phase_to_train,
