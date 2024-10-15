@@ -201,6 +201,7 @@ end
 
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
     current = zeros(Float32, train.shape)
+    scale = spk_args.spk_scale
 
     ignore_derivatives() do
         #find which channels are active 
@@ -213,7 +214,7 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
         impulses = current_kernel(active_tms)
         
-        current[active_inds] .+= impulses
+        current[active_inds] .+= (scale .*impulses)
         # TODO - refactor spike train so that partitioning by index is stored
         # and this calculation can be carried out safely in parallel
         # for i in 1:length(impulses)
