@@ -16,7 +16,7 @@ struct MakeSpiking <: Lux.AbstractExplicitLayer
 end
 
 function MakeSpiking(spk_args::SpikingArgs, repeats::Int)
-    return MakeSpiking(spk_args, repeats, (0.0, 1.0 * repeats), 0.0)
+    return MakeSpiking(spk_args, repeats, (0.0, spk_args.t_period * repeats), 0.0)
 end
 
 function (a::MakeSpiking)(x::AbstractArray, params::LuxParams, state::NamedTuple)
