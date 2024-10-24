@@ -50,7 +50,7 @@ function loss_and_accuracy(data_loader, model, ps, st;
     return ls/num, acc/num
 end
 
-function spiking_accuracy(data_loader, model, ps, st, repeats::Int, spk_args::SpikingArgs)
+function spiking_accuracy(data_loader, model, ps, st, repeats::Int)
     acc = []
     n_phases = []
     num = 0
