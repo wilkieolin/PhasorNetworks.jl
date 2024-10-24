@@ -303,7 +303,7 @@ end
 function phase_to_potential(phase::Real, t::Real; offset::Real=0.0, spk_args::SpikingArgs)
     period = spk_args.t_period
     k = 1im * imag(neuron_constant(spk_args))
-    potential = exp.(k .* ((t .- offset) .- (phase - 1)/2))
+    potential = exp.(k .* ((t .- offset) .- (phase - 1)/2 * period))
     return potential
 end
 
