@@ -205,7 +205,7 @@ end
 
 function spiking_accuracy_test(model, ps, st, test_batch)
     @info "Running spiking accuracy test..."
-    acc = spiking_accuracy(test_batch, model, ps, st, repeats, spk_args)
+    acc = spiking_accuracy(test_batch, model, ps, st, repeats)
     #make sure accuracy is above the baseline (~70% for spiking)
     acc_check = acc[end-1] > 0.70
     @test acc_check
