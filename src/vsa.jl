@@ -209,6 +209,13 @@ function random_symbols(size::Tuple{Vararg{Int}}, rng::AbstractRNG)
     return y
 end
 
+function remap_phase(x::Real)
+    x = x + 1
+    x = mod(x, 2.0)
+    x = x - 1
+    return x
+end
+
 function remap_phase(x::AbstractArray)
     x = x .+ 1
     x = mod.(x, 2.0)
