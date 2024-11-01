@@ -1,5 +1,6 @@
 using ChainRulesCore: ignore_derivatives
 using Random: GLOBAL_RNG
+using CUDA
 
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}
@@ -7,6 +8,18 @@ struct SpikeTrain
     shape::Tuple
     offset::Real
 end
+
+struct SpikeTrainGPU
+    indices::CuArray
+    times::CuArray{<:Real}
+    shape::Tuple
+    offset::Real
+
+    function SpikeTrainGPU(st::SpikeTrain)
+        return new(cu(st.indices), cu(st.times), st.shape, st.offset)
+    end
+end
+
 
 function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
@@ -154,7 +167,7 @@ end
 
 
 struct SpikingCall
-    train::SpikeTrain
+    train::Union{SpikeTrain, SpikeTrainGPU}
     spk_args::SpikingArgs
     t_span::Tuple{<:Real, <:Real}
 end
