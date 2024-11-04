@@ -1,6 +1,6 @@
 using DifferentialEquations: ODESolution
 
-include("domains.jl")
+include("gpu.jl")
 
 PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
 

@@ -19,8 +19,8 @@ struct SpikeTrainGPU
 
     function SpikeTrainGPU(st::SpikeTrain)
         return new(cu(st.indices), 
-                cu(st.times),
                 CuArray(LinearIndices(st.indices)),
+                cu(st.times),
                 st.shape,
                 reduce(*, st.shape),
                 st.offset)
