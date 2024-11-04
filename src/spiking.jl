@@ -52,7 +52,7 @@ function count_nans(phases::Array{<:Real,3})
     return mapslices(x->sum(isnan.(x)), phases, dims=(2,3)) |> vec
 end
 
-function delay_train(train::SpikeTrain, t::Real, offset::Real)
+function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
     new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
     return new_train
@@ -138,7 +138,7 @@ end
 """
 Delay the spike trains in a vector as necessary to make their offsets match
 """
-function match_offsets(x::Vector{<:SpikeTrain})
+function match_offsets(x::Vector{<:SpikingTypes})
     offsets = getfield.(x, :offset)
     final = maximum(offsets)
     dt = final .- offsets
@@ -220,6 +220,21 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         # for i in 1:length(impulses)
         #     current[active_inds[i]] += impulses[i]
         # end
+    end
+
+    return current
+end
+
+function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
+    current = zeros(Float32, train.shape)
+    scale = spk_args.spk_scale
+
+    ignore_derivatives() do
+        #add currents into the synapses
+        current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+        impulses = current_kernel(train.times)
+        
+        current[train.indices] .+= (scale .*impulses)
     end
 
     return current
