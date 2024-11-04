@@ -11,15 +11,39 @@ end
 
 struct SpikeTrainGPU
     indices::CuArray
+    linear_indices::CuArray
     times::CuArray{<:Real}
     shape::Tuple
+    linear_shape::Int
     offset::Real
 
     function SpikeTrainGPU(st::SpikeTrain)
-        return new(cu(st.indices), cu(st.times), st.shape, st.offset)
+        return new(cu(st.indices), 
+                cu(st.times),
+                CuArray(LinearIndices(st.indices)),
+                st.shape,
+                reduce(*, st.shape),
+                st.offset)
     end
 end
 
+function SpikeTrain(stg::SpikeTrainGPU)
+    st = SpikeTrain(Array(stg.indices),
+                    Array(stg.times),
+                    stg.shape,
+                    stg.offset)
+    return st
+end
+
+function Base.convert(::Type{SpikeTrain}, stg::SpikeTrainGPU)
+    return SpikeTrain(stg)
+end
+
+function Base.convert(::Type{SpikeTrainGPU}, st::SpikeTrain)
+    return SpikeTrainGPU(st)
+end
+
+SpikingTypes = Union{SpikeTrain, SpikeTrainGPU}
 
 function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
@@ -167,7 +191,7 @@ end
 
 
 struct SpikingCall
-    train::Union{SpikeTrain, SpikeTrainGPU}
+    train::SpikingTypes
     spk_args::SpikingArgs
     t_span::Tuple{<:Real, <:Real}
 end
