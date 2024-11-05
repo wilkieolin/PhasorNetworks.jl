@@ -140,13 +140,13 @@ struct SpikingArgs
     update_fn::Function
 end
 
-function SpikingArgs(; leakage::Real = -0.2, 
-                    t_period::Real = 1.0,
-                    t_window::Real = 0.01,
-                    spk_scale::Real = 1.0,
-                    threshold::Real = 0.001,
+function SpikingArgs(; leakage::Real = -0.2f0, 
+                    t_period::Real = 1.0f0,
+                    t_window::Real = 0.01f0,
+                    spk_scale::Real = 1.0f0,
+                    threshold::Real = 0.001f0,
                     solver = Heun(),
-                    solver_args = Dict(:dt => 0.01,
+                    solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
                                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                                     :save_start => true))
