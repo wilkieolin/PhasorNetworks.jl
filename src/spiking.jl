@@ -226,17 +226,14 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
 end
 
 function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
-    current = zeros(Float32, train.shape)
     scale = spk_args.spk_scale
 
-    ignore_derivatives() do
-        #add currents into the synapses
-        current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-        impulses = current_kernel(train.times)
-        
-        current[train.indices] .+= (scale .*impulses)
-    end
-
+    #add currents into the synapses
+    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+    impulses = current_kernel(train.times)
+    current = parallel_scatter_add(train.linear_indices, impulses, train.linear_shape)
+    current = reshape(current, train.shape)
+    
     return current
 end
 
@@ -288,6 +285,21 @@ function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:
     dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
 
     sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    return sol
+end
+
+function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+    update_fn = spk_args.update_fn
+
+    #set up compartments for each sample
+    u0 = zeros(ComplexF32, x.shape)
+    #resonate in time with the input spikes
+    function dzdt!(du, u, p, t)
+        du = update_fn(u) .+ spike_current(x, t, spk_args)
+    end
+
+    sol = phase_memory(u0, dzdt!, tspan=tspan, spk_args=spk_args)
 
     return sol
 end
