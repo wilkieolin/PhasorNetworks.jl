@@ -3,7 +3,6 @@ module PhasorNetworks
 export 
 #types
 PhasorDense, 
-PhasorDenseF32,
 PhasorResonant,
 SpikeTrain, 
 SpikeTrainGPU,

@@ -47,66 +47,7 @@ end
 ###
 ### Phasor Dense definitions
 ###
-
 struct PhasorDense <: Lux.AbstractExplicitLayer
-    shape::Tuple{<:Int, <:Int}
-    in_dims::Int
-    out_dims::Int
-    init_weight
-    init_bias
-
-    PhasorDense(shape, init_weight, init_bias) = new(shape, shape[1], shape[2], init_weight, init_bias)
-end
-
-## Constructors
-
-#instantiate a layer from a passed weight and bias
-function PhasorDense(W::AbstractMatrix, b::AbstractVecOrMat)
-    return PhasorDense(size(W), () -> copy(W), () -> copy(b))
-end
-
-function PhasorDense(W::AbstractMatrix)
-    b = ones(ComplexF32, axes(W,1))
-    return PhasorDense(W, b)
-end
-
-#setup the layer with a shape and initializers
-function PhasorDense((in, out)::Pair{<:Integer, <:Integer};
-                init = variance_scaling)
-
-    return PhasorDense((in, out), variance_scaling, () -> ones(ComplexF32, out))
-end
-
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDense)
-    params = (weight = layer.init_weight(rng, layer.out_dims, layer.in_dims), bias = layer.init_bias())
-end
-
-# Calls
-
-function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x, params.weight, params.bias)
-    return y, state
-end
-
-function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = v_bundle_project(x, params.weight, params.bias, return_solution=return_solution)
-    return y, state
-end
-
-function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple; return_solution::Bool=false)
-    y = v_bundle_project(x.current, params.weight, params.bias, x.t_span, x.spk_args, return_solution=return_solution)
-    return y, state
-end
-
-function Base.show(io::IO, l::PhasorDense)
-    print(io, "PhasorDense(", l.shape)
-    print(io, ")")
-end
-
-###
-### Same as PhasorDense, but made with F32 parameters so ComponentArrays doesn't get confused and lead to the gradients getting mixed up
-###
-struct PhasorDenseF32 <: Lux.AbstractExplicitLayer
     shape::Tuple{<:Int, <:Int}
     in_dims::Int
     out_dims::Int
@@ -115,7 +56,7 @@ struct PhasorDenseF32 <: Lux.AbstractExplicitLayer
     init_bias_imag
     return_solution::Bool
 
-    PhasorDenseF32(shape, 
+    PhasorDense(shape, 
                     init_weight, 
                     init_bias_real, 
                     init_bias_imag,
@@ -132,57 +73,57 @@ end
 
 ## Constructors
 
-function PhasorDenseF32(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat; return_solution=false)
-    return PhasorDenseF32(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag), return_solution)
+function PhasorDense(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat; return_solution=false)
+    return PhasorDense(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag), return_solution)
 end
 
-function PhasorDenseF32(W::AbstractMatrix; return_solution::Bool, phase_bias::Bool=true)
+function PhasorDense(W::AbstractMatrix; return_solution::Bool, phase_bias::Bool=true)
     if phase_bias
         b_real = ones(Float32, axes(W,1))
     else
         b_real = zeros(Float32, axes(W,1))
     end
     b_imag = zeros(Float32, axes(W,1))
-    return PhasorDenseF32(W, b_real, b_imag, return_solution=return_solution)
+    return PhasorDense(W, b_real, b_imag, return_solution=return_solution)
 end
 
-function PhasorDenseF32((in, out)::Pair{<:Integer, <:Integer};
+function PhasorDense((in, out)::Pair{<:Integer, <:Integer};
                 init = variance_scaling,
                 return_solution::Bool = false,
                 phase_bias::Bool = true,)
 
     if phase_bias
-        layer = PhasorDenseF32((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
+        layer = PhasorDense((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
     else
-        layer = PhasorDenseF32((in, out), variance_scaling, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
+        layer = PhasorDense((in, out), variance_scaling, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
     end
 
     return layer
 end
 
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDenseF32)
+function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDense)
     params = (weight = layer.init_weight(rng, layer.out_dims, layer.in_dims), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
 end
 
 # Calls
 
-function (a::PhasorDenseF32)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
+function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag)
     return y, state
 end
 
-function (a::PhasorDenseF32)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution=a.return_solution)
     return y, state
 end
 
-function (a::PhasorDenseF32)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x.current, params, tspan = x.t_span, spk_args = x.spk_args, return_solution = a.return_solution)
     return y, state
 end
 
-function Base.show(io::IO, l::PhasorDenseF32)
-    print(io, "PhasorDenseF32(", l.shape)
+function Base.show(io::IO, l::PhasorDense)
+    print(io, "PhasorDense(", l.shape)
     print(io, ")")
 end
 
