@@ -49,24 +49,23 @@ function getdata(args)
 end
 
 function build_mlp(args)
-    phasor_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), x -> x, PhasorDense(2 => 128), PhasorDense(128 => 2))
+    phasor_model = Chain(LayerNorm((2,)), 
+                x -> tanh_fast.(x), 
+                x -> x, 
+                PhasorDense(2 => 128), 
+                x -> x,
+                PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
 
 function build_spiking_mlp(args, spk_args)
-    spk_model = Chain(LayerNorm((2,)), x -> tanh_fast.(x), MakeSpiking(spk_args, repeats), PhasorDense(2 => 128), PhasorDense(128 => 2))
-    ps, st = Lux.setup(args.rng, spk_model)
-    return spk_model, ps, st
-end
-
-function build_mlp_f32(args)
     phasor_model = Chain(LayerNorm((2,)), 
                 x -> tanh_fast.(x), 
-                x -> x, 
-                PhasorDenseF32(2 => 128), 
+                MakeSpiking(spk_args, repeats), 
+                PhasorDense(2 => 128), 
                 x -> x,
-                PhasorDenseF32(128 => 2))
+                PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
@@ -75,22 +74,11 @@ function build_ode_mlp(args, spk_args)
     ode_model = Chain(LayerNorm((2,)),
                 x -> tanh_fast.(x),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0, 10.0)),
-                PhasorDenseF32(2 => 128, return_solution=true),
+                PhasorDense(2 => 128, return_solution=true),
                 x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0),
-                PhasorDenseF32(128 => 2))
+                PhasorDense(128 => 2))
     ps, st = Lux.setup(args.rng, ode_model)
     return ode_model, ps, st
-end
-
-function build_spiking_mlp_f32(args, spk_args)
-    spk_model = Chain(LayerNorm((2,)), 
-                    x -> tanh_fast.(x), 
-                    MakeSpiking(spk_args, repeats), 
-                    PhasorDenseF32(2 => 128), 
-                    x -> x,
-                    PhasorDenseF32(128 => 2))
-    ps, st = Lux.setup(args.rng, spk_model)
-    return spk_model, ps, st
 end
 
 function ode_correlation(model, ode_model, ps, st, x, y)
