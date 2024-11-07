@@ -10,11 +10,6 @@ function threads_blks(l::Int, threads::Int = N_THREADS)
     return threads, blocks
 end
 
-function gaussian_kernel_gpu(x::Real, t::Real, t_sigma::Real)
-    i = exp(-1 * ((t - x) / (2 * t_sigma))^2)
-    return i
-end
-
 function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     i = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
     return i
@@ -31,9 +26,10 @@ function scatter_add_kernel!(output, values, indices)
 end
 
 function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_size::Int) where T
+    @assert length(indices) == length(values) "Length of indices and values must match"
+    
     output = CUDA.zeros(T, output_size)
-    threads = 256
-    blocks = cld(length(indices), threads)
+    threads, blocks = threads_blks(length(indices))
     
     @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
     
@@ -66,10 +62,11 @@ end
 
 #Spiking
 
-function parallel_current(stg::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
-    currents = gaussian_kernel_gpu.(stg.times, t, spk_args.t_window)
-    currents = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
-    return currents
+function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
+    currents = gaussian_kernel_gpu.(stg.times, t, Float32(spk_args.t_window))
+    output = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
+
+    return output
 end
 
 function spike_current(train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
@@ -88,7 +85,7 @@ function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.
     
     #resonate in time with the input spikes
     function dzdt!(du, u, p, t)
-        du .= spk_args.update_fn(u) .+ spike_current(stg, t, spk_args)
+        du .= spk_args.update_fn(u) .+ spike_current(x, t, spk_args)
         return nothing
     end
     
