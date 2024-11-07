@@ -338,9 +338,9 @@ function phase_to_potential(phase::AbstractArray, ts::AbstractVector; offset::Re
 end
 
 function phase_to_potential(phase::Real, t::Real; offset::Real=0.0, spk_args::SpikingArgs)
-    period = spk_args.t_period
-    k = 1im * imag(neuron_constant(spk_args))
-    potential = exp.(k .* ((t .- offset) .- (phase - 1)/2 * period))
+    period = Float32(spk_args.t_period)
+    k = ComplexF32(1im * imag(neuron_constant(spk_args)))
+    potential = ComplexF32(exp.(k .* ((t .- offset) .- (phase - 1.0f0)/2.0f0 * period)))
     return potential
 end
 
@@ -352,7 +352,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
-        current_zero = phase_to_potential(0.0, t, offset=offset, spk_args=spk_args)
+        current_zero = phase_to_potential(0.0f0, t, offset=offset, spk_args=spk_args)
     end
     #get the arc subtended in the complex plane between that reference and our neuron potentials
     arc = angle(current_zero) .- angle.(potential) 
@@ -360,7 +360,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
 
-    #replace silent neurons with random values
+    #replace silent neurons with NaN values
     ignore_derivatives() do
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
@@ -380,7 +380,7 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
-        current_zeros = phase_to_potential.(0.0, ts, offset=offset, spk_args=spk_args)
+        current_zeros = phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args)
     end
     #get the arc subtended in the complex plane between that reference and our neuron potentials
     potential = permutedims(potential, reverse(dims))
@@ -416,14 +416,13 @@ function solution_to_potential(ode_sol::ODESolution)
     return Array(ode_sol)
 end
 
-function solution_to_phase(sol::ODESolution; final_t::Bool=true, offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
+function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
     #convert the ODE solution's saved points to an array
     u = solution_to_potential(sol)
     if final_t
         u = u[:,:,end]
         p = potential_to_phase(u, sol.t[end], offset=offset, spk_args=spk_args; kwargs...)
     else
-        dim = ndims(u)
         #calculate the phase represented by that potential
         p = potential_to_phase(u, sol.t, offset=offset, spk_args=spk_args; kwargs...)
     end
