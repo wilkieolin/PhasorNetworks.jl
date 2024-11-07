@@ -289,21 +289,6 @@ function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:
     return sol
 end
 
-function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
-    update_fn = spk_args.update_fn
-
-    #set up compartments for each sample
-    u0 = zeros(ComplexF32, x.shape)
-    #resonate in time with the input spikes
-    function dzdt!(du, u, p, t)
-        du = update_fn(u) .+ spike_current(x, t, spk_args)
-    end
-
-    sol = phase_memory(u0, dzdt!, tspan=tspan, spk_args=spk_args)
-
-    return sol
-end
-
 function phase_memory(x::CurrentCall; )
     return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args,)
 end
