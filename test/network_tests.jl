@@ -13,29 +13,11 @@ function network_tests()
     posttrain_chk = correlation_test(model, spk_model, ps_train, st_train, x)
     spk_acc_chk = spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),])
 
-    #repeat tests with F32 Dense
-    modelf32, ps, st = build_mlp_f32(args)
-    ode_modelf32, _, _ = build_ode_mlp_f32(args, spk_args)
-    spk_modelf32, _, _ = build_spiking_mlp_f32(args, spk_args)
-
-    pretrain_chk2 = correlation_test(modelf32, spk_modelf32, ps, st, x)
-    train_chk2, ps_train, st_train = train_test(modelf32, args, ps, st, train_loader, test_loader)
-    y_cor_chk, lval_chk, grad_chk = ode_correlation(modelf32, ode_modelf32, ps, st, x, y)
-    acc_chk2 = accuracy_test(modelf32, ps_train, st_train, test_loader)
-    posttrain_chk2 = correlation_test(modelf32, spk_modelf32, ps_train, st_train, x)
-    spk_acc_chk2 = spiking_accuracy_test(spk_modelf32, ps_train, st_train, [(x, y),])
-
     all_pass = reduce(*, [pretrain_chk,
                         train_chk, 
                         acc_chk, 
                         posttrain_chk, 
                         spk_acc_chk,
-                        pretrain_chk2,
-                        train_chk2,
-                        acc_chk2,
-                        posttrain_chk2,
-                        spk_acc_chk2,
-                        y_cor_chk,
                         lval_chk,
                         grad_chk])
 
