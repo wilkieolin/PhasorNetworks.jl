@@ -6,12 +6,14 @@ function network_tests()
 
     model, ps, st = build_mlp(args)
     spk_model, _, _ = build_spiking_mlp(args, spk_args)
+    ode_model, _, _ = build_ode_mlp(args, spk_args)
 
     pretrain_chk = correlation_test(model, spk_model, ps, st, x)
     train_chk, ps_train, st_train = train_test(model, args, ps, st, train_loader, test_loader)
     acc_chk = accuracy_test(model, ps_train, st_train, test_loader)
     posttrain_chk = correlation_test(model, spk_model, ps_train, st_train, x)
     spk_acc_chk = spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),])
+    y_cor_chk, lval_chk, grad_chk = ode_correlation(model, ode_model, ps, st, x, y)
 
     all_pass = reduce(*, [pretrain_chk,
                         train_chk, 
@@ -69,7 +71,7 @@ function build_mlp_f32(args)
     return phasor_model, ps, st
 end
 
-function build_ode_mlp_f32(args, spk_args)
+function build_ode_mlp(args, spk_args)
     ode_model = Chain(LayerNorm((2,)),
                 x -> tanh_fast.(x),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0, 10.0)),
