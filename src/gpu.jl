@@ -77,6 +77,23 @@ function spike_current(train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     return current
 end
 
+function bias_current(bias::CuArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
+    phase = complex_to_angle(bias)
+    mag = abs.(bias)
+    return bias_current(phase, mag, t, t_offset, spk_args)
+end
+
+function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
+    #what times to the bias values correlate to?
+    times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
+    #determine the time within the cycle
+    t = mod(t, spk_args.t_period)
+    #add the active currents, scaled by the gaussian kernel & bias magnitude
+    bias = mag .* gaussian_kernel_gpu.(t, times, Float32(spk_args.t_window))
+
+    return bias
+end
+
 function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
@@ -94,4 +111,29 @@ function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.
     #sol = solve(prob, spk_args.solver; spk_args.solver_args...)
 
     return sol
+end
+
+#VSA
+
+function v_bundle_project(x::SpikeTrainGPU, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    #get the number of batches & output neurons
+    output_shape = (size(w, 1), x.shape[2])
+    u0 = CUDA.zeros(ComplexF32, output_shape)
+
+    function dzdt!(du, u, p, t)
+        du .= update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+        return nothing
+    end
+
+    #solve the ODE over the given time span
+    prob = ODEProblem(dzdt!, u0, tspan)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    #return full solution
+    if return_solution return sol end
+
+    #convert the full solution (potentials) to spikes
+    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
+    return train
 end

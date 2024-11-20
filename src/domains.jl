@@ -15,7 +15,7 @@ struct SpikeTrainGPU
     times::CuArray{<:Real}
     shape::Tuple
     linear_shape::Int
-    offset::Real
+    offset::Float32
 
     function SpikeTrainGPU(st::SpikeTrain)
         return new(cu(st.indices), 
@@ -220,7 +220,7 @@ function angle_to_complex(x::AbstractArray)
 end
 
 function complex_to_angle(x::AbstractArray)
-    return angle.(x) ./ pi
+    return angle.(x) ./ convert(Float32,pi)
 end
 
 function cmpx_to_realvec(u::Array{<:Complex})
@@ -247,13 +247,13 @@ Converts a matrix of phases into a spike train via phase encoding
 
 phase_to_train(phases::AbstractMatrix, spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
 """
-function phase_to_time(phases::AbstractArray; offset::Real = 0.0, spk_args::SpikingArgs)
+function phase_to_time(phases::AbstractArray; offset::Real = 0.0f0, spk_args::SpikingArgs)
     return phase_to_time(phases, spk_args.t_period, offset)
 end
 
-function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0)
+function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0f0)
     #convert a potential to the time at which the voltage is maximum - 90* behind phase
-    phases = (phases ./ 2.0) .+ 0.5
+    phases = (phases ./ 2.0f0) .+ 0.5f0
     times = phases .* period .+ offset
     #make all times positive
     times = mod.(times, period)
@@ -267,7 +267,7 @@ end
 
 function time_to_phase(times::AbstractArray, period::Real, offset::Real)
     times = mod.((times .- offset), period) ./ period
-    phase = (times .- 0.5) .* 2.0
+    phase = (times .- 0.5f0) .* 2.0f0
     return phase
 end
 
@@ -454,7 +454,7 @@ end
 
 function neuron_constant(leakage::Real, t_period::Real)
     angular_frequency = period_to_angfreq(t_period)
-    k = (leakage + 1im * angular_frequency)
+    k = ComplexF32(leakage + 1im * angular_frequency)
     return k
 end
 
