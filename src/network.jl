@@ -8,7 +8,7 @@ include("vsa.jl")
 
 LuxParams = Union{NamedTuple, ComponentArray, SubArray}
 
-struct MakeSpiking <: Lux.AbstractExplicitLayer
+struct MakeSpiking <: Lux.AbstractLuxLayer
     spk_args::SpikingArgs
     repeats::Int
     tspan::Tuple{<:Real, <:Real}
@@ -47,7 +47,7 @@ end
 ###
 ### Phasor Dense definitions
 ###
-struct PhasorDense <: Lux.AbstractExplicitLayer
+struct PhasorDense <: Lux.AbstractLuxLayer
     shape::Tuple{<:Int, <:Int}
     in_dims::Int
     out_dims::Int
@@ -130,7 +130,7 @@ end
 ###
 ### Layer which resonates with incoming input currents - mainly with one input and weakly with others
 ###
-struct PhasorResonant <: Lux.AbstractExplicitLayer
+struct PhasorResonant <: Lux.AbstractLuxLayer
     shape::Int
     init_weight
     return_solution::Bool
@@ -209,7 +209,7 @@ function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; tspan::Tuple{<:Real
     return output
 end
 
-struct PhasorAttention{M<:AbstractArray, B} <: Lux.AbstractExplicitLayer
+struct PhasorAttention{M<:AbstractArray, B} <: Lux.AbstractLuxLayer
     shape::Tuple{<:Int, <:Int}
     in_dims::Int
     out_dims::Int
@@ -233,7 +233,7 @@ end
 """
 Phasor Self-Attention Module
 """
-struct PhasorSA{M<:AbstractArray, B} <: Lux.AbstractExplicitLayer
+struct PhasorSA{M<:AbstractArray, B} <: Lux.AbstractLuxLayer
     shape::Tuple{<:Int, <:Int}
     n_heads::Int
     in_dims::Int
