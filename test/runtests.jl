@@ -2,7 +2,6 @@ using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
-using LuxDeviceUtils: cpu_device, gpu_device
 using Optimisers, ComponentArrays
 using Statistics: mean
 using LinearAlgebra: diag
