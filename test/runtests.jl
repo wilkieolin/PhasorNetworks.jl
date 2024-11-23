@@ -1,4 +1,5 @@
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test
+using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test, LuxCUDA
+using DifferentialEquations, SciMLSensitivity
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
@@ -7,7 +8,6 @@ using Statistics: mean
 using LinearAlgebra: diag
 using Distributions: Normal
 using DifferentialEquations: Heun, Tsit5
-
 #global args for all tests
 n_x = 101
 n_y = 101
@@ -15,7 +15,12 @@ n_vsa = 1
 epsilon = 0.10
 repeats = 10
 epsilon = 0.025
-solver_args = Dict(:adaptive => false, :dt => 0.01)
+#solver_args = Dict(:adaptive => false, :dt => 0.01)
+solver_args = Dict(:adaptive => false, 
+                    :dt => 0.01,
+                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
+                    :save_start => true)
+
 spk_args = SpikingArgs(t_window = 0.01, 
                     threshold = 0.001,
                     solver=Tsit5(), 
