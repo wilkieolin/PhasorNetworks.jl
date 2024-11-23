@@ -17,14 +17,26 @@ struct SpikeTrainGPU
     linear_shape::Int
     offset::Float32
 
-    function SpikeTrainGPU(st::SpikeTrain)
-        return new(cu(st.indices), 
-                CuArray(LinearIndices(st.indices)),
-                cu(st.times),
-                st.shape,
-                reduce(*, st.shape),
-                st.offset)
+    function SpikeTrainGPU(indices::AbstractArray,
+                            times::AbstractArray,
+                            shape::Tuple,
+                            offset::Real)
+        return new(cu(indices), 
+                CuArray(LinearIndices(indices)),
+                cu(times),
+                shape,
+                reduce(*, shape),
+                Float32(offset))
     end
+end
+
+function SpikeTrainGPU(st::SpikeTrain)
+    return SpikeTrain(cu(st.indices), 
+            CuArray(LinearIndices(st.indices)),
+            cu(st.times),
+            st.shape,
+            reduce(*, st.shape),
+            st.offset)
 end
 
 function SpikeTrain(stg::SpikeTrainGPU)

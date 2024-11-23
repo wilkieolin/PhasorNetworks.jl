@@ -60,6 +60,22 @@ function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::Sp
     return phase
 end
 
+function phase_to_train(phases::CuArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
+    shape = phases |> size
+    indices = collect(CartesianIndices(shape)) |> vec
+    times = phase_to_time(phases, spk_args=spk_args, offset=offset) |> vec
+
+    if repeats > 1
+        n_t = times |> length
+        offsets = cu(repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t))
+        times = repeat(times, repeats) .+ offsets
+        indices = repeat(indices, repeats)
+    end
+
+    train = SpikeTrainGPU(indices, times, shape, offset)
+    return train
+end
+
 #Spiking
 
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
