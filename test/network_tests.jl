@@ -37,7 +37,10 @@ function bullseye_data(n_s::Int, rng::AbstractRNG)
     x_x = r .* cos.(phi)
     x_y = r .* sin.(phi)
 
-    return cat(x_x, x_y, dims=2)', onehotbatch(y, 0:1)
+    data = Float32.(cat(x_x, x_y, dims=2)' )
+    labels = Float32.(onehotbatch(y, 0:1))
+
+    return data, labels
 end
 
 function getdata(args)
