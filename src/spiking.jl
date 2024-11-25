@@ -268,7 +268,7 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
     return new_train
 end
 
-function phase_memory(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     #solve the memory compartment
     prob = ODEProblem(dzdt, u0, tspan)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
@@ -276,7 +276,7 @@ function phase_memory(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:
     return sol
 end
 
-function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function oscillator_bank(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
@@ -284,16 +284,16 @@ function phase_memory(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:
     #resonate in time with the input spikes
     dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
 
-    sol = phase_memory(u0, dzdt, tspan=tspan, spk_args=spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
 end
 
-function phase_memory(x::CurrentCall; )
-    return phase_memory(x.current, tspan=x.t_span, spk_args=x.spk_args,)
+function oscillator_bank(x::CurrentCall; )
+    return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
-function vcat_trains(trains::Array{<:SpikeTrain,1})
+function vcat_trains(trains::Array{<:SpikingTypes,1})
     check_offsets(trains...)
     n_t = length(trains)
     shape = trains[1].shape
