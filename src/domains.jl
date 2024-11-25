@@ -22,7 +22,7 @@ struct SpikeTrainGPU
                             shape::Tuple,
                             offset::Real)
         return new(cu(indices), 
-                CuArray(LinearIndices(indices)),
+                CuArray(LinearIndices(shape)[indices]),
                 cu(times),
                 shape,
                 reduce(*, shape),
