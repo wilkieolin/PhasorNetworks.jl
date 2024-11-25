@@ -276,7 +276,7 @@ function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real,
     return sol
 end
 
-function oscillator_bank(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
@@ -289,8 +289,101 @@ function oscillator_bank(x::Union{SpikeTrain,LocalCurrent}; tspan::Tuple{<:Real,
     return sol
 end
 
+function oscillator_bank(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    #get the number of batches & output neurons
+    output_shape = (size(w, 1), x.shape[2])
+    u0 = zeros(ComplexF32, output_shape)
+
+    #solve the ODE over the given time span
+    dzdt(u, p, t) = update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    #return full solution
+    return sol
+end
+
 function oscillator_bank(x::CurrentCall; )
     return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args,)
+end
+
+function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    #make the initial potential the bias value
+    u0 = zeros(ComplexF32, x.shape)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ x.offset
+
+    #solve the ODE over the given time span
+    dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    return sol
+end
+
+function oscillator_bank(x::CurrentCall, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1})
+    return oscillator_bank(x.current, w, b, tspan=x.t_span, spk_args=x.spk_args,)
+end
+
+function oscillator_bank(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1}; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    output_shape = (size(w, 1), x.shape[2])
+    #make the initial potential the bias value
+    u0 = zeros(ComplexF32, output_shape)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ x.offset
+
+    #solve the ODE over the given time span
+    dzdt(u, p, t) = update_fn(u) + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    return sol
+end
+
+#special version used for ODE layers
+function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+    #set up functions to define the neuron's differential equations
+    output_shape = (size(params.weight, 1), x.shape[2])
+    #make the initial potential the bias value
+    u0 = zeros(ComplexF32, output_shape)
+    #shift the solver span by the function's time offset
+    tspan = tspan .+ x.offset
+    
+    #override spk args with params leakage and frequency if provided
+    function calc_k(p)
+        if haskey(p, :leakage) && haskey(p, :t_period)
+            angular_frequency = 2 * pi / p.t_period[1]
+            k = (p.leakage[1] + 1im * angular_frequency)
+        else
+            k = neuron_constant(spk_args)
+        end
+        return k
+    end
+    
+    function dzdt(u, p, t)
+        k = calc_k(p)
+        du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
+        return du
+    end
+
+    function dzdt_nobias(u, p, t)
+        k = calc_k(p)
+        du = k .* u + p.weight * x.current_fn(t)
+        return du
+    end
+    
+    #enable bias if used
+    if haskey(params, :bias_real) && haskey(params, :bias_imag)
+        prob = ODEProblem(dzdt, u0, tspan, params)
+    else
+        prob = ODEProblem(dzdt_nobias, u0, tspan, params)
+    end
+    
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    return sol
 end
 
 function vcat_trains(trains::Array{<:SpikingTypes,1})
