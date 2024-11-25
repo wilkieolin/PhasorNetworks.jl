@@ -29,7 +29,8 @@ function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_
     @assert length(indices) == length(values) "Length of indices and values must match"
     
     output = CUDA.zeros(T, output_size)
-    threads, blocks = threads_blks(length(indices))
+    threads = 256
+    blocks = cld(length(indices), threads)
     
     @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
     
@@ -123,8 +124,7 @@ function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.
     end
     
     prob = ODEProblem(dzdt!, u0, tspan)
-    return prob
-    #sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
 
     return sol
 end

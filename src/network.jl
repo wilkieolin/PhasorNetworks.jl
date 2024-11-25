@@ -199,7 +199,7 @@ function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; tspan::Tuple{<:Real
     #produces [q k][1 1 time]
     scores = similarity_outer(q, k, dims=2)
     #convert the values to potentials
-    values = phase_memory(v, tspan=tspan, spk_args=spk_args)
+    values = oscillator_bank(v, tspan=tspan, spk_args=spk_args)
     #multiply by the scores found at each time step
     output_u = stack([values[:,:,b,t] * scores[1,1,t,:,:]' for b in axes(v_u, 3), t in axes(v_u,4)])
     if return_solution 

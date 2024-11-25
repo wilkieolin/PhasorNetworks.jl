@@ -31,12 +31,10 @@ struct SpikeTrainGPU
 end
 
 function SpikeTrainGPU(st::SpikeTrain)
-    return SpikeTrain(cu(st.indices), 
-            CuArray(LinearIndices(st.indices)),
-            cu(st.times),
-            st.shape,
-            reduce(*, st.shape),
-            st.offset)
+    return SpikeTrainGPU(st.indices,
+                        st.times,
+                        st.shape,
+                        st.offset)
 end
 
 function SpikeTrain(stg::SpikeTrainGPU)

@@ -21,9 +21,9 @@ function v_bind(x::SpikingCall, y::SpikingCall; kwargs...)
     return next_call
 end
 
-function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
+function v_bind(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
     if !automatch
-        if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
+        if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
         x, y = match_offsets(x, y)
     end
@@ -35,8 +35,8 @@ function v_bind(x::SpikeTrain, y::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.
     output_shape = x.shape
 
     #find the complex state induced by the spikes
-    sol_x = phase_memory(x, tspan=tspan, spk_args=spk_args)
-    sol_y = phase_memory(y, tspan=tspan, spk_args=spk_args)
+    sol_x = oscillator_bank(x, tspan=tspan, spk_args=spk_args)
+    sol_y = oscillator_bank(y, tspan=tspan, spk_args=spk_args)
     
     #create a reference oscillator to generate complex values for each moment in time
     u_ref = t -> phase_to_potential(0.0, t, offset = x.offset, spk_args = spk_args)
@@ -73,9 +73,9 @@ function v_bundle(x::SpikingCall; dims::Int)
     return next_call
 end
 
-function v_bundle(x::SpikeTrain; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool=false)
+function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool=false)
     #let compartments resonate in sync with inputs
-    sol = phase_memory(x, tspan=tspan, spk_args=spk_args)
+    sol = oscillator_bank(x, tspan=tspan, spk_args=spk_args)
     tbase = sol.t
     #combine the potentials (interfere) along the bundling axis
     f_sol = x -> sum(normalize_potential.(sol(x)), dims=dims)
@@ -103,7 +103,7 @@ function v_bundle_project(x::SpikingCall, w::AbstractMatrix, b::AbstractVecOrMat
     return next_call
 end
 
-function v_bundle_project(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+function v_bundle_project(x::SpikingTypes, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
     #get the number of batches & output neurons
@@ -233,15 +233,15 @@ function similarity(x::AbstractArray, y::AbstractArray; dim::Int = -1)
     return s
 end
 
-function similarity(x::SpikeTrain, y::SpikeTrain; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}, automatch::Bool=true)
+function similarity(x::SpikingTypes, y::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}, automatch::Bool=true)
     if !automatch
-        if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
+        if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
         x, y = match_offsets(x, y)
     end
 
-    sol_x = phase_memory(x, tspan = tspan, spk_args = spk_args)
-    sol_y = phase_memory(y, tspan = tspan, spk_args = spk_args)
+    sol_x = oscillator_bank(x, tspan = tspan, spk_args = spk_args)
+    sol_y = oscillator_bank(y, tspan = tspan, spk_args = spk_args)
 
     u_x = normalize_potential.(Array(sol_x))
     u_y = normalize_potential.(Array(sol_y))
@@ -270,15 +270,15 @@ function similarity_outer(x::SpikingCall, y::SpikingCall; dims, reduce_dim::Int=
     return similarity_outer(x.train, y.train, dims=dims, reduce_dim=reduce_dim, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
 end
 
-function similarity_outer(x::SpikeTrain, y::SpikeTrain; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
+function similarity_outer(x::SpikingTypes, y::SpikingTypes; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
     if !automatch
-        if check_offsets(x::SpikeTrain, y::SpikeTrain) @warn "Offsets between spike trains do not match - may not produce desired phases" end
+        if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
         x, y = match_offsets(x, y)
     end
 
-    sol_x = phase_memory(x, tspan = tspan, spk_args = spk_args)
-    sol_y = phase_memory(y, tspan = tspan, spk_args = spk_args)
+    sol_x = oscillator_bank(x, tspan = tspan, spk_args = spk_args)
+    sol_y = oscillator_bank(y, tspan = tspan, spk_args = spk_args)
     if reduce_dim == -1
         reduce_dim = ndims(sol_x)
     end
@@ -310,6 +310,6 @@ function v_unbind(x::AbstractArray, y::AbstractArray)
     return y
 end
 
-function v_unbind(x::SpikeTrain, y::SpikeTrain; kwargs...)
+function v_unbind(x::SpikingTypes, y::SpikingTypes; kwargs...)
     return v_bind(x, y, unbind=true; kwargs...)
 end
