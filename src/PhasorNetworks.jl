@@ -41,7 +41,7 @@ vcat_trains,
 delay_train,
 match_offsets,
 mean_phase,
-phase_memory,
+oscillator_bank,
 neuron_constant,
 
 #vsa

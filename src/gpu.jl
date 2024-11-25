@@ -111,45 +111,84 @@ function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_o
     return bias
 end
 
-function phase_memory(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function f32_tspan(tspan::Tuple{<:Real, <:Real})
+    tspan = (Float32(tspan[1]), Float32(tspan[2]))
+    return tspan
+end
+
+function oscillator_bank(u0::CuArray, dzdt::Function; tspan::Tuple{<:Float32, <:Float32}, spk_args::SpikingArgs)
+    #solve the memory compartment
+    prob = ODEProblem(dzdt, u0, tspan)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    
+    return sol
+end
+
+function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+    tspan = tspan |> f32_tspan 
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
     u0 = CUDA.zeros(ComplexF32, x.shape)
-    
     #resonate in time with the input spikes
-    function dzdt!(du, u, p, t)
-        du .= spk_args.update_fn(u) .+ spike_current(x, t, spk_args)
-        return nothing
-    end
-    
-    prob = ODEProblem(dzdt!, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
+
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
 end
 
-#VSA
+function oscillator_bank(x::SpikeTrainGPU, w::AbstractMatrix, b::AbstractVecOrMat; kwargs...)
+    return oscillator_bank(x, cu(w), cu(b); kwargs...)
+end
 
-function v_bundle_project(x::SpikeTrainGPU, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+function oscillator_bank(x::SpikeTrainGPU, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    tspan = tspan |> f32_tspan
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
     #get the number of batches & output neurons
     output_shape = (size(w, 1), x.shape[2])
     u0 = CUDA.zeros(ComplexF32, output_shape)
 
-    function dzdt!(du, u, p, t)
-        du .= update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
-        return nothing
-    end
-
     #solve the ODE over the given time span
-    prob = ODEProblem(dzdt!, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    #return full solution
-    if return_solution return sol end
+    dzdt(u, p, t) = update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
-    #convert the full solution (potentials) to spikes
-    train = solution_to_train(sol, tspan, spk_args = spk_args, offset = x.offset)
-    return train
+    #return full solution
+    return sol
 end
+
+# function oscillator_bank(x::CurrentCall; )
+#     return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args,)
+# end
+
+# function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+#     #set up functions to define the neuron's differential equations
+#     update_fn = spk_args.update_fn
+#     #make the initial potential the bias value
+#     u0 = zeros(ComplexF32, x.shape)
+#     #shift the solver span by the function's time offset
+#     tspan = tspan .+ x.offset
+
+#     #solve the ODE over the given time span
+#     dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
+#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+#     return sol
+# end
+
+# function oscillator_bank(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1}; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+#     #set up functions to define the neuron's differential equations
+#     update_fn = spk_args.update_fn
+#     output_shape = (size(w, 1), x.shape[2])
+#     #make the initial potential the bias value
+#     u0 = zeros(ComplexF32, output_shape)
+#     #shift the solver span by the function's time offset
+#     tspan = tspan .+ x.offset
+
+#     #solve the ODE over the given time span
+#     dzdt(u, p, t) = update_fn(u) + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+#     return sol
+# end
