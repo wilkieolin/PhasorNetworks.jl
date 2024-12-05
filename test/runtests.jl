@@ -1,4 +1,4 @@
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test, LuxCUDA
+using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test
 using DifferentialEquations, SciMLSensitivity
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
