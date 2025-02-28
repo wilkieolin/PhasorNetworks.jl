@@ -533,6 +533,12 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     
     #convert the phase represented by that potential to a spike time
     tms = potential_to_time(u, cycles, spk_args = spk_args)
+    
+    if typeof(tms) <: CuArray
+        gpu = true
+        spiking = spiking |> cdev
+        tms = tms |> cdev
+    end
 
     #return only the times where the neuron is spiking
     cut_index = i -> CartesianIndex(Tuple(i)[1:end-1])
@@ -540,6 +546,10 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     tms = tms[inds]
     inds = cut_index.(inds)
     train = SpikeTrain(inds, tms, size(u)[1:end-1], offset + spiking_offset(spk_args))
+
+    if gpu
+        train = SpikeTrainGPU(train)
+    end
 
     return train
 end
