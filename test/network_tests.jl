@@ -10,9 +10,9 @@ function network_tests()
 
     pretrain_chk = correlation_test(model, spk_model, ps, st, x)
     train_chk, ps_train, st_train = train_test(model, args, ps, st, train_loader, test_loader)
-    acc_chk = accuracy_test(model, ps_train, st_train, test_loader)
+    acc_chk = accuracy_test(model, ps_train, st_train, test_loader, args)
     posttrain_chk = correlation_test(model, spk_model, ps_train, st_train, x)
-    spk_acc_chk = spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),])
+    spk_acc_chk = spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),], args)
     y_cor_chk, lval_chk, grad_chk = ode_correlation(model, ode_model, ps, st, x, y)
 
     all_pass = reduce(*, [pretrain_chk,
@@ -175,15 +175,15 @@ function train_test(model, args, ps, st, train_loader, test_loader)
     return loss_check, ps, st
 end
 
-function accuracy_test(model, ps, st, test_loader)
-    _, accuracy = loss_and_accuracy(test_loader, model, ps, st)
+function accuracy_test(model, ps, st, test_loader, args)
+    _, accuracy = loss_and_accuracy(test_loader, model, ps, st, args)
     #usually reaches ~80% after 6 epochs
     acc_check = accuracy > 0.75
     @test acc_check
     return acc_check
 end
 
-function spiking_accuracy_test(model, ps, st, test_batch)
+function spiking_accuracy_test(model, ps, st, test_batch, args)
     @info "Running spiking accuracy test..."
     acc = spiking_accuracy(test_batch, model, ps, st, repeats)
     #make sure accuracy is above the baseline (~70% for spiking)
