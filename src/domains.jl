@@ -1,6 +1,6 @@
 using ChainRulesCore: ignore_derivatives
 using Random: GLOBAL_RNG
-using CUDA
+using CUDA, LuxCUDA
 
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}

@@ -1,6 +1,5 @@
 include("domains.jl")
 
-using CUDA
 const N_THREADS = 256
 
 # Define devices
@@ -115,9 +114,9 @@ function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_o
     #what times to the bias values correlate to?
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
-    t = mod(t, spk_args.t_period)
+    t = Float32(mod(t, spk_args.t_period))
     #add the active currents, scaled by the gaussian kernel & bias magnitude
-    bias = mag .* gaussian_kernel_gpu.(t, times, Float32(spk_args.t_window))
+    bias = mag .* gaussian_kernel_gpu.(times, t, Float32(spk_args.t_window))
 
     return bias
 end

@@ -42,15 +42,14 @@ function loss_and_accuracy(data_loader, model, ps, st, args)
     num = 0
     for (x, y) in data_loader
         x = x |> dev
-        y = 1.0 .* y |> dev
-
+        
         ŷ, _ = model(x, ps, st)
 
         if typeof(ŷ) <: SpikingTypes
             ŷ, _ = train_to_phase(ŷ)
         end
         
-        ls += sum(quadrature_loss(ŷ, y))
+        ls += sum(quadrature_loss(ŷ, 1.0 .* y |> dev))
         acc += sum(accuracy_quadrature(ŷ, y)) ## Decode the output of the model
         num +=  size(y)[2]
     end
