@@ -30,16 +30,23 @@ function z_score(phases::AbstractArray)
     return score
 end
 
-function loss_and_accuracy(data_loader, model, ps, st; 
-                            mode="static", )
+function loss_and_accuracy(data_loader, model, ps, st, args)
+    if args.use_cuda
+        dev = gdev
+    else
+        dev = cdev
+    end
 
     acc = 0
     ls = 0.0f0
     num = 0
     for (x, y) in data_loader
+        x = x |> dev
+        y = 1.0 .* y |> dev
+
         ŷ, _ = model(x, ps, st)
 
-        if mode != "static"
+        if typeof(ŷ) <: SpikingTypes
             ŷ, _ = train_to_phase(ŷ)
         end
         
@@ -68,6 +75,10 @@ function spiking_accuracy(data_loader, model, ps, st, repeats::Int)
 end
 
 function predict_quadrature(phases::AbstractMatrix)
+    if on_gpu(phases)
+        phases = phases |> cdev
+    end
+
     predictions = getindex.(argmin(abs.(phases .- 0.5), dims=1), 1)'
     return predictions
 end
@@ -78,12 +89,22 @@ function predict_quadrature(spikes::SpikingCall)
 end
 
 function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
+    if on_gpu(phases, truth)
+        phases = phases |> cdev
+        truth = truth |> cdev
+    end
+
     predictions = predict_quadrature(phases)
     labels = getindex.(findall(truth), 1)
     return predictions .== labels
 end
 
 function accuracy_quadrature(phases::Array{<:Real,3}, truth::AbstractMatrix)
+    if on_gpu(phases, truth)
+        phases = phases |> cdev
+        truth = truth |> cdev
+    end
+
     return [accuracy_quadrature(phases[i,:,:], truth) for i in axes(phases,1)]
 end
 
