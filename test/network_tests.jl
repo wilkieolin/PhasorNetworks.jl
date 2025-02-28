@@ -129,14 +129,14 @@ end
 
 
 function train(model, ps, st, train_loader, args; verbose::Bool = false)
-     # if CUDA.functional() && args.use_cuda
-    #     @info "Training on CUDA GPU"
-    #     CUDA.allowscalar(false)
-    #     device = gpu_device()
-    # else
-    @info "Training on CPU"
-    device = cpu_device()
-    # end
+     if CUDA.functional() && args.use_cuda
+        @info "Training on CUDA GPU"
+        CUDA.allowscalar(false)
+        device = gpu_device()
+    else
+        @info "Training on CPU"
+        device = cpu_device()
+    end
 
     ## Optimizer
     opt_state = Optimisers.setup(Adam(args.η), ps)
@@ -145,6 +145,9 @@ function train(model, ps, st, train_loader, args; verbose::Bool = false)
     ## Training
     for epoch in 1:args.epochs
         for (x, y) in train_loader
+            x = x |> device
+            y = y |> device
+            
             lf = p -> loss(x, y, model, p, st)[1]
             lossval, gs = withgradient(lf, ps)
             if verbose
