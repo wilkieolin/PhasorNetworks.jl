@@ -3,6 +3,17 @@ include("domains.jl")
 using CUDA
 const N_THREADS = 256
 
+# Define devices
+cdev = cpu_device()
+if CUDA.functional()
+    gdev = gpu_device()
+end
+
+function on_gpu(args...)
+    locs = [typeof(x) <: CuArray for x in args]
+    return reduce(+, locs) > 0
+end
+
 #Kernels 
 
 function threads_blks(l::Int, threads::Int = N_THREADS)

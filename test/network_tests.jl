@@ -133,9 +133,11 @@ function train(model, ps, st, train_loader, args; verbose::Bool = false)
         @info "Training on CUDA GPU"
         CUDA.allowscalar(false)
         device = gpu_device()
+        conv_fn = x -> 1.0 .* x |> device
     else
         @info "Training on CPU"
         device = cpu_device()
+        conv_fn = x -> x
     end
 
     ## Optimizer
@@ -146,7 +148,7 @@ function train(model, ps, st, train_loader, args; verbose::Bool = false)
     for epoch in 1:args.epochs
         for (x, y) in train_loader
             x = x |> device
-            y = y |> device
+            y = y |> conv_fn
             
             lf = p -> loss(x, y, model, p, st)[1]
             lossval, gs = withgradient(lf, ps)
