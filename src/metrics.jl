@@ -1,6 +1,7 @@
 using Interpolations: linear_interpolation
 using Statistics: cor
 using LinearAlgebra: diag
+using OneHotArrays: OneHotMatrix
 
 include("network.jl")
 
@@ -56,12 +57,21 @@ function loss_and_accuracy(data_loader, model, ps, st, args)
     return ls/num, acc/num
 end
 
-function spiking_accuracy(data_loader, model, ps, st, repeats::Int)
+function dense_onehot(x::OneHotMatrix)
+    return 1.0f0 .* x
+end
+
+function spiking_accuracy(data_loader, model, ps, st, args, repeats::Int)
     acc = []
     n_phases = []
     num = 0
 
     for (x, y) in data_loader
+        if args.use_cuda
+            x = x |> gdev
+            y = y |> dense_onehot |> gdev
+        end
+        
         spk_output, _ = model(x, ps, st)
         ŷ = train_to_phase(spk_output)
         
@@ -94,7 +104,7 @@ function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
     end
 
     predictions = predict_quadrature(phases)
-    labels = getindex.(findall(truth), 1)
+    labels = getindex.(findall(truth .== 1.0f0), 1)
     return predictions .== labels
 end
 

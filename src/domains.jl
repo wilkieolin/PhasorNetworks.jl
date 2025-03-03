@@ -297,11 +297,16 @@ function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::I
     return train
 end
 
-function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs)
-    return train_to_phase(train, spk_args)
+function train_to_phase(call::SpikingCall)
+    return train_to_phase(call.train, spk_args=call.spk_args)
 end
 
-function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs; offset::Real = 0.0)
+function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
+    train = SpikeTrain(train)
+    return train_to_phase(train, spk_args=spk_args, offset=train.offset)
+end
+
+function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0)
     if length(train.times) == 0
         return missing
     end
@@ -326,10 +331,6 @@ function train_to_phase(train::SpikeTrain, spk_args::SpikingArgs; offset::Real =
     #stack the arrays to cycle, batch, neuron
     phases = mapreduce(x->reshape(x, 1, train.shape...), vcat, phases)
     return phases
-end
-
-function train_to_phase(call::SpikingCall)
-    return train_to_phase(call.train, call.spk_args)
 end
 
 ###
@@ -534,10 +535,12 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
     #convert the phase represented by that potential to a spike time
     tms = potential_to_time(u, cycles, spk_args = spk_args)
     
-    if typeof(tms) <: CuArray
+    if on_gpu(tms)
         gpu = true
         spiking = spiking |> cdev
         tms = tms |> cdev
+    else
+        gpu = false
     end
 
     #return only the times where the neuron is spiking
