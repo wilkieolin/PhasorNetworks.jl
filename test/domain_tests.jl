@@ -20,7 +20,7 @@ end
 
 function phase_train_test()
     trains = [phase_to_train(phases, spk_args=spk_args, offset=o) for o in offsets];
-    rec_phases = [train_to_phase(t, spk_args) for t in trains];
+    rec_phases = [train_to_phase(t, spk_args=spk_args) for t in trains];
     errors = [mapslices(x -> x .- phases, t, dims=(2)) for t in rec_phases]
     errors = map(y -> maximum(arc_error(filter(x -> !isnan(x), y))), errors)
     max_error = maximum(maximum.(errors))

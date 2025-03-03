@@ -61,6 +61,7 @@ similarity_loss,
 #network
 attend,
 variance_scaling,
+dense_onehot,
 
 #metrics
 cycle_correlation,
