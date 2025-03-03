@@ -127,13 +127,12 @@ function loss(x, y, model, ps, st)
     return mean(quadrature_loss(y_pred, y)), st
 end
 
-
 function train(model, ps, st, train_loader, args; verbose::Bool = false)
      if CUDA.functional() && args.use_cuda
         @info "Training on CUDA GPU"
         CUDA.allowscalar(false)
         device = gpu_device()
-        conv_fn = x -> 1.0 .* x |> device
+        conv_fn = x -> x |> dense_onehot |> device
     else
         @info "Training on CPU"
         device = cpu_device()
@@ -185,7 +184,7 @@ end
 
 function spiking_accuracy_test(model, ps, st, test_batch, args)
     @info "Running spiking accuracy test..."
-    acc = spiking_accuracy(test_batch, model, ps, st, repeats)
+    acc = spiking_accuracy(test_batch, model, ps, st, args, repeats)
     #make sure accuracy is above the baseline (~70% for spiking)
     acc_check = acc[end-1] > 0.70
     @test acc_check
