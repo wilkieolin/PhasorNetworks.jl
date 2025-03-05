@@ -54,7 +54,13 @@ end
 
 function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
-    new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
+
+    if typeof(train) == SpikeTrain
+        new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
+    else
+        new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset)
+    end
+
     return new_train
 end
 
@@ -123,7 +129,7 @@ end
 """
 Delay spike trains as necessary to make the represented phases between them match
 """
-function match_offsets(x::SpikeTrain, y::SpikeTrain)
+function match_offsets(x::SpikingTypes, y::SpikingTypes)
     xo = x.offset
     yo = y.offset
 
