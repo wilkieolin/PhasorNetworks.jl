@@ -167,38 +167,3 @@ function oscillator_bank(x::SpikeTrainGPU, w::CuArray, b::CuArray; tspan::Tuple{
     #return full solution
     return sol
 end
-
-# function oscillator_bank(x::CurrentCall; )
-#     return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args,)
-# end
-
-# function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-#     #set up functions to define the neuron's differential equations
-#     update_fn = spk_args.update_fn
-#     #make the initial potential the bias value
-#     u0 = zeros(ComplexF32, x.shape)
-#     #shift the solver span by the function's time offset
-#     tspan = tspan .+ x.offset
-
-#     #solve the ODE over the given time span
-#     dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
-#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-#     return sol
-# end
-
-# function oscillator_bank(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1}; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-#     #set up functions to define the neuron's differential equations
-#     update_fn = spk_args.update_fn
-#     output_shape = (size(w, 1), x.shape[2])
-#     #make the initial potential the bias value
-#     u0 = zeros(ComplexF32, output_shape)
-#     #shift the solver span by the function's time offset
-#     tspan = tspan .+ x.offset
-
-#     #solve the ODE over the given time span
-#     dzdt(u, p, t) = update_fn(u) + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
-#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-#     return sol
-# end
