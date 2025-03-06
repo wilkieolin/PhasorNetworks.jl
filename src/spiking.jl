@@ -11,13 +11,13 @@ function angular_mean(phases::AbstractArray; dims)
     return phase
 end
 
-function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
+function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     phase = complex_to_angle(bias)
     mag = abs.(bias)
-    return bias_current(phase, mag, t, t_offset, spk_args, sigma=sigma)
+    return bias_current(phase, mag, t, t_offset, spk_args)
 end
 
-function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs; sigma::Real=9.0)
+function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     #what times to the bias values correlate to?
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
