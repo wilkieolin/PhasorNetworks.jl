@@ -61,10 +61,12 @@ function dense_onehot(x::OneHotMatrix)
     return 1.0f0 .* x
 end
 
-function spiking_accuracy(data_loader, model, ps, st, args, repeats::Int)
+function spiking_accuracy(data_loader, model, ps, st, args)
     acc = []
     n_phases = []
     num = 0
+
+    n_batches = length(data_loader)
 
     for (x, y) in data_loader
         if args.use_cuda
@@ -79,7 +81,7 @@ function spiking_accuracy(data_loader, model, ps, st, args, repeats::Int)
         num += size(x)[end]
     end
 
-    acc = sum(reshape(acc, repeats, :), dims=2) ./ num
+    acc = sum(reshape(acc, :, n_batches), dims=2) ./ num
     return acc
 end
 
@@ -129,6 +131,13 @@ function cycle_correlation(static_phases::Matrix{<:Real}, dynamic_phases::Array{
     n_cycles = axes(dynamic_phases, 1)
     cor_vals = [cor_realvals(static_phases |> vec, dynamic_phases[i,:,:] |> vec) for i in n_cycles]
     return cor_vals
+end
+
+function cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
+    n_cycles = axes(dynamic_phases, 1)
+    total = reduce(*, size(static_phases))
+    sparsity_vals = [sum(isnan.(dynamic_phases[i,:,:])) / total for i in n_cycles]
+    return sparsity_vals
 end
 
 function cor_realvals(x, y)
