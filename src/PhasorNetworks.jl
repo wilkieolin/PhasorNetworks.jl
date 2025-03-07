@@ -12,6 +12,7 @@ SpikingArgs,
 SpikingCall, 
 CurrentCall,
 SpikingArgs_NN,
+TrackOutput,
 
 #domain conversions
 phase_to_train,
@@ -65,6 +66,7 @@ dense_onehot,
 
 #metrics
 cycle_correlation,
+cycle_sparsity,
 cor_realvals,
 predict_quadrature,
 accuracy_quadrature,
