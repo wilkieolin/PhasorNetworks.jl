@@ -250,6 +250,26 @@ end
 Other utilities
 """
 
+struct TrackOutput{L<:Lux.AbstractLuxLayer} <: Lux.AbstractLuxLayer
+    layer::L
+end
+
+# Forward parameter initialization to inner layer
+Lux.initialparameters(rng::AbstractRNG, t::TrackOutput) = 
+    (layer=Lux.initialparameters(rng, t.layer),)
+
+# Forward state initialization and add output tracking
+function Lux.initialstates(rng::AbstractRNG, t::TrackOutput)
+    st_layer = Lux.initialstates(rng, t.layer)
+    return merge(st_layer, (outputs=(),))
+end
+
+function (t::TrackOutput)(x, ps, st)
+    y, st_layer = Lux.apply(t.layer, x, ps.layer, st)
+    new_st = merge(st_layer, (outputs=(st.outputs..., y),))
+    return y, new_st
+end
+
 function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "avg", scale::Real = 0.66)
     fan_in = shape[end]
     fan_out = shape[1]
