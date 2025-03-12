@@ -72,8 +72,8 @@ function interference_kernel(A, B, output, X, M, N, D)
             sim = cos(2.0f0 * half_angle)
             acc += sim
         end
-        # Transpose output dimensions to X×N×M
-        output[x, n, m] = acc / D
+        # Transpose output dimensions to X×M×N
+        output[x, m, n] = acc / D
     end
     return
 end
