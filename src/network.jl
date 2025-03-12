@@ -181,20 +181,20 @@ end
 Phasor QKV Attention
 """
 
-function attend(q::Array{<:Real, 3}, k::Array{<:Real, 3}, v::Array{<:Real, 3})
+function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3})
     #compute qk scores
     #produces (1 b qt kt)
     scores = similarity_outer(q, k, dims=2)
-    #do complex-domain matrix multiply of values by scores (v kt b)
+    #do complex-domain matrix multiply of values by scores (b kt v)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
-    #(v kt b) * (1 b qt kt) ... (v kt) * (kt qt) over b
-    output = stack([v[:,:,i] * scores[1,i,:,:]' for i in axes(v, 3)])
+    #(b kt v) * (1 b qt kt) ... (v kt) * (kt qt) over b
+    output = stack([v[i,:,:]' * scores[i,1,:,:] for i in axes(v, 1)])
     output = complex_to_angle(output)
     return output
 end
 
-function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), spk_args::SpikingArgs=default_spk_args(), return_solution::Bool = false)
+function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false)
     #compute the similarity between the spike trains
     #produces [q k][1 1 time]
     scores = similarity_outer(q, k, dims=2)
