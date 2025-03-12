@@ -218,7 +218,7 @@ function similarity_outer(x::SpikingCall, y::SpikingCall; dims, reduce_dim::Int=
     return similarity_outer(x.train, y.train, dims=dims, reduce_dim=reduce_dim, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
 end
 
-function similarity_outer(x::SpikingTypes, y::SpikingTypes; dims, reduce_dim::Int=-1, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
+function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
     if !automatch
         if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -227,15 +227,13 @@ function similarity_outer(x::SpikingTypes, y::SpikingTypes; dims, reduce_dim::In
 
     sol_x = oscillator_bank(x, tspan = tspan, spk_args = spk_args)
     sol_y = oscillator_bank(y, tspan = tspan, spk_args = spk_args)
-    if reduce_dim == -1
-        reduce_dim = ndims(sol_x)
-    end
 
-    u_x = normalize_potential.(Array(sol_x))
-    u_y = normalize_potential.(Array(sol_y))
+
+    u_x = normalize_potential.(sol_x.u)
+    u_y = normalize_potential.(sol_y.u)
     
     #add up along the slices
-    sim = [similarity_outer(xs, ys) for xs in u_x, ys in u_y]
+    sim = similarity_outer.(u_x, u_y)
     return sim
 end
 
