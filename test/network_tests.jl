@@ -43,6 +43,45 @@ function bullseye_data(n_s::Int, rng::AbstractRNG)
     return data, labels
 end
 
+function generate_helix(r::Real, theta::Real, frequency::Real, scale::Real)
+    """
+    Construct a generating function for a helix
+    
+    Parameters:
+    - r:       Cylinder radius (distance from z-axis)
+    - theta:   Initial angular phase offset [radians]
+    - frequency:       Angular frequency [radians/unit time]
+    - scale:   How far it stretches in z per unit time [1/unit time]
+    
+    Returns:
+    - Array (x, y, z) of coordinate vectors
+    """
+    function helix(t::Real)
+        v = r * exp(1im * (theta + frequency * t))
+        x = real(v)
+        y = imag(v)
+        z = scale * t
+        return [x,y,z]
+    end
+    return helix
+end
+
+function helix_data(n_points::Int)
+    #setup the generating functions
+    left = generate_helix(1.0, 0.0, 10.0, 1.0)
+    right = generate_helix(1.0, 0.0, 10.0, 1.0)
+    #choose the parametric sampling points
+    ts = range(start = 0.0, stop = 1.0, length = n_points)
+    #generate the coordinates
+    left_pts = left.(ts) |> stack
+    right_pts = right.(ts) |> stack
+    pts = cat(left_pts, right_pts, dims=2)
+    #label what belongs to which function
+    labels = cat(zeros(n_points), ones(n_points), dims=1)
+    
+    return pts, labels
+end
+ 
 function getdata(args)
     #make synthetic bullseye data (no needing an external data repository)
     train_loader = [bullseye_data(args.batchsize, args.rng) for i in 1:100];

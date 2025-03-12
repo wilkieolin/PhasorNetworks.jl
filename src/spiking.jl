@@ -183,6 +183,10 @@ function normalize_potential(u::Complex)
     end
 end
 
+function normalize_potential(a::AbstractArray)
+    return normalize_potential.(a)
+end
+
 function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0, tspan::Tuple{<:Real, <:Real}, repeat::Bool=true)
     shape = size(phases)
     

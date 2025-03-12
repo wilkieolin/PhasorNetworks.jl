@@ -207,6 +207,7 @@ function interference_similarity(interference::AbstractArray; dim::Int=-1)
     half_angle = acos.(0.5 .* magnitude)
     sim = cos.(2.0 .* half_angle)
     avg_sim = mean(sim, dims=dim)
+    avg_sim = dropdims(avg_sim, dims=dim)
     
     return avg_sim
 end
@@ -234,9 +235,8 @@ function similarity_outer(x::SpikingTypes, y::SpikingTypes; dims, reduce_dim::In
     u_y = normalize_potential.(Array(sol_y))
     
     #add up along the slices
-    interference = [abs.(u_xs .+ u_ys) for u_xs in eachslice(u_x, dims=dims), u_ys in eachslice(u_y, dims=dims)]
-    avg_sim = interference_similarity.(interference, dim=reduce_dim-1)
-    return avg_sim
+    sim = [similarity_outer(xs, ys) for xs in u_x, ys in u_y]
+    return sim
 end
 
 function similarity_self(x::AbstractArray; dims)
