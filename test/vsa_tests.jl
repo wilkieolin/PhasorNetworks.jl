@@ -77,7 +77,7 @@ function test_outer()
     #check the non-spiking implementation
     phase_x = reshape(range(-1.0, 1.0, n_x), (1, n_x, n_vsa)) |> collect
     phase_y = reshape(range(-1.0, 1.0, n_y), (1, n_y, n_vsa)) |> collect
-    sims = similarity_outer(phase_x, phase_y, dims= 2, reduce_dim=1)[1,1,:,:]
+    sims = similarity_outer(phase_x, phase_y, dims= 2, reduce_dim=1)[1,:,:]
     v1, v2 = check_phase(sims)
     @test v1
     @test v2
@@ -87,7 +87,7 @@ function test_outer()
     st_y = phase_to_train(phase_y, spk_args = spk_args, repeats = repeats)
     sims_2 = stack(similarity_outer(st_x, st_y, dims=2, reduce_dim=3, tspan=tspan, spk_args = spk_args));
     #check at the last time step
-    sims_spk = sims_2[1,1,end,:,:]
+    sims_spk = sims_2[1,end,:,:]
     v1s, v2s = check_phase(sims_spk)
     @test v1s 
     @test v2s 

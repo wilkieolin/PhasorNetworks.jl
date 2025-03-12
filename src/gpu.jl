@@ -47,6 +47,54 @@ function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_
     return output
 end
 
+function interference_kernel(A, B, output, X, M, N, D)
+    # Thread indices for matrix dimensions
+    m = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n = (blockIdx().y - 1) * blockDim().y + threadIdx().y
+    # Batch dimension from grid z-axis
+    x = blockIdx().z
+
+    if x <= X && m <= M && n <= N
+        acc = 0.0f0
+        @inbounds for d in 1:D
+            # Load complex values from batch tensors
+            a = A[x, m, d]
+            b = B[x, n, d]
+            
+            # Complex addition and magnitude calculation
+            sum_real = real(a) + real(b)
+            sum_imag = imag(a) + imag(b)
+            interference = sqrt(sum_real^2 + sum_imag^2)
+            
+            # Clamp and transform
+            magnitude = clamp(interference, 0.0f0, 2.0f0)
+            half_angle = acos(0.5f0 * magnitude)
+            sim = cos(2.0f0 * half_angle)
+            acc += sim
+        end
+        # Transpose output dimensions to X×N×M
+        output[x, n, m] = acc / D
+    end
+    return
+end
+
+function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
+    X, M, D = size(A)
+    X_B, N, D_B = size(B)
+    @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
+    @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
+
+    output = CUDA.zeros(Float32, X, N, M)
+    
+    # Kernel configuration (256 threads/block in x-y plane)
+    threads = (16, 16, 1)
+    blocks = (ceil(Int, M/16), ceil(Int, N/16), X)
+    
+    @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
+    synchronize()
+    return output
+end
+
 # Domains
 
 function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false)
