@@ -183,13 +183,13 @@ Phasor QKV Attention
 
 function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3})
     #compute qk scores
-    #produces (1 b qt kt)
+    #produces (b qt kt)
     scores = similarity_outer(q, k, dims=2)
     #do complex-domain matrix multiply of values by scores (b kt v)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
-    #(b kt v) * (1 b qt kt) ... (v kt) * (kt qt) over b
-    output = stack([v[i,:,:]' * scores[i,1,:,:] for i in axes(v, 1)])
+    #(b kt v) * (b qt kt) ... (v kt) * (kt qt) over b
+    output = stack([v[i,:,:]' * scores[i,:,:] for i in axes(v, 1)])
     output = complex_to_angle(output)
     return output
 end
