@@ -177,6 +177,7 @@ function similarity(x::AbstractArray, y::AbstractArray; dim::Int = -1)
 
     dx = cos.(pi .* (x .- y))
     s = mean(dx, dims = dim)
+    s = dropdims(s, dims = dim)
     return s
 end
 
@@ -212,13 +213,14 @@ function interference_similarity(interference::AbstractArray; dim::Int=-1)
     return avg_sim
 end
 
-function similarity_outer(x::SpikingCall, y::SpikingCall; dims, reduce_dim::Int=-1, automatch::Bool=true)
+function similarity_outer(x::SpikingCall, y::SpikingCall; automatch::Bool=true)
     @assert x.spk_args == y.spk_args "Spiking arguments must be identical to calculate similarity"
     new_span = match_tspans(x.t_span, y.t_span)
-    return similarity_outer(x.train, y.train, dims=dims, reduce_dim=reduce_dim, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
+    return similarity_outer(x.train, y.train, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
 end
 
 function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
+    @assert length(x.shape) == 3 && length(y.shape) == 3 "Outer similarity for spike trains assumes 3-dimensional inputs (b x d)"
     if !automatch
         if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -241,12 +243,34 @@ function similarity_self(x::AbstractArray; dims)
     return similarity_outer(x, x, dims=dims)
 end
 
+function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
+    X, M, D = size(A)
+    X_B, N, D_B = size(B)
+    @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
+    @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
+
+    output = CUDA.zeros(Float32, X, M, N)
+    
+    #Kernel configuration
+    threads = (16, 16, 1)
+    blocks = (ceil(Int, M/16), ceil(Int, N/16), X)
+    
+    @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
+    synchronize()
+    return output
+end
+
 """
 Slicing each array along 'dims', find the similarity between each corresponding slice and
 reduce along 'reduce_dim'
 """
-function similarity_outer(x::AbstractArray, y::AbstractArray; dims, reduce_dim::Int=-1)
-    s = stack([similarity(xs, ys, dim=reduce_dim) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)])
+function similarity_outer(x::AbstractArray{<:Real}, y::AbstractArray{<:Real}; dims=2)
+    s = stack([similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)])
+    return s
+end
+
+function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Complex}; dims=2)
+    s = stack([interference_similarity(abs.(xs .+ ys), dim=dims) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)])
     return s
 end
 

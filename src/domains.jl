@@ -530,6 +530,27 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
 
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
+    train = solution_to_train(u, spk_args=spk_args, offset=offset)
+    return train
+end
+
+function solution_to_train(u::AbstractVector{<:AbstractArray}, t::Vector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
+    #determine the ending time of each cycle
+    cycles = generate_cycles(tspan, spk_args, offset)
+    inds = [argmin(abs.(t .- t_c)) for t_c in cycles]
+
+    #sample the potential at the end of each cycle
+    u = u[inds] |> stack
+    train = solution_to_train(u, spk_args=spk_args, offset=offset)
+    return train
+end
+
+function solution_to_train(u::AbstractArray{<:Complex}; spk_args::SpikingArgs, offset::Real)
+    #determine the ending time of each cycle
+    cycles = generate_cycles(tspan, spk_args, offset)
+
+    #sample the potential at the end of each cycle
+    u = solution_to_potential(sol, cycles)
     spiking = abs.(u) .> spk_args.threshold
     
     #convert the phase represented by that potential to a spike time
