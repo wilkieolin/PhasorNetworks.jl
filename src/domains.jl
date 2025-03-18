@@ -530,10 +530,13 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
 
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
-    train = solution_to_train(u, spk_args=spk_args, offset=offset)
+    train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset)
     return train
 end
 
+"""
+This implementation takes a full solution (represented by a vector of arrays) and finds the spikes from it.
+"""
 function solution_to_train(u::AbstractVector{<:AbstractArray}, t::Vector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
@@ -545,16 +548,16 @@ function solution_to_train(u::AbstractVector{<:AbstractArray}, t::Vector{<:Real}
     return train
 end
 
-function solution_to_train(u::AbstractArray{<:Complex}; spk_args::SpikingArgs, offset::Real)
+"""
+This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
+to spikes.
+"""
+function solution_to_train(u::AbstractArray{<:Complex}, times::Vector{<:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
-    cycles = generate_cycles(tspan, spk_args, offset)
-
-    #sample the potential at the end of each cycle
-    u = solution_to_potential(sol, cycles)
     spiking = abs.(u) .> spk_args.threshold
     
     #convert the phase represented by that potential to a spike time
-    tms = potential_to_time(u, cycles, spk_args = spk_args)
+    tms = potential_to_time(u, times, spk_args = spk_args)
     
     if on_gpu(tms)
         gpu = true
