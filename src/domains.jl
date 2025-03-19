@@ -537,14 +537,15 @@ end
 """
 This implementation takes a full solution (represented by a vector of arrays) and finds the spikes from it.
 """
-function solution_to_train(u::AbstractVector{<:AbstractArray}, t::Vector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
+function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
     inds = [argmin(abs.(t .- t_c)) for t_c in cycles]
 
     #sample the potential at the end of each cycle
     u = u[inds] |> stack
-    train = solution_to_train(u, spk_args=spk_args, offset=offset)
+    ts = t[inds]
+    train = solution_to_train(u, ts, spk_args=spk_args, offset=offset)
     return train
 end
 
@@ -552,7 +553,7 @@ end
 This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
 to spikes.
 """
-function solution_to_train(u::AbstractArray{<:Complex}, times::Vector{<:Real}; spk_args::SpikingArgs, offset::Real)
+function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     spiking = abs.(u) .> spk_args.threshold
     
