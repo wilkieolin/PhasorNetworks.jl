@@ -189,9 +189,19 @@ function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::Abs
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
     #(b kt v) * (b qt kt) ... (v kt) * (kt qt) over b
-    output = stack([v[i,:,:]' * scores[i,:,:] for i in axes(v, 1)])
+    output = stack([scores[i,:,:] * v[i,:,:]  for i in axes(v, 1)], dims=1)
     output = complex_to_angle(output)
     return output
+end
+
+function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3})
+    @assert size(potential, 1) == size(scores,1) "Batch dimensions of inputs must match"
+
+    scores = permutedims(scores, (2, 3, 1))
+    potential = permutedims(potential, (2, 3, 1))
+    scaled = batched_mul(scores, potential)
+    scaled = permutedims(scaled, (3, 1, 2))
+    return scaled
 end
 
 function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false)
