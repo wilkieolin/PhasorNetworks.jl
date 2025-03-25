@@ -69,7 +69,7 @@ end
 function helix_data(n_points::Int)
     #setup the generating functions
     left = generate_helix(1.0, 0.0, 10.0, 1.0)
-    right = generate_helix(1.0, 0.0, 10.0, 1.0)
+    right = generate_helix(1.0, pi, 10.0, 1.0)
     #choose the parametric sampling points
     ts = range(start = 0.0, stop = 1.0, length = n_points)
     #generate the coordinates
