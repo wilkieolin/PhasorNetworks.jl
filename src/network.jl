@@ -204,18 +204,19 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3})
     return scaled
 end
 
-function attend(q::SpikeTrain, k::SpikeTrain, v::SpikeTrain; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false)
+function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false)
     #compute the similarity between the spike trains
-    #produces [q k][1 1 time]
-    scores = similarity_outer(q, k, dims=2)
+    #produces [time][b qt kt]
+    scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
     #convert the values to potentials
     values = oscillator_bank(v, tspan=tspan, spk_args=spk_args)
     #multiply by the scores found at each time step
-    output_u = stack([values[:,:,b,t] * scores[1,1,t,:,:]' for b in axes(v_u, 3), t in axes(v_u,4)])
+    output_u = score_scale.(values.u, scores)
     if return_solution 
         return output_u 
     end
-    output = find_spikes_rf(output_u, values.t, spk_args)
+
+    output = solution_to_train(output_u, values.t, tspan, spk_args=spk_args, offset=v.offset)
     return output
 end
 
