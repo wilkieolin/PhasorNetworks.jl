@@ -1,6 +1,4 @@
-using ChainRulesCore: ignore_derivatives
-using Random: GLOBAL_RNG
-using CUDA, LuxCUDA
+include("imports.jl")
 
 struct SpikeTrain
     indices::Array{<:Union{Int, CartesianIndex},1}
@@ -223,6 +221,8 @@ struct CurrentCall
     spk_args::SpikingArgs
     t_span::Tuple{<:Real, <:Real}
 end
+
+PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
 
 function angle_to_complex(x::AbstractArray)
     k = convert(ComplexF32, pi * (0.0 + 1.0im))

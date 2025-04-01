@@ -1,7 +1,3 @@
-using Statistics: mean
-using Random: AbstractRNG
-using DifferentialEquations
-
 include("spiking.jl")
 
 function v_bind(x::AbstractArray; dims)
@@ -109,7 +105,13 @@ function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.
 end
 
 function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOrMat)
-    xz = w * angle_to_complex(x) .+ b
+    xz = batched_mul(w, angle_to_complex(x)) .+ b
+    y = complex_to_angle(xz)
+    return y
+end
+
+function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOrMat)
+    xz = w *  .+ b
     y = complex_to_angle(xz)
     return y
 end

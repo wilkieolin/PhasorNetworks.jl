@@ -1,8 +1,4 @@
-using DifferentialEquations: ODESolution
-
 include("gpu.jl")
-
-PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
 
 function angular_mean(phases::AbstractArray; dims)
     u = exp.(pi * 1im .* phases)
