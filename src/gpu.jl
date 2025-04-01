@@ -55,8 +55,8 @@ function interference_kernel(A, B, output, X, M, N, D)
     if x <= X && m <= M && n <= N
         acc = 0.0f0
         @inbounds for d in 1:D
-            a = A[x, m, d]
-            b = B[x, n, d]
+            a = A[d, m, x]
+            b = B[d, n, x]
             
             sum_real = real(a) + real(b)
             sum_imag = imag(a) + imag(b)
@@ -67,7 +67,7 @@ function interference_kernel(A, B, output, X, M, N, D)
             sim = cos(2.0f0 * half_angle)
             acc += sim
         end
-        output[x, m, n] = acc / D
+        output[m, n, x] = acc / D
     end
     return
 end
