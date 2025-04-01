@@ -1,9 +1,3 @@
-using ComponentArrays, SciMLSensitivity, DifferentialEquations, Lux
-using Random: AbstractRNG
-using Lux: glorot_uniform, truncated_normal
-using LinearAlgebra: diagind, I
-import LuxLib: dropout
-
 include("vsa.jl")
 
 LuxParams = Union{NamedTuple, ComponentArray, SubArray}
@@ -107,7 +101,7 @@ end
 
 # Calls
 
-function (a::PhasorDense)(x::AbstractVecOrMat, params::LuxParams, state::NamedTuple)
+function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple)
     y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag)
     return y, state
 end
