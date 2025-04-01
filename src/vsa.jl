@@ -180,7 +180,7 @@ function remap_phase(x::AbstractArray)
     return x
 end
 
-function similarity(x::AbstractArray, y::AbstractArray; dim::Int = -1)
+function similarity(x::AbstractArray, y::AbstractArray; dim::Int = 1)
     if dim == -1
         dim = ndims(x)
     end
@@ -254,12 +254,12 @@ function similarity_self(x::AbstractArray; dims)
 end
 
 function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
-    X, M, D = size(A)
-    X_B, N, D_B = size(B)
+    D, M, X = size(A)
+    D_B, N, X_B = size(B)
     @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
     @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
 
-    output = CUDA.zeros(Float32, X, M, N)
+    output = CUDA.zeros(Float32, M, N, X)
     
     #Kernel configuration
     threads = (16, 16, 1)
@@ -267,6 +267,8 @@ function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
     
     @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
     synchronize()
+    #output = permutedims(output, (2,3,1))
+
     return output
 end
 
@@ -275,12 +277,16 @@ Slicing each array along 'dims', find the similarity between each corresponding 
 reduce along 'reduce_dim'
 """
 function similarity_outer(x::AbstractArray{<:Real}, y::AbstractArray{<:Real}; dims=2)
-    s = stack([similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)])
+    s = [similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
+    #stack and reshape to batch-last
+    s = permutedims(stack(s), (2,3,1))
     return s
 end
 
 function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Complex}; dims=2)
-    s = stack([interference_similarity(abs.(xs .+ ys), dim=dims) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)])
+    s = [interference_similarity(abs.(xs .+ ys), dim=dims) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
+    #stack and reshape to batch-last
+    s = permutedims(stack(s), (2,3,1))
     return s
 end
 
