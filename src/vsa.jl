@@ -15,6 +15,11 @@ function v_bind(x::AbstractArray, y::AbstractArray)
     return y
 end
 
+function v_bind(x::Vararg{<:AbstractArray}; dims=1)
+    x = cat((x...), dims=dims)
+    return v_bind(x, dims=dims)
+end
+
 function v_bind(x::SpikingCall, y::SpikingCall; return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
     output = v_bind(x.train, y.train; 
                 tspan=x.t_span, 
@@ -75,6 +80,11 @@ function v_bundle(x::AbstractArray; dims::Int)
     bz = sum(xz, dims = dims)
     y = complex_to_angle(bz)
     return y
+end
+
+function v_bundle(x::Vararg{<:AbstractArray}; dims=1)
+    x = cat((x...), dims=dims)
+    return v_bundle(x, dims=dims)
 end
 
 function v_bundle(x::SpikingCall; dims::Int)
