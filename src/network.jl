@@ -188,19 +188,17 @@ function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::Abs
     #do complex-domain matrix multiply of values by scores (b kt v)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
-    #(b kt v) * (b qt kt) ... (v kt) * (kt qt) over b
-    output = stack([scores[i,:,:] * v[i,:,:]  for i in axes(v, 1)], dims=1)
+    #(v kt b) * (b qt kt) ... (v kt) * (kt qt) over b
+    output = stack([v[:,:,i] * scores[:,:,i]' for i in axes(v, 3)], dims=3)
     output = complex_to_angle(output)
     return output
 end
 
 function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3})
-    @assert size(potential, 1) == size(scores,1) "Batch dimensions of inputs must match"
+    @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
-    scores = permutedims(scores, (2, 3, 1))
-    potential = permutedims(potential, (2, 3, 1))
-    scaled = batched_mul(scores, potential)
-    scaled = permutedims(scaled, (3, 1, 2))
+    scores = permutedims(scores, (2,1,3))
+    scaled = batched_mul(potential, scores)
     return scaled
 end
 
