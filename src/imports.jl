@@ -10,6 +10,6 @@ using Interpolations: linear_interpolation
 using Statistics: cor, mean
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
-using NNLib: batched_mul
+using NNlib: batched_mul
 
 import LuxLib: dropout
