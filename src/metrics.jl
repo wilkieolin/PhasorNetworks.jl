@@ -1,8 +1,3 @@
-using Interpolations: linear_interpolation
-using Statistics: cor
-using LinearAlgebra: diag
-using OneHotArrays: OneHotMatrix
-
 include("network.jl")
 
 function arc_error(phase::Real)

@@ -104,14 +104,8 @@ function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.
     return out_train
 end
 
-function v_bundle_project(x::AbstractArray{<:Real,3}, w::AbstractMatrix, b::AbstractVecOrMat)
+function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
-    y = complex_to_angle(xz)
-    return y
-end
-
-function v_bundle_project(x::AbstractMatrix, w::AbstractMatrix, b::AbstractVecOrMat)
-    xz = w * angle_to_complex(x) .+ b
     y = complex_to_angle(xz)
     return y
 end

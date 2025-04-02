@@ -300,7 +300,7 @@ function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.
     return sol
 end
 
-function oscillator_bank(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+function oscillator_bank(x::SpikeTrain{2}, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
     #get the number of batches & output neurons
@@ -309,6 +309,21 @@ function oscillator_bank(x::SpikeTrain, w::AbstractMatrix, b::AbstractVecOrMat; 
 
     #solve the ODE over the given time span
     dzdt(u, p, t) = update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    #return full solution
+    return sol
+end
+
+function oscillator_bank(x::SpikeTrain{3}, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    #get the number of batches & output neurons
+    output_shape = (size(w, 1), x.shape[2], x.shape[3])
+    u0 = zeros(ComplexF32, output_shape)
+
+    #solve the ODE over the given time span
+    dzdt(u, p, t) = update_fn(u) + batched_mul(w, spike_current(x, t, spk_args)) .+ bias_current(b, t, x.offset, spk_args)
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     #return full solution
