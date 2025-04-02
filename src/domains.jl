@@ -1,13 +1,23 @@
 include("imports.jl")
 
-struct SpikeTrain
+struct SpikeTrain{N}
     indices::Array{<:Union{Int, CartesianIndex},1}
     times::Array{<:Real,1}
     shape::Tuple
     offset::Real
+
+    function SpikeTrain(indices::AbstractArray,
+        times::AbstractArray,
+        shape::Tuple,
+        offset::Real)
+        return new{length(shape)}(indices,
+                            times,
+                            shape,
+                            offset)
+    end
 end
 
-struct SpikeTrainGPU
+struct SpikeTrainGPU{N}
     indices::CuArray
     linear_indices::CuArray
     times::CuArray{<:Real}
@@ -19,7 +29,7 @@ struct SpikeTrainGPU
                             times::AbstractArray,
                             shape::Tuple,
                             offset::Real)
-        return new(cu(indices), 
+        return new{length(shape)}(cu(indices), 
                 CuArray(LinearIndices(shape)[indices]),
                 cu(times),
                 shape,
