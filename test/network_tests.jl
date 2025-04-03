@@ -134,7 +134,7 @@ function ode_correlation(model, ode_model, ps, st, x, y)
     lval, grads = withgradient(p -> mean(quadrature_loss(model(x, p, st)[1], y)), psf)
     lval_ode, grads_ode = withgradient(p -> mean(quadrature_loss(ode_model(x, p, st)[1], y)), psf)
     lval_chk = abs(lval_ode - lval) < 0.02
-    grad_chk = cor_realvals(vec(grads[1].layer_4.weight), vec(grads_ode[1].layer_4.weight)) > 0.95
+    grad_chk = cor_realvals(vec(real.(grads[1].layer_4.weight)), vec(real.(grads_ode[1].layer_4.weight))) > 0.95
     @test lval_chk
     @test grad_chk
 
