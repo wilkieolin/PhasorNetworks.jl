@@ -153,6 +153,7 @@ struct SpikingArgs
     t_window::Real
     spk_scale::Real
     threshold::Real
+    spike_kernel::Union{Symbol, Function}
     solver
     solver_args::Dict
     update_fn::Function
@@ -163,6 +164,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                     t_window::Real = 0.01f0,
                     spk_scale::Real = 1.0f0,
                     threshold::Real = 0.001f0,
+                    spike_kernel = :gaussian,
                     solver = Heun(),
                     solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
@@ -174,6 +176,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             t_window,
             spk_scale,
             threshold,
+            spike_kernel,
             solver,
             solver_args,
             u -> neuron_constant(leakage, t_period) .* u,)
@@ -184,6 +187,7 @@ function SpikingArgs_NN(; leakage::Real = -0.2,
     t_window::Real = 0.01,
     spk_scale::Real = 1.0,
     threshold::Real = 0.001,
+    spike_kernel = :gaussian,
     solver = Heun(),
     solver_args = Dict(:dt => 0.01,
                     :adaptive => false,
@@ -196,6 +200,7 @@ function SpikingArgs_NN(; leakage::Real = -0.2,
             t_window,
             spk_scale,
             threshold,
+            spike_kernel,
             solver,
             solver_args,
             update_fn)

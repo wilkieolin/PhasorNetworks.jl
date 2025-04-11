@@ -222,15 +222,14 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         active_tms = train.times[active]
 
         #add currents into the active synapses
-        current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+        if typeof(spk_args.spike_kernel) == Function
+            current_kernel = x -> spk_args.spike_kernel(x, t)
+        else
+            current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+        end
         impulses = current_kernel(active_tms)
         
         current[active_inds] .+= (scale .*impulses)
-        # TODO - refactor spike train so that partitioning by index is stored
-        # and this calculation can be carried out safely in parallel
-        # for i in 1:length(impulses)
-        #     current[active_inds[i]] += impulses[i]
-        # end
     end
 
     return current
