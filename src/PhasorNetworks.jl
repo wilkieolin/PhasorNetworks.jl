@@ -63,6 +63,7 @@ similarity_loss,
 attend,
 variance_scaling,
 dense_onehot,
+ResidualBlock,
 
 #metrics
 cycle_correlation,

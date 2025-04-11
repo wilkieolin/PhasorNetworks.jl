@@ -15,7 +15,7 @@ function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
     return 1.0 .- sim
 end
 
-function similarity_loss(phases::AbstractArray, truth::AbstractArray, dim::Int)
+function similarity_loss(phases::AbstractArray, truth::AbstractArray; dim::Int = 1)
     sim = similarity(phases, truth, dim = dim)
     return 1.0 .- sim
 end
