@@ -211,6 +211,7 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
 end
 
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
+    @assert typeof(spk_args.spike_kernel) <: Function || spk_args.spike_kernel == :gaussian "Unrecognized kernel type, defaulting to gaussian"
     current = zeros(Float32, train.shape)
     scale = spk_args.spk_scale
 
@@ -222,9 +223,9 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         active_tms = train.times[active]
 
         #add currents into the active synapses
-        if typeof(spk_args.spike_kernel) == Function
+        if typeof(spk_args.spike_kernel) <: Function
             current_kernel = x -> spk_args.spike_kernel(x, t)
-        else
+        elseif spk_args.spike_kernel == :gaussian
             current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
         end
         impulses = current_kernel(active_tms)
