@@ -172,13 +172,39 @@ function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
 end
 
 """
+Residual blocks
+"""
+
+struct ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
+    ff
+end
+
+function ResidualBlock(dimensions::Tuple{Vararg{Int}};)
+    @assert length(dimensions) >= 2 "Must have at least 1 layer"
+    #construct a Phasor MLP based on the given dimensions
+    pairs = [dimensions[i] => dimensions[i+1] for i in 1:length(dimensions) - 1]
+    layers = [PhasorDense(pair) for pair in pairs]
+    ff = Chain(layers...)
+
+    return ResidualBlock(ff)
+end
+
+function (rb::ResidualBlock)(x, ps, st)
+    # MLP path
+    ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
+    x = v_bind(x, ff_out)
+    
+    return x, st_ff
+end
+
+"""
 Phasor QKV Attention
 """
 
 function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3})
     #compute qk scores
     #produces (b qt kt)
-    scores = similarity_outer(q, k, dims=2)
+    scores = exp.(similarity_outer(q, k, dims=2))
     #do complex-domain matrix multiply of values by scores (b kt v)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
@@ -192,6 +218,7 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3})
     @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
     scores = permutedims(scores, (2,1,3))
+    scores = exp.(scores)
     scaled = batched_mul(potential, scores)
     return scaled
 end
