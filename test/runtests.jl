@@ -36,6 +36,7 @@ tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 
+include("data.jl")
 include("domain_tests.jl")
 include("vsa_tests.jl")
 include("network_tests.jl")
