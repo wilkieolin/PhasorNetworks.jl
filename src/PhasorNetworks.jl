@@ -64,6 +64,8 @@ attend,
 variance_scaling,
 dense_onehot,
 ResidualBlock,
+PhasorAttention,
+SingleHeadAttention,
 
 #metrics
 cycle_correlation,
