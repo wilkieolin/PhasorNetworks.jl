@@ -1,0 +1,13 @@
+attention.ipynb filter=lfs diff=lfs merge=lfs -text
+binding.ipynb filter=lfs diff=lfs merge=lfs -text
+bundling.ipynb filter=lfs diff=lfs merge=lfs -text
+network.ipynb filter=lfs diff=lfs merge=lfs -text
+similarity.ipynb filter=lfs diff=lfs merge=lfs -text
+test.ipynb filter=lfs diff=lfs merge=lfs -text
+attention_identity.ipynb filter=lfs diff=lfs merge=lfs -text
+attn_data.ipynb filter=lfs diff=lfs merge=lfs -text
+domains.ipynb filter=lfs diff=lfs merge=lfs -text
+layer.ipynb filter=lfs diff=lfs merge=lfs -text
+ode[[:space:]]network.ipynb filter=lfs diff=lfs merge=lfs -text
+oscillator[[:space:]]bank.ipynb filter=lfs diff=lfs merge=lfs -text
+xform[[:space:]]network.ipynb filter=lfs diff=lfs merge=lfs -text
