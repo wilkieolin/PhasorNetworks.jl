@@ -25,62 +25,6 @@ function network_tests()
 
     return all_pass
 end
-
-function bullseye_data(n_s::Int, rng::AbstractRNG)
-    d = Normal(0.0, 0.08)
-    #determine the class labels
-    y = rand(rng, (0, 1), n_s)
-    #determine the polar coordinates
-    r = rand(rng, d, n_s) .+ (0.4 .* y)
-    phi = (rand(rng, Float64, n_s) .- 1) .* (2 * pi)
-    #convert to cartesian
-    x_x = r .* cos.(phi)
-    x_y = r .* sin.(phi)
-
-    data = Float32.(cat(x_x, x_y, dims=2)' )
-    labels = onehotbatch(y, 0:1)
-
-    return data, labels
-end
-
-function generate_helix(r::Real, theta::Real, frequency::Real, scale::Real)
-    """
-    Construct a generating function for a helix
-    
-    Parameters:
-    - r:       Cylinder radius (distance from z-axis)
-    - theta:   Initial angular phase offset [radians]
-    - frequency:       Angular frequency [radians/unit time]
-    - scale:   How far it stretches in z per unit time [1/unit time]
-    
-    Returns:
-    - Array (x, y, z) of coordinate vectors
-    """
-    function helix(t::Real)
-        v = r * exp(1im * (theta + frequency * t))
-        x = real(v)
-        y = imag(v)
-        z = scale * t
-        return [x,y,z]
-    end
-    return helix
-end
-
-function helix_data(n_points::Int)
-    #setup the generating functions
-    left = generate_helix(1.0, 0.0, 10.0, 1.0)
-    right = generate_helix(1.0, pi, 10.0, 1.0)
-    #choose the parametric sampling points
-    ts = range(start = 0.0, stop = 1.0, length = n_points)
-    #generate the coordinates
-    left_pts = left.(ts) |> stack
-    right_pts = right.(ts) |> stack
-    pts = cat(left_pts, right_pts, dims=2)
-    #label what belongs to which function
-    labels = cat(zeros(n_points), ones(n_points), dims=1)
-    
-    return pts, labels
-end
  
 function getdata(args)
     #make synthetic bullseye data (no needing an external data repository)

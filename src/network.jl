@@ -201,79 +201,140 @@ end
 Phasor QKV Attention
 """
 
-function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3})
+function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::Real=1.0f0)
     #compute qk scores
     #produces (b qt kt)
-    scores = exp.(similarity_outer(q, k, dims=2))
+    d_k = size(k,2)
+    scores = exp.(scale .* similarity_outer(q, k, dims=2)) ./ d_k
     #do complex-domain matrix multiply of values by scores (b kt v)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
     #(v kt b) * (b qt kt) ... (v kt) * (kt qt) over b
     output = stack([v[:,:,i] * scores[:,:,i]' for i in axes(v, 3)], dims=3)
     output = complex_to_angle(output)
-    return output
+    return output, scores
 end
 
-function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3})
+function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3}; d_k::Int, scale::Real=1.0f0)
     @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
     scores = permutedims(scores, (2,1,3))
-    scores = exp.(scores)
+    d_k = size(scores,1)
+    scores = exp.(scale .* scores) / d_k
     scaled = batched_mul(potential, scores)
     return scaled
 end
 
-function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false)
+function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false, scale::Real=1.0f0)
     #compute the similarity between the spike trains
     #produces [time][b qt kt]
     scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
     #convert the values to potentials
+    d_k = size(k)[2]
     values = oscillator_bank(v, tspan=tspan, spk_args=spk_args)
     #multiply by the scores found at each time step
-    output_u = score_scale.(values.u, scores)
+    output_u = score_scale.(values.u, scores, scale=scale, d_k=d_k)
     if return_solution 
         return output_u 
     end
 
     output = solution_to_train(output_u, values.t, tspan, spk_args=spk_args, offset=v.offset)
-    return output
+    return output, scores
 end
 
-struct PhasorAttention{M<:AbstractArray, B} <: Lux.AbstractLuxLayer
-    shape::Tuple{<:Int, <:Int}
-    in_dims::Int
-    out_dims::Int
-    init_weight::Function
-    init_bias::Function
+struct PhasorAttention <: Lux.AbstractLuxLayer
+    init_scale::Real
 end
 
-function (a::PhasorAttention)(query::AbstractArray, keyvalue::AbstractArray)
-    q = a.query_network(query)
-    k = a.key_network(keyvalue)
-    v = a.value_network(keyvalue)
-
-    result = attend(q, k, v)
-
-    output = a.output_network(result)
-
-    return output
+function PhasorAttention()
+    return PhasorAttention(1.0f0)
 end
 
+function Lux.initialparameters(rng::AbstractRNG, attention::PhasorAttention)
+    params = (scale = [attention.init_scale],)
+end
 
-"""
-Phasor Self-Attention Module
-"""
-struct PhasorSA{M<:AbstractArray, B} <: Lux.AbstractLuxLayer
-    shape::Tuple{<:Int, <:Int}
-    n_heads::Int
-    in_dims::Int
-    out_dims::Int
-    init_weight::Function
-    init_bias::Function
+function (a::PhasorAttention)(q::AbstractArray, k::AbstractArray, v::AbstractArray, ps::LuxParams, st::NamedTuple)
+    result, scores = attend(q, k, v, scale=ps.scale[1])
 
-    function PhasorDense(W::M, b::B) where {M<:AbstractArray, B<:AbstractVector}
-      new{M,typeof(b)}(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b))
-    end
+    return result, (scores=scores,)
+end
+
+identity_layer = Chain(x -> x,)
+
+struct SingleHeadAttention <: LuxCore.AbstractLuxContainerLayer{(:q_proj, :k_proj, :v_proj, :attention, :out_proj)}
+    q_proj
+    k_proj
+    v_proj
+    attention
+    out_proj
+end
+
+function SingleHeadAttention(d_input::Int, d_model::Int; init=variance_scaling, kwargs...)
+    default_model = () -> Chain(ResidualBlock((d_input, d_model)))
+
+    q_proj = get(kwargs, :q_proj, default_model())
+    k_proj = get(kwargs, :k_proj, default_model())
+    v_proj = get(kwargs, :v_proj, default_model())
+    scale = get(kwargs, :scale, 1.0f0)
+    attention = get(kwargs, :attention, PhasorAttention(scale))
+    out_proj = get(kwargs, :out_proj, PhasorDense(d_model => d_input; init))
+    
+
+    SingleHeadAttention(
+        q_proj,  # Query
+        k_proj,  # Key
+        v_proj,  # Value
+        attention, # Attention mechanism
+        out_proj,   # Output
+    )
+end
+
+function (m::SingleHeadAttention)(q, kv, ps, st)
+    q = m.q_proj(q, ps.q_proj, st.q_proj)[1]
+    k = m.k_proj(kv, ps.k_proj, st.k_proj)[1]
+    v = m.v_proj(kv, ps.v_proj, st.v_proj)[1]
+    
+    # Single-head attention (nheads=1)
+    attn_out, scores = attend(q, k, v, ps.attention, st.attention)
+    output = m.out_proj(attn_out, ps.out_proj, st.out_proj)[1]
+    
+    return output, (scores = scores,)
+end
+
+struct SingleHeadCABlock <: LuxCore.AbstractLuxContainerLayer{(:attn, :q_norm, :kv_norm, :ff_norm, :ff)}
+    attn::SingleHeadAttention
+    q_norm
+    kv_norm
+    ff_norm
+    ff
+end
+
+function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; dropout::Real=0.1, kwargs...)
+    SingleHeadCABlock(
+        SingleHeadAttention(d_input, d_model; kwargs...),
+        LayerNorm((d_model, n_q)),
+        LayerNorm((d_model, n_kv)),
+        LayerNorm((d_model, n_q)),
+        Chain(PhasorDense(d_input => d_model),
+            Dropout(dropout),
+            PhasorDense(d_model => d_input)),
+    )
+end
+
+function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
+    # Attention path
+    norm_q = tb.q_norm(q, ps.q_norm, st.q_norm)[1]
+    norm_kv = tb.kv_norm(kv, ps.kv_norm, st.kv_norm)[1]
+    attn_out, st_attn = tb.attn(q, kv, ps.attn, st.attn)
+    x = v_bind(q, attn_out)
+    
+    # Feed-forward path
+    norm_x = tb.ff_norm(x, ps.ff_norm, st.ff_norm)[1]
+    ff_out, st_ff = tb.ff(x, ps.ff, st.ff)
+    x = v_bind(x, ff_out)
+    
+    return x, merge(st_attn, st_ff)
 end
 
 """

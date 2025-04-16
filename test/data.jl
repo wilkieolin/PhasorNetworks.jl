@@ -61,6 +61,22 @@ end
 """
 HD / Attention data
 """
+function generate_codebook(rng::AbstractRNG; vocab_size::Int=100, n_hd::Int=512)
+    symbols = random_symbols((n_hd, vocab_size), rng)
+    codebook = Dict{Int, Vector{<:Real}}()
+    for i in 1:vocab_size
+        codebook[i] = symbols[:,i]
+    end
+    codebook[Int(0)] = zeros(n_hd)
+    return codebook
+end
+
+function map_symbols(dataset::Vector{<:Any}, codebook::Dict{<:Int, <:Vector{<:Real}})
+    map_fn = x -> stack([codebook[k] for k in x])
+
+    output = [map_fn.(data) for data in dataset]
+    return output
+end
 
 function generate_addresses(n_samples::Int,  n_vsa::Int, rng::AbstractRNG)
     header = random_symbols((n_vsa, 1), rng)
@@ -75,6 +91,8 @@ function generate_copy_dataset(rng::AbstractRNG; num_samples::Int=1000, max_leng
     for _ in 1:num_samples
         length = rand(rng, 5:max_length)
         sequence = [rand(1:vocab_size) for _ in 1:length]
+        #pad with zeros
+        sequence = cat(sequence, zeros(Int, max_length - length), dims=1)
         push!(dataset, (sequence, sequence))  # Input and target identical
     end
     return dataset

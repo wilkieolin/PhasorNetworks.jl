@@ -67,7 +67,7 @@ function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
 end
 
-function Base.size(x::SpikeTrain)
+function Base.size(x::Union{SpikeTrain, SpikeTrainGPU})
     return x.shape
 end
 
@@ -219,6 +219,10 @@ struct SpikingCall
     t_span::Tuple{<:Real, <:Real}
 end
 
+function Base.size(x::SpikingCall)
+    return x.train.shape
+end
+
 function Base.getindex(x::SpikingCall, inds...)
     new_train = getindex(x.train, inds...)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
@@ -231,10 +235,18 @@ struct LocalCurrent
     offset::Real
 end
 
+function Base.size(x::LocalCurrent)
+    return x.shape
+end
+
 struct CurrentCall
     current::LocalCurrent
     spk_args::SpikingArgs
     t_span::Tuple{<:Real, <:Real}
+end
+
+function Base.size(x::CurrentCall)
+    return x.current.shape
 end
 
 PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
