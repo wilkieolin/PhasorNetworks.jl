@@ -203,14 +203,14 @@ Phasor QKV Attention
 
 function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::Real=1.0f0)
     #compute qk scores
-    #produces (b qt kt)
+    #produces (qt kt b)
     d_k = size(k,2)
     scores = exp.(scale .* similarity_outer(q, k, dims=2)) ./ d_k
-    #do complex-domain matrix multiply of values by scores (b kt v)
+    #do complex-domain matrix multiply of values by scores (kt v b)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
-    #(v kt b) * (b qt kt) ... (v kt) * (kt qt) over b
-    output = stack([v[:,:,i] * scores[:,:,i]' for i in axes(v, 3)], dims=3)
+    #(v kt b) * (kt qt b) ... (v kt) * (kt qt) over b
+    output = batched_mul(v, scores)
     output = complex_to_angle(output)
     return output, scores
 end
@@ -220,7 +220,7 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3};
 
     scores = permutedims(scores, (2,1,3))
     d_k = size(scores,1)
-    scores = exp.(scale .* scores) / d_k
+    scores = exp.(scale .* scores) ./ d_k
     scaled = batched_mul(potential, scores)
     return scaled
 end
