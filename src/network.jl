@@ -251,7 +251,7 @@ function PhasorAttention()
 end
 
 function Lux.initialparameters(rng::AbstractRNG, attention::PhasorAttention)
-    params = (scale = [attention.init_scale],)
+    params = (scale = [attention.init_scale,],)
 end
 
 function (a::PhasorAttention)(q::AbstractArray, k::AbstractArray, v::AbstractArray, ps::LuxParams, st::NamedTuple)
@@ -291,12 +291,12 @@ function SingleHeadAttention(d_input::Int, d_model::Int; init=variance_scaling, 
 end
 
 function (m::SingleHeadAttention)(q, kv, ps, st)
-    q = m.q_proj(q, ps.q_proj, st.q_proj)[1]
-    k = m.k_proj(kv, ps.k_proj, st.k_proj)[1]
-    v = m.v_proj(kv, ps.v_proj, st.v_proj)[1]
+    q, _ = m.q_proj(q, ps.q_proj, st.q_proj)
+    k, _ = m.k_proj(kv, ps.k_proj, st.k_proj)
+    v, _ = m.v_proj(kv, ps.v_proj, st.v_proj)
     
     # Single-head attention (nheads=1)
-    attn_out, scores = m.attention(q, k, v, ps.attention, st.attenion)
+    attn_out, scores = m.attention(q, k, v, ps.attention, st.attention)
     output = m.out_proj(attn_out, ps.out_proj, st.out_proj)[1]
     
     return output, (scores = scores,)
