@@ -296,7 +296,7 @@ function (m::SingleHeadAttention)(q, kv, ps, st)
     v = m.v_proj(kv, ps.v_proj, st.v_proj)[1]
     
     # Single-head attention (nheads=1)
-    attn_out, scores = attend(q, k, v, ps.attention, st.attention)
+    attn_out, scores = m.attention(q, k, v, ps.attention, st.attenion)
     output = m.out_proj(attn_out, ps.out_proj, st.out_proj)[1]
     
     return output, (scores = scores,)
