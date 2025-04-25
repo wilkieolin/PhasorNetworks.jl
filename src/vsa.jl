@@ -7,7 +7,7 @@ function v_bind(x::AbstractArray; dims)
 end
 
 function v_bind(x::AbstractArray, y::AbstractArray)
-    y = remap_phase(x + y)
+    y = remap_phase(x .+ y)
     return y
 end
 
@@ -163,16 +163,20 @@ function random_symbols(size::Tuple{Vararg{Int}}, rng::AbstractRNG)
 end
 
 function remap_phase(x::Real)
-    x = x + 1
-    x = mod(x, 2.0)
-    x = x - 1
+    ignore_derivatives() do
+        x = x + 1
+        x = mod(x, 2.0)
+        x = x - 1
+    end
     return x
 end
 
 function remap_phase(x::AbstractArray)
-    x = x .+ 1
-    x = mod.(x, 2.0)
-    x = x .- 1
+    ignore_derivatives() do
+        x = x .+ 1
+        x = mod.(x, 2.0)
+        x = x .- 1 
+    end
     return x
 end
 
