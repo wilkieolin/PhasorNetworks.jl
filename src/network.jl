@@ -201,7 +201,7 @@ end
 Phasor QKV Attention
 """
 
-function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::Real=1.0f0)
+function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::AbstractArray=[1.0f0,])
     #compute qk scores
     #produces (qt kt b)
     d_k = size(k,2)
@@ -215,7 +215,7 @@ function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::Abs
     return output, scores
 end
 
-function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3}; d_k::Int, scale::Real=1.0f0)
+function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3}; d_k::Int, scale::AbstractArray=[1.0f0,])
     @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
     scores = permutedims(scores, (2,1,3))
@@ -225,7 +225,7 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3};
     return scaled
 end
 
-function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false, scale::Real=1.0f0)
+function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false, scale::AbstractArray=[1.0f0,])
     #compute the similarity between the spike trains
     #produces [time][b qt kt]
     scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
@@ -255,7 +255,7 @@ function Lux.initialparameters(rng::AbstractRNG, attention::PhasorAttention)
 end
 
 function (a::PhasorAttention)(q::AbstractArray, k::AbstractArray, v::AbstractArray, ps::LuxParams, st::NamedTuple)
-    result, scores = attend(q, k, v, scale=ps.scale[1])
+    result, scores = attend(q, k, v, scale=ps.scale)
 
     return result, (scores=scores,)
 end
