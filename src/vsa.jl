@@ -11,7 +11,7 @@ function v_bind(x::AbstractArray, y::AbstractArray)
     return y
 end
 
-function v_bind(x::Tuple{Vararg{<:AbstractArray}}; dims=1)
+function v_bind(x::Tuple{Vararg{AbstractArray}}; dims=1)
     x = cat((x...), dims=dims)
     return v_bind(x, dims=dims)
 end
@@ -78,7 +78,7 @@ function v_bundle(x::AbstractArray; dims::Int)
     return y
 end
 
-function v_bundle(x::Tuple{Vararg{<:AbstractArray}}; dims=1)
+function v_bundle(x::Tuple{Vararg{AbstractArray}}; dims=1)
     x = cat((x...), dims=dims)
     return v_bundle(x, dims=dims)
 end
