@@ -338,6 +338,50 @@ function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
 end
 
 """
+Training loops/primitives
+"""
+@kwdef mutable struct Args
+    η::Float64 = 3e-4       ## learning rate
+    batchsize::Int = 256    ## batch size
+    epochs::Int = 10        ## number of epochs
+    use_cuda::Bool = true   ## use gpu (if cuda available)
+    rng::Xoshiro = Xoshiro(42) ## global rng
+end
+
+function train(model, ps, st, train_loader, loss, args; verbose::Bool = false)
+    if CUDA.functional() && args.use_cuda
+       @info "Training on CUDA GPU"
+       #CUDA.allowscalar(false)
+       device = gpu_device()
+   else
+       @info "Training on CPU"
+       device = cpu_device()
+   end
+
+   ## Optimizer
+   opt_state = Optimisers.setup(Adam(args.η), ps)
+   losses = []
+
+   ## Training
+   for epoch in 1:args.epochs
+       for (x, y) in train_loader
+           x = x |> device
+           y = y |> device
+           
+           lf = p -> loss(x, y, model, p, st)
+           lossval, gs = withgradient(lf, ps)
+           if verbose
+               println(reduce(*, ["Epoch ", string(epoch), " loss: ", string(lossval)]))
+           end
+           append!(losses, lossval)
+           opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
+       end
+   end
+
+   return losses, ps, st
+end
+
+"""
 Other utilities
 """
 

@@ -1,5 +1,6 @@
 using CUDA, LuxCUDA
-using ComponentArrays, SciMLSensitivity, DifferentialEquations, Lux
+using ComponentArrays, Lux
+using SciMLSensitivity, DifferentialEquations, Optimisers
 
 using Lux: glorot_uniform, truncated_normal
 using LinearAlgebra: diagind, I
@@ -11,5 +12,8 @@ using Statistics: cor, mean
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
 using NNlib: batched_mul
+using Base: @kwdef
+using Zygote: withgradient
+using Random: Xoshiro
 
 import LuxLib: dropout

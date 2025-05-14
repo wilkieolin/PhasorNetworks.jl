@@ -13,6 +13,7 @@ SpikingCall,
 CurrentCall,
 SpikingArgs_NN,
 TrackOutput,
+Args,
 
 #domain conversions
 phase_to_train,
@@ -66,6 +67,7 @@ dense_onehot,
 ResidualBlock,
 PhasorAttention,
 SingleHeadAttention,
+train,
 
 #metrics
 cycle_correlation,

@@ -106,49 +106,14 @@ function correlation_test(model, spk_model, ps, st, x)
 end
 
 function loss(x, y, model, ps, st)
-    y_pred, st = model(x, ps, st)
-    return mean(quadrature_loss(y_pred, y)), st
-end
-
-function train(model, ps, st, train_loader, args; verbose::Bool = false)
-     if CUDA.functional() && args.use_cuda
-        @info "Training on CUDA GPU"
-        CUDA.allowscalar(false)
-        device = gpu_device()
-        conv_fn = x -> x |> dense_onehot |> device
-    else
-        @info "Training on CPU"
-        device = cpu_device()
-        conv_fn = x -> x
-    end
-
-    ## Optimizer
-    opt_state = Optimisers.setup(Adam(args.η), ps)
-    losses = []
-
-    ## Training
-    for epoch in 1:args.epochs
-        for (x, y) in train_loader
-            x = x |> device
-            y = y |> conv_fn
-            
-            lf = p -> loss(x, y, model, p, st)[1]
-            lossval, gs = withgradient(lf, ps)
-            if verbose
-                println(reduce(*, ["Epoch ", string(epoch), " loss: ", string(lossval)]))
-            end
-            append!(losses, lossval)
-            opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
-        end
-    end
-
-    return losses, ps, st
+    y_pred, _ = model(x, ps, st)
+    return mean(quadrature_loss(y_pred, y))
 end
 
 function train_test(model, args, ps, st, train_loader, test_loader)
     @info "Running training test..."
 
-    losses, ps, st = train(model, ps, st, train_loader, args)
+    losses, ps, st = train(model, ps, st, train_loader, loss, args)
 
     #check the final loss against the usual ending value
     loss_check = losses[end] < 0.36

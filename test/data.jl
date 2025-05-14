@@ -103,6 +103,8 @@ function generate_reversal_dataset(rng::AbstractRNG; num_samples=1000, max_lengt
     for _ in 1:num_samples
         length = rand(rng, 5:max_length)
         sequence = [rand(rng, 1:vocab_size) for _ in 1:length]
+        #pad with zeros
+        sequence = cat(sequence, zeros(Int, max_length - length), dims=1)
         reversed_sequence = reverse(sequence)
         push!(dataset, (sequence, reversed_sequence))
     end
