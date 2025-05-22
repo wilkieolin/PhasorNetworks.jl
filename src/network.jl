@@ -122,6 +122,31 @@ function Base.show(io::IO, l::PhasorDense)
 end
 
 ###
+### Convolutional Phasor Layer
+###
+
+struct PhasorConv <: LuxCore.AbstractLuxWrapperLayer{:conv}
+    conv
+end
+
+function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, kwargs...)
+    #construct the convolutional layer
+    conv = Conv(k, chs, identity, kwargs...)
+    return ResidualBlock(conv)
+end
+
+function (pc::PhasorConv)(x, ps, st)
+    x = angle_to_complex(x)
+    y_real, st_real = pc.conv(real.(x), ps.conv, st.conv)
+    y_imag, st_imag = pc.conv(imag.(x), ps.conv, st.conv)
+    st = (conv_real = st_real, conv_imag = st_imag)
+    y = y_real .+ 1im .* y_imag
+    y = complex_to_angle(y)
+    
+    return x, st
+end
+
+###
 ### Layer which resonates with incoming input currents - mainly with one input and weakly with others
 ###
 struct PhasorResonant <: Lux.AbstractLuxLayer
