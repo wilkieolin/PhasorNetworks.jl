@@ -8,20 +8,24 @@ function arc_error(phases::AbstractArray)
     return arc_error.(phases)
 end
 
+function exp_score(similarity::AbstractArray; scale::Real = 3.0f0)
+    return exp.((1.0f0 .- similarity) .* scale) .- 1.0f0
+end
+
 function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
-    #truth = 2.0 .* truth .- 1.0
-    targets = 0.5 .* truth
+    #truth = 2.0f0 .* truth .- 1.0f0
+    targets = 0.5f0 .* truth
     sim = similarity(phases, targets, dim = 1)
-    return 1.0 .- sim
+    return 1.0f0 .- sim
 end
 
 function similarity_loss(phases::AbstractArray, truth::AbstractArray; dim::Int = 1)
     sim = similarity(phases, truth, dim = dim)
-    return 1.0 .- sim
+    return 1.0f0 .- sim
 end
 
 function z_score(phases::AbstractArray)
-    arc = remap_phase(phases .- 0.5)
+    arc = remap_phase(phases .- 0.5f0)
     score = abs.(atanh.(arc))
     return score
 end
@@ -45,7 +49,7 @@ function loss_and_accuracy(data_loader, model, ps, st, args)
             ŷ, _ = train_to_phase(ŷ)
         end
         
-        ls += sum(quadrature_loss(ŷ, 1.0 .* y |> dev))
+        ls += sum(quadrature_loss(ŷ, 1.0f0 .* y |> dev))
         acc += sum(accuracy_quadrature(ŷ, y)) ## Decode the output of the model
         num +=  size(y)[2]
     end
@@ -85,7 +89,7 @@ function predict_quadrature(phases::AbstractMatrix)
         phases = phases |> cdev
     end
 
-    predictions = getindex.(argmin(abs.(phases .- 0.5), dims=1), 1)'
+    predictions = getindex.(argmin(abs.(phases .- 0.5f0), dims=1), 1)'
     return predictions
 end
 
@@ -141,7 +145,7 @@ function cor_realvals(x, y)
     y_real = is_real(y)
     reals = x_real .* y_real
     if sum(reals) == 0
-        return 0.0
+        return 0.0f0
     else
         return cor(x[reals], y[reals])
     end
@@ -153,9 +157,9 @@ function OvR_matrices(predictions, labels, threshold::Real)
     return mats
 end
 
-function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01)
-    test_points = range(start = 0.0, stop = -20.0, length = points)
-    test_points = vcat(exp.(test_points), 0.0, reverse(-1 .* exp.(test_points)))
+function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
+    test_points = range(start = 0.0f0, stop = -20.0f0, length = points)
+    test_points = vcat(exp.(test_points), 0.0f0, reverse(-1 .* exp.(test_points)))
 
     fn = x -> sum(OvR_matrices(prediction, labels, x))
     confusion = cat(fn.(test_points)..., dims=3)

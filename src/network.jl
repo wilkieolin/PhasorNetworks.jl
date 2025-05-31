@@ -129,7 +129,7 @@ struct PhasorConv <: LuxCore.AbstractLuxWrapperLayer{:conv}
     conv
 end
 
-function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, kwargs...)
     #construct the convolutional layer
     conv = Conv(k, chs, identity, kwargs...)
     return ResidualBlock(conv)
@@ -373,7 +373,7 @@ Training loops/primitives
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 
-function train(model, ps, st, train_loader, loss, args; verbose::Bool = false)
+function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false)
     if CUDA.functional() && args.use_cuda
        @info "Training on CUDA GPU"
        #CUDA.allowscalar(false)
@@ -384,7 +384,7 @@ function train(model, ps, st, train_loader, loss, args; verbose::Bool = false)
    end
 
    ## Optimizer
-   opt_state = Optimisers.setup(Adam(args.η), ps)
+   opt_state = Optimisers.setup(optimiser(args.η), ps)
    losses = []
 
    ## Training
@@ -405,6 +405,7 @@ function train(model, ps, st, train_loader, loss, args; verbose::Bool = false)
 
    return losses, ps, st
 end
+
 
 """
 Other utilities

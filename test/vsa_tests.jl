@@ -1,3 +1,5 @@
+# This file is intended to be included and run from runtests.jl
+# Ensure that runtests.jl has already loaded PhasorNetworks and other common dependencies.
 
 """
 Run all the basic VSA tests and check they pass
