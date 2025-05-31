@@ -45,4 +45,20 @@ include("network_tests.jl")
     domain_tests()
     vsa_tests()
     network_tests()
+
+    if CUDA.functional()
+        @info "CUDA device detected and functional. Running CUDA tests..."
+        @testset "CUDA Specific Tests" begin
+            try
+                include("test_cuda.jl")
+                cuda_core_tests() # Call the main test function from test_cuda.jl
+            catch e
+                @error "Error during CUDA tests:" exception=(e, catch_backtrace())
+                @test false # Explicitly fail CUDA test section on error
+            end
+        end
+    else
+        @info "No functional CUDA device detected or CUDA.jl is not functional. Skipping CUDA tests."
+        # Optionally, explicitly mark as skipped if your test framework supports it.
+    end
 end

@@ -1,3 +1,6 @@
+# This file is intended to be included and run from runtests.jl
+# Ensure that runtests.jl has already loaded PhasorNetworks and other common dependencies.
+
 function network_tests()
     #load the dataset and a single batch for testing
     args = Args()
