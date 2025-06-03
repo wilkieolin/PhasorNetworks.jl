@@ -106,7 +106,8 @@ end
 
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
-    y = complex_to_angle(xz)
+    #y = complex_to_angle(xz)
+    y = soft_angle(xz, 1e-2, 0.1)
     return y
 end
 

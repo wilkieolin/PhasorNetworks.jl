@@ -1,5 +1,14 @@
 include("imports.jl")
 
+
+@kwdef mutable struct Args
+    lr::Float64 = 0.001       ## learning rate
+    batchsize::Int = 256    ## batch size
+    epochs::Int = 10        ## number of epochs
+    use_cuda::Bool = true   ## use gpu (if cuda available)
+    rng::Xoshiro = Xoshiro(42) ## global rng
+end
+
 struct SpikeTrain{N}
     indices::Array{<:Union{Int, CartesianIndex},1}
     times::Array{<:Real,1}
@@ -259,6 +268,31 @@ end
 function complex_to_angle(x::AbstractArray)
     return angle.(x) ./ convert(Float32,pi)
 end
+
+# function soft_angle(x::Complex, r_lo::Real = 1e-2, r_hi::Real = 0.2)
+#     function kernel(x::Complex)
+#         r = abs(x)
+#         if r < r_lo
+#             return zero(real(x))
+#         elseif r > r_hi
+#             return one(real(x))
+#         else
+#             return (r - r_lo)/(r_hi - r_lo)
+#         end
+#     end
+
+#     return kernel(x) * angle(x) / convert(typeof(x), pi)
+# end
+
+
+function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+    r = abs.(x)
+    m = (r .- r_lo) ./ (r_hi - r_lo)
+    s = sigmoid_fast(3 .* m .- (r_hi - r_lo))
+
+    return s .* angle.(x) / pi
+end
+
 
 function cmpx_to_realvec(u::Array{<:Complex})
     nd = ndims(u)
