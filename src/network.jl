@@ -82,14 +82,14 @@ function PhasorDense(W::AbstractMatrix; return_solution::Bool, phase_bias::Bool=
 end
 
 function PhasorDense((in, out)::Pair{<:Integer, <:Integer};
-                init = variance_scaling,
+                init_weight = variance_scaling,
                 return_solution::Bool = false,
                 phase_bias::Bool = true,)
 
     if phase_bias
-        layer = PhasorDense((in, out), variance_scaling, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
+        layer = PhasorDense((in, out), init_weight, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
     else
-        layer = PhasorDense((in, out), variance_scaling, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
+        layer = PhasorDense((in, out), init_weight, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
     end
 
     return layer
@@ -102,7 +102,8 @@ end
 # Calls
 
 function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag)
+    z = angle_to_complex(x)
+    xz = 
     return y, state
 end
 
@@ -362,17 +363,6 @@ function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
     return x, merge(st_attn, st_ff)
 end
 
-"""
-Training loops/primitives
-"""
-@kwdef mutable struct Args
-    η::Float64 = 3e-4       ## learning rate
-    batchsize::Int = 256    ## batch size
-    epochs::Int = 10        ## number of epochs
-    use_cuda::Bool = true   ## use gpu (if cuda available)
-    rng::Xoshiro = Xoshiro(42) ## global rng
-end
-
 function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false)
     if CUDA.functional() && args.use_cuda
        @info "Training on CUDA GPU"
@@ -384,7 +374,7 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
    end
 
    ## Optimizer
-   opt_state = Optimisers.setup(optimiser(args.η), ps)
+   opt_state = Optimisers.setup(optimiser(args.lr), ps)
    losses = []
 
    ## Training
@@ -410,6 +400,19 @@ end
 """
 Other utilities
 """
+
+struct MinPool <: LuxCore.AbstractLuxWrapperLayer{:pool}
+    pool
+end
+
+function MinPool()
+    return MinPool(MaxPool())
+end
+
+function (mp::MinPool)(x, ps, st)
+    y = -1.0f0 .* mp(-1.0f0 .* x, ps, st)
+    return y
+end 
 
 struct TrackOutput{L<:Lux.AbstractLuxLayer} <: Lux.AbstractLuxLayer
     layer::L
