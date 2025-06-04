@@ -68,6 +68,7 @@ ResidualBlock,
 PhasorAttention,
 SingleHeadAttention,
 train,
+soft_angle,
 
 #metrics
 cycle_correlation,

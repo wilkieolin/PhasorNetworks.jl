@@ -287,7 +287,7 @@ function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real,
     return sol
 end
 
-function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
@@ -300,17 +300,19 @@ function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0, 10.
     return sol
 end
 
-function oscillator_bank(x::SpikeTrain, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikeTrain, kernel_fn::Function; bias::AbstractArray{<:Complex}, tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
-    u0 = zeros(ComplexF32, x.shape)
+    output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
+    u0 = zeros(ComplexF32, size(output_sample))
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
         s_current = spike_current(x, t, spk_args)
         transformed_current = kernel_fn(s_current)
-        return update_fn(u) .+ transformed_current
+        bias = bias_current(bias, t, x.offset, spk_args)
+        return update_fn(u) .+ transformed_current .+ bias
     end
 
     #solve the memory compartment using the base oscillator_bank method
@@ -319,39 +321,25 @@ function oscillator_bank(x::SpikeTrain, kernel_fn::Function; tspan::Tuple{<:Real
     return sol
 end
 
-
-function oscillator_bank(x::SpikeTrain{2}, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #set up functions to define the neuron's differential equations
+function oscillator_bank(x::SpikeTrainGPU, kernel_fn::Function; bias::AbstractArray{<:Complex}, tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
-    #get the number of batches & output neurons
-    output_shape = (size(w, 1), x.shape[2])
-    u0 = zeros(ComplexF32, output_shape)
 
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+    #set up compartments for each sample
+    output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
+    u0 = zeros(ComplexF32, size(output_sample)) |> gdev
+
+    #resonate in time with the input spikes, applying the kernel to the spike current
+    function dzdt(u, p, t)
+        s_current = spike_current(x, t, spk_args)
+        transformed_current = kernel_fn(s_current)
+        biasing_current = bias_current(bias, t, x.offset, spk_args)
+        return update_fn(u) .+ transformed_current .+ biasing_current
+    end
+
+    #solve the memory compartment using the base oscillator_bank method
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
-    #return full solution
     return sol
-end
-
-function oscillator_bank(x::SpikeTrain{3}, w::AbstractMatrix, b::AbstractVecOrMat; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-    #get the number of batches & output neurons
-    output_shape = (size(w, 1), x.shape[2], x.shape[3])
-    u0 = zeros(ComplexF32, output_shape)
-
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + batched_mul(w, spike_current(x, t, spk_args)) .+ bias_current(b, t, x.offset, spk_args)
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    #return full solution
-    return sol
-end
-
-function oscillator_bank(x::CurrentCall; )
-    return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
 function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
