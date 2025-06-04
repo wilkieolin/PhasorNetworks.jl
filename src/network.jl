@@ -2,6 +2,10 @@ include("vsa.jl")
 
 LuxParams = Union{NamedTuple, ComponentArray, SubArray}
 
+"""
+MakeSpiking - a layer to include in Chains to convert phase tensors
+into SpikeTrains
+"""
 struct MakeSpiking <: Lux.AbstractLuxLayer
     spk_args::SpikingArgs
     repeats::Int
@@ -10,7 +14,7 @@ struct MakeSpiking <: Lux.AbstractLuxLayer
 end
 
 function MakeSpiking(spk_args::SpikingArgs, repeats::Int)
-    return MakeSpiking(spk_args, repeats, (0.0, spk_args.t_period * repeats), 0.0)
+    return MakeSpiking(spk_args, repeats, (0.0f0, spk_args.t_period * repeats), 0.0f0)
 end
 
 function (a::MakeSpiking)(x::AbstractArray, params::LuxParams, state::NamedTuple)
@@ -20,11 +24,14 @@ function (a::MakeSpiking)(x::AbstractArray, params::LuxParams, state::NamedTuple
 end
 
 function (a::MakeSpiking)(x::ODESolution, params::LuxParams, state::NamedTuple)
-    train = solution_to_train(x, a.tspan, spk_args = a.spk_args, offset = 0.0)
+    train = solution_to_train(x, a.tspan, spk_args = a.spk_args, offset = 0.0f0)
     call = SpikingCall(train, a.spk_args, a.tspan)
     return call, state
 end
 
+"""
+Extension of dropout to SpikeTrains
+"""
 function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims) where {T}
     train = x.train
     n_s = length(train.indices)
@@ -38,83 +45,105 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
     return new_call, (), rng
 end
 
-###
-### Phasor Dense definitions
-###
-struct PhasorDense <: Lux.AbstractLuxLayer
-    shape::Tuple{<:Int, <:Int}
-    in_dims::Int
-    out_dims::Int
-    init_weight
-    init_bias_real
-    init_bias_imag
+"""
+ComplexBias layer for use in Phase Networks - adds bias in the complex plane
+    during calls
+"""
+struct ComplexBias <: LuxCore.AbstractLuxLayer
+    dims
+    init_bias
+end
+
+function default_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
+    return ones(ComplexF32, dims)
+end
+
+function ComplexBias(dims::Tuple{Vararg{Int}}; init_bias = default_bias)
+    if init_bias == nothing
+        init_bias = (rng, dims) -> zeros(ComplexF32, dims)
+    end
+
+    return ComplexBias(dims, init_bias)
+end
+
+function Base.show(io::IO, b::ComplexBias)
+    print(io, "ComplexBias($(b.dims))")
+end
+
+function (b::ComplexBias)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+    b = params.bias_real .+ 1.0f0im .* params.bias_imag
+    return x .+ b
+end
+
+function (b::ComplexBias)(params::LuxParams, state::NamedTuple; offset::Real = 0.0, spk_args::SpikingArgs)
+    b = params.bias_real .+ 1.0f0im .* params.bias_imag
+    return t -> bias_current(b, t, offset, spk_args)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, bias::ComplexBias)
+    bias = bias.init_bias(rng, bias.dims)
+    bias_real = real.(bias)
+    bias_imag = imag.(bias)
+    params = (bias_real = bias_real, bias_imag = bias_imag)
+    return params
+end
+
+"""
+PhasorDense layer - implementationof fundamental dense layer using phase tensors
+"""
+struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:dense, :bias)}
+    dense
+    bias
+    activation
     return_solution::Bool
-
-    PhasorDense(shape, 
-                    init_weight, 
-                    init_bias_real, 
-                    init_bias_imag,
-                    return_solution) = 
-                        new(shape,
-                        shape[1],
-                        shape[2],
-                        init_weight,
-                        init_bias_real,
-                        init_bias_imag,
-                        return_solution
-                        )
 end
 
-## Constructors
-
-function PhasorDense(W::AbstractMatrix, b_real::AbstractVecOrMat, b_imag::AbstractVecOrMat; return_solution=false)
-    return PhasorDense(size(W), size(W,2), size(W,1), () -> copy(W), () -> copy(b_real), () -> copy(b_imag), return_solution)
-end
-
-function PhasorDense(W::AbstractMatrix; return_solution::Bool, phase_bias::Bool=true)
-    if phase_bias
-        b_real = ones(Float32, axes(W,1))
-    else
-        b_real = zeros(Float32, axes(W,1))
-    end
-    b_imag = zeros(Float32, axes(W,1))
-    return PhasorDense(W, b_real, b_imag, return_solution=return_solution)
-end
-
-function PhasorDense((in, out)::Pair{<:Integer, <:Integer};
-                init_weight = variance_scaling,
-                return_solution::Bool = false,
-                phase_bias::Bool = true,)
-
-    if phase_bias
-        layer = PhasorDense((in, out), init_weight, () -> ones(Float32, out), () -> zeros(Float32, out), return_solution)
-    else
-        layer = PhasorDense((in, out), init_weight, () -> zeros(Float32, out), () -> zeros(Float32, out), return_solution)
-    end
-
-    return layer
-end
-
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorDense)
-    params = (weight = layer.init_weight(rng, layer.out_dims, layer.in_dims), bias_real = layer.init_bias_real(), bias_imag = layer.init_bias_imag())
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
+    dense = Dense(shape, identity; use_bias=false, kwargs...)
+    bias = ComplexBias((shape[2],); init_bias = init_bias)
+    return PhasorDense(dense, bias, activation, return_solution)
 end
 
 # Calls
-
 function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple)
-    z = angle_to_complex(x)
-    xz = 
-    return y, state
+    xz = angle_to_complex(x)
+    y_real, st_real = a.dense(real.(xz), params.dense, state.dense)
+    y_imag, st_imag = a.dense(imag.(xz), params.dense, state.dense)
+    st = (dense_real = st_real, dense_imag = st_imag)
+    y = y_real .+ 1im .* y_imag
+    y = a.bias(y, params.bias, state.bias)
+    y = a.activation(y)
+    return y, st
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x, params.weight, params.bias_real .+ 1im .* params.bias_imag, return_solution=a.return_solution)
-    return y, state
+    #access the current transformations
+    nn_kernel = x -> a.dense(x, params.dense, state.dense)[1]
+    bias = params.bias.bias_real .+ 1.0f0im .* params.bias.bias_imag
+    #pass them to the solver
+    sol = oscillator_bank(x.train, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
+    if a.return_solution
+        return sol
+    end
+
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
+    next_call = SpikingCall(train, x.spk_args, x.t_span)
+    return next_call, state
 end
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    y = v_bundle_project(x, params, return_solution = a.return_solution)
-    return y, state
+    #access the current transformations
+    nn_kernel = x -> a.dense(x, params.dense, state.dense)[1]
+    bias = params.bias_real .+ 1.0f0im .* params.bias_imag
+    #pass them to the solver
+    sol = oscillator_bank(x, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
+    if return_solution
+        return sol
+    end
+
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
+    next_call = SpikingCall(train, x.spk_args, x.t_span)
+    return next_call, state
 end
 
 function Base.show(io::IO, l::PhasorDense)
@@ -126,25 +155,47 @@ end
 ### Convolutional Phasor Layer
 ###
 
-struct PhasorConv <: LuxCore.AbstractLuxWrapperLayer{:conv}
+struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:conv, :bias)}
     conv
+    bias
+    return_solution::Bool
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, kwargs...)
+function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, init_bias = nothing, kwargs...)
     #construct the convolutional layer
-    conv = Conv(k, chs, identity, kwargs...)
-    return ResidualBlock(conv)
+    conv = Conv(k, chs, identity; kwargs...)
+    bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
+    return PhasorConv(conv, bias, return_solution)
 end
 
 function (pc::PhasorConv)(x, ps, st)
     x = angle_to_complex(x)
-    y_real, st_real = pc.conv(real.(x), ps.conv, st.conv)
-    y_imag, st_imag = pc.conv(imag.(x), ps.conv, st.conv)
-    st = (conv_real = st_real, conv_imag = st_imag)
-    y = y_real .+ 1im .* y_imag
+    x_real = real.(x)
+    x_imag = imag.(x)
+
+    conv_call = x -> pc.conv(x, ps.conv, st.conv)[1]
+    y_real = conv_call(x_real)
+    y_im = 1.0f0im .* conv_call(x_imag)
+    y = y_real .+ y_im
+    y = pc.bias(y, ps.bias, st.bias)
     y = complex_to_angle(y)
     
-    return x, st
+    return y, NamedTuple()
+end
+
+function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+    #access the current transformations
+    nn_kernel = x -> a.conv(x, params.dense, state.dense)[1]
+    bias = params.bias_real .+ 1.0f0im .* params.bias_imag
+    #pass them to the solver
+    sol = oscillator_bank(x.train, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
+    if return_solution
+        return sol
+    end
+
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
+    next_call = SpikingCall(train, x.spk_args, x.t_span)
+    return next_call, state
 end
 
 ###
