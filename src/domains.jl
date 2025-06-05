@@ -1,5 +1,6 @@
 include("imports.jl")
 
+pi_f32 = convert(Float32, pi)
 
 @kwdef mutable struct Args
     lr::Float64 = 0.001       ## learning rate
@@ -261,36 +262,24 @@ end
 PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
 
 function angle_to_complex(x::AbstractArray)
-    k = convert(ComplexF32, pi * (0.0 + 1.0im))
+    k = pi_f32 * (0.0f0 + 1.0f0im)
     return exp.(k .* x)
 end
 
 function complex_to_angle(x::AbstractArray)
-    return angle.(x) ./ convert(Float32,pi)
+    return angle.(x) ./ pi_f32
 end
 
-# function soft_angle(x::Complex, r_lo::Real = 1e-2, r_hi::Real = 0.2)
-#     function kernel(x::Complex)
-#         r = abs(x)
-#         if r < r_lo
-#             return zero(real(x))
-#         elseif r > r_hi
-#             return one(real(x))
-#         else
-#             return (r - r_lo)/(r_hi - r_lo)
-#         end
-#     end
-
-#     return kernel(x) * angle(x) / convert(typeof(x), pi)
-# end
-
-
 function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
-    r = abs.(x)
-    m = (r .- r_lo) ./ (r_hi - r_lo)
-    s = sigmoid_fast(3 .* m .- (r_hi - r_lo))
+    s = ones(Float32, size(x))
 
-    return s .* angle.(x) / pi
+    ignore_derivatives() do
+        r = abs.(x)
+        m = (r .- r_lo) ./ (r_hi - r_lo)
+        s .= sigmoid_fast(3.0f0 .* m .- (r_hi - r_lo))
+    end
+
+    return s .* angle.(x) / pi_f32
 end
 
 
@@ -419,7 +408,7 @@ end
 """
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
-function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0, spk_args::SpikingArgs, threshold::Bool=false)
+function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0, spk_args::SpikingArgs, threshold::Bool=false)
     current_zero = ones(ComplexF32, (1))
 
     ignore_derivatives() do
@@ -430,7 +419,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.0,
     arc = angle(current_zero) .- angle.(potential) 
 
     #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+    phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 
     #replace silent neurons with NaN values
     ignore_derivatives() do
@@ -460,7 +449,7 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
     
 
     #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+    phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 
     #replace silent neurons with random values
     ignore_derivatives() do
@@ -515,7 +504,7 @@ end
 ###
 
 function period_to_angfreq(t_period::Real)
-    angular_frequency = 2 * pi / t_period
+    angular_frequency = 2.0f0 * pi_f32 / t_period
     return angular_frequency
 end
 
@@ -536,10 +525,10 @@ function neuron_constant(spk_args::SpikingArgs)
 end
 
 function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
-    spiking_angle = pi / 2
+    spiking_angle = pi_f32 / 2.0f0
 
     #find out given this potential, how much time until the neuron spikes (ideally)
-    angles = mod.(-1 .* angle.(u), 2*pi) #flip angles and move onto the positive domain
+    angles = mod.(-1.0f0 .* angle.(u), 2.0f0*pi_f32) #flip angles and move onto the positive domain
     arc_to_spike = spiking_angle .+ angles
     time_to_spike = arc_to_spike ./ period_to_angfreq(spk_args.t_period)
     spikes = t .+ time_to_spike
@@ -562,13 +551,13 @@ function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::Spiki
 end
 
 function time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs)
-    spiking_angle = pi / 2
+    spiking_angle = pi_f32 / 2.0f0
 
     #find out given this time, what is the (normalized) potential at a given moment?
     time_from_spike = spikes .- t
     arc_from_spike = time_from_spike .* period_to_angfreq(spk_args.t_period)
     angles = -1 .* (arc_from_spike .- spiking_angle)
-    potentials = angle_to_complex(angles ./ pi)
+    potentials = angle_to_complex(angles ./ pi_f32)
 
     return potentials
 end

@@ -41,19 +41,18 @@ function cuda_core_tests()
         return b2_sol, b2_phase_error
     end
 
-    if CUDA.functional()
-        @testset "CUDA Core Functionality Tests" begin
-            sol_cpu, err_cpu = bundling_test(spk_args_cuda, "cpu")
-            sol_gpu, err_gpu = bundling_test(spk_args_cuda, "gpu")
-
-            return err_cpu, err_gpu
-            
-            max_comparative_error = maximum(err_cpu .- err_gpu)
-            @test max_comparative_error < 1e-3
-        end
-    else
+    if !CUDA.functional()
         # This else block might not be strictly necessary if runtests.jl already skips calling cuda_core_tests,
         # but kept for robustness if test_cuda.jl were somehow run directly in a non-CUDA env.
         @info "CUDA not functional. Skipping GPU-specific operations within cuda_core_tests."
+        return
+    end
+
+    @testset "CUDA Core Functionality Tests" begin
+        sol_cpu, err_cpu = bundling_test(spk_args_cuda, "cpu")
+        sol_gpu, err_gpu = bundling_test(spk_args_cuda, "gpu")
+        
+        max_comparative_error = maximum(err_cpu .- err_gpu)
+        @test max_comparative_error < 1e-3
     end
 end

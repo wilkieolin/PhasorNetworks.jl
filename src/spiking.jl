@@ -1,9 +1,9 @@
 include("gpu.jl")
 
 function angular_mean(phases::AbstractArray; dims)
-    u = exp.(pi * 1im .* phases)
+    u = exp.(pi_f32 * 1.0f0im .* phases)
     u_mean = mean(u, dims=dims)
-    phase = angle.(u_mean) ./ pi
+    phase = angle.(u_mean) ./ pi_f32
     return phase
 end
 
@@ -300,19 +300,42 @@ function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0f0, 1
     return sol
 end
 
-function oscillator_bank(x::SpikeTrain, kernel_fn::Function; bias::AbstractArray{<:Complex}, tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+# function oscillator_bank(x::SpikeTrain, kernel_fn::Function, bias::AbstractArray{<:Complex}; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+#     update_fn = spk_args.update_fn
+
+#     #set up compartments for each sample
+#     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
+#     u0 = similar(output_sample, ComplexF32)
+#     u0 .= ComplexF32(0)
+
+#     #resonate in time with the input spikes, applying the kernel to the spike current
+#     function dzdt(u, p, t)
+#         s_current = spike_current(x, t, spk_args)
+#         transformed_current = kernel_fn(s_current)
+#         biasing_current = bias_current(bias, t, x.offset, spk_args)
+#         return update_fn(u) .+ transformed_current .+ biasing_current
+#     end
+
+#     #solve the memory compartment using the base oscillator_bank method
+#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+#     return sol
+# end
+
+function oscillator_bank(x::SpikingTypes, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
-    u0 = zeros(ComplexF32, size(output_sample))
+    u0 = similar(output_sample, ComplexF32)
+    u0 .= ComplexF32(0)
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
         s_current = spike_current(x, t, spk_args)
         transformed_current = kernel_fn(s_current)
-        bias = bias_current(bias, t, x.offset, spk_args)
-        return update_fn(u) .+ transformed_current .+ bias
+        biasing_current = bias_current(bias, t, x.offset, spk_args)
+        return update_fn(u) .+ transformed_current .+ biasing_current
     end
 
     #solve the memory compartment using the base oscillator_bank method
@@ -321,12 +344,13 @@ function oscillator_bank(x::SpikeTrain, kernel_fn::Function; bias::AbstractArray
     return sol
 end
 
-function oscillator_bank(x::SpikeTrainGPU, kernel_fn::Function; bias::AbstractArray{<:Complex}, tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikingTypes, kernel_fn::Function, bias::AbstractArray{<:Complex}; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
-    u0 = zeros(ComplexF32, size(output_sample)) |> gdev
+    u0 = similar(output_sample, ComplexF32)
+    u0 .= ComplexF32(0)
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
@@ -357,21 +381,25 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     return sol
 end
 
-function oscillator_bank(x::CurrentCall, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1})
-    return oscillator_bank(x.current, w, b, tspan=x.t_span, spk_args=x.spk_args,)
+function oscillator_bank(x::CurrentCall, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+    return oscillator_bank(x.current, kernel_fn, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
-function oscillator_bank(x::LocalCurrent, w::AbstractArray{<:Real,2}, b::AbstractArray{<:Complex,1}; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+function oscillator_bank(x::LocalCurrent, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
-    output_shape = (size(w, 1), x.shape[2])
-    #make the initial potential the bias value
-    u0 = zeros(ComplexF32, output_shape)
-    #shift the solver span by the function's time offset
-    tspan = tspan .+ x.offset
+    #set up compartments for each sample
+    output_sample = kernel_fn(x.current_fn(0.0f0))
+    u0 = similar(output_sample, ComplexF32)
+    u0 .= ComplexF32(0)
 
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + w * x.current_fn(t) .+ bias_current(b, t, x.offset, spk_args)
+    #resonate in time with the input spikes, applying the kernel to the spike current
+    function dzdt(u, p, t)
+        transformed_current = kernel_fn(x.current_fn(t))
+        return update_fn(u) .+ transformed_current
+    end
+
+    #solve the memory compartment using the base oscillator_bank method
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
@@ -389,8 +417,8 @@ function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, 
     #override spk args with params leakage and frequency if provided
     function calc_k(p)
         if haskey(p, :leakage) && haskey(p, :t_period)
-            angular_frequency = 2 * pi / p.t_period[1]
-            k = (p.leakage[1] + 1im * angular_frequency)
+            angular_frequency = 2.0f0 * pi_f32 / p.t_period[1]
+            k = (p.leakage[1] + 1.0f0im * angular_frequency)
         else
             k = neuron_constant(spk_args)
         end
