@@ -121,7 +121,7 @@ function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     nn_kernel = x -> a.dense(x, params.dense, state.dense)[1]
     bias = params.bias.bias_real .+ 1.0f0im .* params.bias.bias_imag
     #pass them to the solver
-    sol = oscillator_bank(x.train, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
+    sol = oscillator_bank(x.train, nn_kernel, bias, tspan=x.t_span, spk_args=x.spk_args)
     if a.return_solution
         return sol
     end
@@ -134,21 +134,15 @@ end
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #access the current transformations
     nn_kernel = x -> a.dense(x, params.dense, state.dense)[1]
-    bias = params.bias_real .+ 1.0f0im .* params.bias_imag
     #pass them to the solver
-    sol = oscillator_bank(x, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
-    if return_solution
+    sol = oscillator_bank(x, nn_kernel, tspan=x.t_span, spk_args=x.spk_args)
+    if a.return_solution
         return sol
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call, state
-end
-
-function Base.show(io::IO, l::PhasorDense)
-    print(io, "PhasorDense(", l.shape)
-    print(io, ")")
 end
 
 ###
@@ -188,8 +182,8 @@ function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     nn_kernel = x -> a.conv(x, params.dense, state.dense)[1]
     bias = params.bias_real .+ 1.0f0im .* params.bias_imag
     #pass them to the solver
-    sol = oscillator_bank(x.train, nn_kernel, bias=bias, tspan=x.t_span, spk_args=x.spk_args)
-    if return_solution
+    sol = oscillator_bank(x.train, nn_kernel, bias, tspan=x.t_span, spk_args=x.spk_args)
+    if a.return_solution
         return sol
     end
 

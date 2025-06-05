@@ -186,7 +186,7 @@ function similarity(x::AbstractArray, y::AbstractArray; dim::Int = 1)
         dim = ndims(x)
     end
 
-    dx = cos.(pi .* (x .- y))
+    dx = cos.(pi_f32 .* (x .- y))
     s = mean(dx, dims = dim)
     s = dropdims(s, dims = dim)
     return s

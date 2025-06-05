@@ -1,8 +1,8 @@
 # This file is intended to be included and run from runtests.jl
 # Ensure that runtests.jl has already loaded PhasorNetworks and other common dependencies.
 
-phases = -1.0:0.01:1.0 |> collect
-offsets = 0.0:0.25:1.0 |> collect
+phases = -1.0f0:0.01f0:1.0f0 |> collect
+offsets = 0.0f0:0.25f0:1.0f0 |> collect
 
 function domain_tests()
     @testset "Domain Conversions" begin
@@ -21,7 +21,7 @@ function phase_time_test()
         phase_tms = [time_to_phase(tms[i], spk_args=spk_args, offset=o) for (i,o) in enumerate(offsets)]
         errors = [arc_error(phases .- p) for p in phase_tms]
         max_error = maximum(maximum.(errors))
-        @test max_error < 1e-6
+        @test max_error < 5e-6
     end
 end
 
@@ -32,7 +32,7 @@ function phase_train_test()
         errors = [mapslices(x -> x .- phases, t, dims=(2)) for t in rec_phases]
         errors = map(y -> maximum(arc_error(filter(x -> !isnan(x), y))), errors)
         max_error = maximum(maximum.(errors))
-        @test max_error < 1e-6
+        @test max_error < 5e-6
     end
 end
 
@@ -43,7 +43,7 @@ function potential_phase_test()
         rec_phases = [potential_to_phase(us[i], tms, offset=offsets[i], spk_args=spk_args) for i in axes(offsets,1)]
         errors = map(y -> arc_error.(mapslices(x -> abs.(x .- phases), y, dims=1)), rec_phases)
         max_error = maximum(maximum.(errors))
-        @test max_error < 1e-6
+        @test max_error < 5e-6
     end
 end
 
@@ -55,7 +55,7 @@ function potential_time_test()
         us_rec = [time_to_potential(t, tms, spk_args=spk_args) for t in ts]
         errors = [arc_error.(angle.(u[1]) .- angle.(u[2])) for u in zip(us, us_rec)]
         max_error = maximum(maximum.(errors))
-        @test max_error < 1e-6
+        @test max_error < 5e-6
     end
 end
 

@@ -29,7 +29,7 @@ tspan = (0.0, repeats*1.0)
 tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
 
 @kwdef mutable struct Args
-    η::Float64 = 3e-4       ## learning rate
+    lr::Float64 = 3e-4       ## learning rate
     batchsize::Int = 256    ## batch size
     epochs::Int = 10        ## number of epochs
     use_cuda::Bool = false   ## use gpu (if cuda available)

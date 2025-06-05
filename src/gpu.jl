@@ -86,7 +86,7 @@ function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::Sp
     arc = angle.(current_zeros) .- angle.(potential)
     
     #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi .+ 1.0), 2.0) .- 1.0
+    phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 
     #replace silent neurons with NaN
     silent = abs.(potential) .< spk_args.threshold

@@ -1,7 +1,7 @@
 include("network.jl")
 
 function arc_error(phase::Real)
-    return sin(pi * phase)
+    return sin(pi_f32 * phase)
 end
 
 function arc_error(phases::AbstractArray)
