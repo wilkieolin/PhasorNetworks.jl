@@ -98,7 +98,7 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:dense, :bias)}
     return_solution::Bool
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
     dense = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
     return PhasorDense(dense, bias, activation, return_solution)
@@ -156,7 +156,7 @@ struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:conv, :bias)}
     return_solution::Bool
 end
 
-function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
     #construct the convolutional layer
     conv = Conv(k, chs, identity; kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
