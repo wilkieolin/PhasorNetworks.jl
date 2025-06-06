@@ -2,8 +2,6 @@ module PhasorNetworks
 
 export 
 #types
-PhasorDense, 
-PhasorResonant,
 SpikeTrain, 
 SpikeTrainGPU,
 MakeSpiking,
@@ -64,6 +62,11 @@ similarity_loss,
 attend,
 variance_scaling,
 dense_onehot,
+ComplexBias,
+PhasorConv,
+PhasorDense, 
+PhasorResonant,
+MinPool,
 ResidualBlock,
 PhasorAttention,
 SingleHeadAttention,
