@@ -152,14 +152,15 @@ end
 struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:conv, :bias)}
     conv
     bias
+    activation
     return_solution::Bool
 end
 
-function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}; return_solution::Bool = false, init_bias = nothing, kwargs...)
+function PhasorConv(k::Tuple{Vararg{<:Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
     #construct the convolutional layer
     conv = Conv(k, chs, identity; kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
-    return PhasorConv(conv, bias, return_solution)
+    return PhasorConv(conv, bias, activation, return_solution)
 end
 
 function (pc::PhasorConv)(x, ps, st)
@@ -172,7 +173,7 @@ function (pc::PhasorConv)(x, ps, st)
     y_im = 1.0f0im .* conv_call(x_imag)
     y = y_real .+ y_im
     y = pc.bias(y, ps.bias, st.bias)
-    y = complex_to_angle(y)
+    y = pc.activation(y)
     
     return y, NamedTuple()
 end
@@ -240,6 +241,48 @@ function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
     end
 
     return y, state
+end
+
+###
+### Random Projection Layer
+###
+
+struct RandomProjection <: Lux.AbstractLuxLayer
+    dim::Int # The dimension being projected, typically the feature dimension
+end
+
+function Lux.initialparameters(rng::AbstractRNG, layer::RandomProjection)
+    return NamedTuple() # No trainable parameters
+end
+
+function Lux.initialstates(rng::AbstractRNG, layer::RandomProjection)
+    # Create a random projection matrix W of size (dim, dim).
+    # This matrix will project a vector of length `dim` to another vector of length `dim`.
+    # Stored in state as it's non-trainable.
+    projection_weights = randn(rng, Float32, layer.dim, layer.dim)
+    return (weights = projection_weights, rng = Lux.replicate(rng))
+end
+
+# Call
+function (rp::RandomProjection)(x::AbstractArray, params::LuxParams, state::NamedTuple)
+    # x is expected to have its first dimension match rp.dim
+    # e.g., x can be (dim, batch_size) or (dim, H, W, batch_size)
+    
+    current_size = size(x)
+    if current_size[1] != rp.dim
+        error("Input first dimension $(current_size[1]) must match layer dimension $(rp.dim)")
+    end
+
+    local y::AbstractArray
+    if ndims(x) == 1 # Input is a vector (dim,)
+        y = state.weights * x
+    else # Input is a batched tensor (dim, other_dims...)
+        x_reshaped = reshape(x, rp.dim, :)
+        y_reshaped = state.weights * x_reshaped
+        y = reshape(y_reshaped, current_size)
+    end
+    
+    return y, state # State is not modified in the forward pass for this layer
 end
 
 """

@@ -271,7 +271,7 @@ function complex_to_angle(x::AbstractArray)
 end
 
 function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
-    s = ones(Float32, size(x))
+    s = similar(real.(x))
 
     ignore_derivatives() do
         r = abs.(x)
