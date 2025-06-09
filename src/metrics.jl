@@ -31,7 +31,7 @@ function z_score(phases::AbstractArray)
 end
 
 function loss_and_accuracy(data_loader, model, ps, st, args)
-    if args.use_cuda
+    if args.use_cuda && CUDA.functional()
         dev = gdev
     else
         dev = cdev
@@ -68,7 +68,7 @@ function spiking_accuracy(data_loader, model, ps, st, args)
     n_batches = length(data_loader)
 
     for (x, y) in data_loader
-        if args.use_cuda
+        if args.use_cuda && CUDA.functional()
             x = x |> gdev
             y = y |> dense_onehot |> gdev
         end
