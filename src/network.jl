@@ -75,7 +75,7 @@ function (b::ComplexBias)(x::AbstractArray{<:Complex}, params::LuxParams, state:
     return x .+ bias_val, state 
 end
 
-function (b::ComplexBias)(params::LuxParams, state::NamedTuple; offset::Real = 0.0, spk_args::SpikingArgs)
+function (b::ComplexBias)(params::LuxParams, state::NamedTuple; offset::Real = 0.0f0, spk_args::SpikingArgs)
     bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
     return t -> bias_current(bias_val, t, offset, spk_args)
 end
@@ -353,7 +353,7 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3};
     return scaled
 end
 
-function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0, 10.0), return_solution::Bool = false, scale::AbstractArray=[1.0f0,])
+function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0f0, 10.0f0), return_solution::Bool = false, scale::AbstractArray=[1.0f0,])
     #compute the similarity between the spike trains
     #produces [time][b qt kt]
     scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
@@ -438,7 +438,7 @@ struct SingleHeadCABlock <: LuxCore.AbstractLuxContainerLayer{(:attn, :q_norm, :
     ff
 end
 
-function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; dropout::Real=0.1, kwargs...)
+function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; dropout::Real=0.1f0, kwargs...)
     SingleHeadCABlock(
         SingleHeadAttention(d_input, d_model; kwargs...),
         LayerNorm((d_model, n_q)),
@@ -560,24 +560,24 @@ function (t::TrackOutput)(x, ps, st)
     return y, new_st
 end
 
-function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "avg", scale::Real = 0.66)
+function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "avg", scale::Real = 0.66f0)
     fan_in = shape[end]
     fan_out = shape[1]
 
     if mode == "fan_in"
-        scale /= max(1.0, fan_in)
+        scale /= max(1.0f0, fan_in)
     elseif mode == "fan_out"
-        scale /= max(1.0, fan_out)
+        scale /= max(1.0f0, fan_out)
     else
-        scale /= max(1.0, (fan_in + fan_out) / 2.0)
+        scale /= max(1.0f0, (fan_in + fan_out) / 2.0f0)
     end
 
-    stddev = sqrt(scale) / 0.87962566103423978
-    return truncated_normal(rng, shape..., mean = 0.0, std = stddev)
+    stddev = sqrt(scale) / 0.87962566103423978f0
+    return truncated_normal(rng, shape..., mean = 0.0f0, std = stddev)
 end
 
 function square_variance(rng::AbstractRNG, shape::Integer; kwargs...)
     weights = variance_scaling(rng, shape, shape; kwargs...)
-    weights[diagind(weights)] .= 1.0
+    weights[diagind(weights)] .= 1.0f0
     return weights
 end

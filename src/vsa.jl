@@ -32,7 +32,7 @@ function v_bind(x::SpikingCall, y::SpikingCall; return_solution::Bool = false, u
     return next_call
 end
 
-function v_bind(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
+function v_bind(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, return_solution::Bool = false, unbind::Bool=false, automatch::Bool=true)
     if !automatch
         if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -50,7 +50,7 @@ function v_bind(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} =
     sol_y = oscillator_bank(y, tspan=tspan, spk_args=spk_args)
     
     #create a reference oscillator to generate complex values for each moment in time
-    u_ref = t -> phase_to_potential(0.0, t, offset = x.offset, spk_args = spk_args)
+    u_ref = t -> phase_to_potential(0.0f0, t, offset = x.offset, spk_args = spk_args)
 
     #find the first chord
     chord_x = t -> sol_x(t)
@@ -89,7 +89,7 @@ function v_bundle(x::SpikingCall; dims::Int)
     return next_call
 end
 
-function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, return_solution::Bool=false)
+function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, return_solution::Bool=false)
     #let compartments resonate in sync with inputs
     sol = oscillator_bank(x, tspan=tspan, spk_args=spk_args)
     tbase = sol.t
@@ -107,7 +107,7 @@ end
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
     #y = complex_to_angle(xz)
-    y = soft_angle(xz, 1e-2, 0.1)
+    y = soft_angle(xz, 0.01f0, 0.1f0)
     return y
 end
 
@@ -154,29 +154,29 @@ function chance_level(nd::Int, samples::Int)
 end
 
 function random_symbols(size::Tuple{Vararg{Int}})
-    y = 2 .* rand(Float32, size) .- 1.0
+    y = 2.0f0 .* rand(Float32, size) .- 1.0f0
     return y
 end
 
 function random_symbols(size::Tuple{Vararg{Int}}, rng::AbstractRNG)
-    y = 2 .* rand(rng, Float32, size) .- 1.0
+    y = 2.0f0 .* rand(rng, Float32, size) .- 1.0f0
     return y
 end
 
 function remap_phase(x::Real)
     ignore_derivatives() do
-        x = x + 1
-        x = mod(x, 2.0)
-        x = x - 1
+        x = x + 1.0f0
+        x = mod(x, 2.0f0)
+        x = x - 1.0f0
     end
     return x
 end
 
 function remap_phase(x::AbstractArray)
     ignore_derivatives() do
-        x = x .+ 1
-        x = mod.(x, 2.0)
-        x = x .- 1 
+        x = x .+ 1.0f0
+        x = mod.(x, 2.0f0)
+        x = x .- 1.0f0
     end
     return x
 end
@@ -215,9 +215,9 @@ function interference_similarity(interference::AbstractArray; dim::Int=-1)
         dim = ndims(interference)
     end
 
-    magnitude = clamp.(interference, 0.0, 2.0)
-    half_angle = acos.(0.5 .* magnitude)
-    sim = cos.(2.0 .* half_angle)
+    magnitude = clamp.(interference, 0.0f0, 2.0f0)
+    half_angle = acos.(0.5f0 .* magnitude)
+    sim = cos.(2.0f0 .* half_angle)
     avg_sim = mean(sim, dims=dim)
     avg_sim = dropdims(avg_sim, dims=dim)
     
@@ -230,7 +230,7 @@ function similarity_outer(x::SpikingCall, y::SpikingCall; automatch::Bool=true)
     return similarity_outer(x.train, y.train, tspan=new_span, spk_args=x.spk_args, automatch=automatch)
 end
 
-function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs, automatch::Bool=true)
+function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, automatch::Bool=true)
     @assert length(x.shape) == 3 && length(y.shape) == 3 "Outer similarity for spike trains assumes 3-dimensional inputs (b x d)"
     if !automatch
         if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end

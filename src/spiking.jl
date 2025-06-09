@@ -79,7 +79,7 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
     current = real.(u)
 
     #find the local voltage maxima through the first derivative (current)
-    op = x -> x .< 0
+    op = x -> x .< 0.0f0
     #find maxima along the temporal dimension
     maxima = findall(op(diff(sign.(current), dims=dim)))
     peak_voltages = voltage[maxima]
@@ -117,7 +117,7 @@ function generate_cycles(tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, of
     return r[2:end]
 end
 
-function is_active(times::AbstractArray, t::Real, t_window::Real; sigma::Real=9.0)
+function is_active(times::AbstractArray, t::Real, t_window::Real; sigma::Real=9.0f0)
     active = (times .> (t - sigma * t_window)) .* (times .< (t + sigma * t_window))
     return active
 end
@@ -159,7 +159,7 @@ function match_tspans(spans::Tuple{<:Real, <:Real}...)
     return (start, stop)
 end
 
-function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0, kwargs...)
+function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0f0, kwargs...)
     inds = solution.t .> (i_warmup * spk_args.t_period)
 
     u = Array(solution)[:,:,inds]
@@ -172,7 +172,7 @@ end
 
 function normalize_potential(u::Complex)
     a = abs(u)
-    if a == 0.0
+    if a == 0.0f0
         return u
     else
         return u / a
@@ -183,7 +183,7 @@ function normalize_potential(a::AbstractArray)
     return normalize_potential.(a)
 end
 
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0, tspan::Tuple{<:Real, <:Real}, repeat::Bool=true)
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, repeat::Bool=true)
     shape = size(phases)
     
     function inner(t::Real)
@@ -210,7 +210,7 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
     return call
 end
 
-function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0)
+function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0f0)
     @assert typeof(spk_args.spike_kernel) <: Function || spk_args.spike_kernel == :gaussian "Unrecognized kernel type, defaulting to gaussian"
     current = zeros(Float32, train.shape)
     scale = spk_args.spk_scale
@@ -328,7 +328,7 @@ function oscillator_bank(x::SpikingTypes, kernel_fn::Function; tspan::Tuple{<:Re
     #set up compartments for each sample
     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
     u0 = similar(output_sample, ComplexF32)
-    u0 .= ComplexF32(0)
+    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
@@ -350,7 +350,7 @@ function oscillator_bank(x::SpikingTypes, kernel_fn::Function, bias::AbstractArr
     #set up compartments for each sample
     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
     u0 = similar(output_sample, ComplexF32)
-    u0 .= ComplexF32(0)
+    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
@@ -391,7 +391,7 @@ function oscillator_bank(x::LocalCurrent, kernel_fn::Function; tspan::Tuple{<:Re
     #set up compartments for each sample
     output_sample = kernel_fn(x.current_fn(0.0f0))
     u0 = similar(output_sample, ComplexF32)
-    u0 .= ComplexF32(0)
+    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
@@ -477,6 +477,6 @@ end
 
 function zero_nans(phases::AbstractArray)
     nans = isnan.(phases)
-    phases[nans] .= 0.0
+    phases[nans] .= 0.0f0
     return phases
 end
