@@ -74,7 +74,7 @@ end
 
 # Domains
 
-function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false)
+function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     dims = collect(1:ndims(potential))
 
@@ -90,7 +90,7 @@ function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::Sp
 
     #replace silent neurons with NaN
     silent = abs.(potential) .< spk_args.threshold
-    phase[silent] .= NaN
+    phase[silent] .= Float32(NaN)
     phase = permutedims(phase, reverse(dims))
     
     return phase
@@ -159,7 +159,7 @@ function oscillator_bank(u0::CuArray, dzdt::Function; tspan::Tuple{<:Float32, <:
     return sol
 end
 
-function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0, 10.0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     tspan = tspan |> f32_tspan 
     update_fn = spk_args.update_fn
 

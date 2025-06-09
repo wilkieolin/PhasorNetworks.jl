@@ -159,8 +159,7 @@ end
 
 function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
     test_points = range(start = 0.0f0, stop = -20.0f0, length = points)
-    test_points = vcat(exp.(test_points), 0.0f0, reverse(-1 .* exp.(test_points)))
-
+    test_points = vcat(exp.(test_points), 0.0f0, reverse(-1.0f0 .* exp.(test_points)))
     fn = x -> sum(OvR_matrices(prediction, labels, x))
     confusion = cat(fn.(test_points)..., dims=3)
 
