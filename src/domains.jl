@@ -2,7 +2,7 @@ include("imports.jl")
 
 pi_f32 = convert(Float32, pi)
 
-@kwdef mutable struct Args
+@kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
     lr::Float64 = 0.001       ## learning rate
     batchsize::Int = 256    ## batch size
     epochs::Int = 10        ## number of epochs
@@ -193,18 +193,18 @@ function SpikingArgs(; leakage::Real = -0.2f0,
 end
 
 function SpikingArgs_NN(; leakage::Real = -0.2, 
-    t_period::Real = 1.0,
-    t_window::Real = 0.01,
-    spk_scale::Real = 1.0,
-    threshold::Real = 0.001,
+    t_period::Real = 1.0f0,
+    t_window::Real = 0.01f0,
+    spk_scale::Real = 1.0f0,
+    threshold::Real = 0.001f0,
     spike_kernel = :gaussian,
     solver = Heun(),
-    solver_args = Dict(:dt => 0.01,
+    solver_args = Dict(:dt => 0.01f0,
                     :adaptive => false,
                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                     :save_start => true),
     update_fn::Function)
-    
+
     return SpikingArgs(leakage,
             t_period,
             t_window,
@@ -294,7 +294,7 @@ end
 function realvec_to_cmpx(u::Array{<:Real})
     @assert size(u)[1] == 2 "Must have first dimension contain real and imaginary values"
     slices = eachslice(u, dims=1)
-    mat = slices[1] .+ 1im .* slices[2]
+    mat = slices[1] .+ 1.0f0im .* slices[2]
     return mat
 end
 
@@ -331,7 +331,7 @@ function time_to_phase(times::AbstractArray, period::Real, offset::Real)
     return phase
 end
 
-function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
+function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
     shape = phases |> size
     indices = collect(CartesianIndices(shape)) |> vec
     times = phase_to_time(phases, spk_args=spk_args, offset=offset) |> vec
@@ -356,12 +356,12 @@ function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
     return train_to_phase(train, spk_args=spk_args, offset=train.offset)
 end
 
-function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0)
+function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0f0)
     if length(train.times) == 0
         return missing
     end
 
-    @assert reduce(*, train.times .>= 0.0) "Spike train times must be positive"
+    @assert reduce(*, train.times .>= 0.0f0) "Spike train times must be positive"
 
     #decode each spike's phase within a cycle
     relative_phase = time_to_phase(train.times, spk_args.t_period, train.offset)
@@ -372,7 +372,7 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real =
     cycle = cycle .+ (1 - minimum(cycle))
     #what is the number of cycles in this train?
     n_cycles = maximum(cycle)
-    phases = [NaN .* zeros(train.shape...) for i in 1:n_cycles]
+    phases = [fill(Float32(NaN), train.shape...) for i in 1:n_cycles]
 
     for i in eachindex(relative_phase)
         phases[cycle[i]][train.indices[i]] = relative_phase[i]
@@ -390,17 +390,17 @@ end
 """
 Convert a static phase to the complex potential of an R&F neuron
 """
-function phase_to_potential(phase::Real, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
+function phase_to_potential(phase::Real, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
     return [phase_to_potential(phase, t, offset=offset, spk_args=spk_args) for t in ts]
 end
 
-function phase_to_potential(phase::AbstractArray, ts::AbstractVector; offset::Real=0.0, spk_args::SpikingArgs)
+function phase_to_potential(phase::AbstractArray, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
     return [phase_to_potential(p, t, offset=offset, spk_args=spk_args) for p in phase, t in ts]
 end
 
-function phase_to_potential(phase::Real, t::Real; offset::Real=0.0, spk_args::SpikingArgs)
+function phase_to_potential(phase::Real, t::Real; offset::Real=0.0f0, spk_args::SpikingArgs)
     period = Float32(spk_args.t_period)
-    k = ComplexF32(1im * imag(neuron_constant(spk_args)))
+    k = ComplexF32(1.0f0im * imag(neuron_constant(spk_args)))
     potential = ComplexF32(exp.(k .* ((t .- offset) .- (phase - 1.0f0)/2.0f0 * period)))
     return potential
 end
@@ -426,7 +426,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                phase[i] = NaN
+                phase[i] = Float32(NaN)
             end
         end
     end
@@ -434,7 +434,7 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     return phase
 end
 
-function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0, threshold::Bool=false)
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     current_zeros = ones(ComplexF32, (length(ts)))
     dims = collect(1:ndims(potential))
@@ -456,7 +456,7 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                phase[i] = NaN
+                phase[i] = Float32(NaN)
             end
         end
     end
@@ -477,7 +477,7 @@ function solution_to_potential(ode_sol::ODESolution)
     return Array(ode_sol)
 end
 
-function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
+function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0.0f0, spk_args::SpikingArgs, kwargs...)
     #convert the ODE solution's saved points to an array
     u = solution_to_potential(sol)
     if final_t
@@ -491,7 +491,7 @@ function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0
     return p
 end
 
-function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0, spk_args::SpikingArgs, kwargs...)
+function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0f0, spk_args::SpikingArgs, kwargs...)
     #call the solution at the provided times
     u = solution_to_potential(sol, t)
     #calculate the phase represented by that potential
@@ -515,7 +515,7 @@ end
 
 function neuron_constant(leakage::Real, t_period::Real)
     angular_frequency = period_to_angfreq(t_period)
-    k = ComplexF32(leakage + 1im * angular_frequency)
+    k = ComplexF32(leakage + 1.0f0im * angular_frequency)
     return k
 end
 
@@ -534,7 +534,7 @@ function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
     spikes = t .+ time_to_spike
     
     #make all times positive
-    spikes[findall(x -> x < 0.0, spikes)] .+= spk_args.t_period
+    spikes[findall(x -> x < 0.0f0, spikes)] .+= spk_args.t_period
     return spikes
 end
 
@@ -556,7 +556,7 @@ function time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs
     #find out given this time, what is the (normalized) potential at a given moment?
     time_from_spike = spikes .- t
     arc_from_spike = time_from_spike .* period_to_angfreq(spk_args.t_period)
-    angles = -1 .* (arc_from_spike .- spiking_angle)
+    angles = -1.0f0 .* (arc_from_spike .- spiking_angle)
     potentials = angle_to_complex(angles ./ pi_f32)
 
     return potentials
