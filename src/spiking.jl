@@ -99,12 +99,12 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
 end
 
 function gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
-    i = exp.(-1 .* ((t .- x) / (2 .* t_sigma)).^2)
+    i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
     return i
 end
 
 function gaussian_kernel(x::AbstractVector, ts::Vector, t_sigma::Real)
-    i = exp.(-1 .* ((ts' .- x) / (2 .* t_sigma)).^2)
+    i = exp.(-1.0f0 .* ((ts' .- x) / (2.0f0 .* t_sigma)).^2.0f0)
     return i
 end
 
@@ -249,7 +249,7 @@ function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
 end
 
 function spiking_offset(spk_args::SpikingArgs)
-    return spk_args.t_period / 4.0
+    return spk_args.t_period / 4.0f0
 end
 
 function stack_trains(trains::Array{<:SpikeTrain,1})

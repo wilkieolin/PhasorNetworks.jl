@@ -71,13 +71,13 @@ function Base.show(io::IO, b::ComplexBias)
 end
 
 function (b::ComplexBias)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
-    b = params.bias_real .+ 1.0f0im .* params.bias_imag
-    return x .+ b
+    bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+    return x .+ bias_val, state 
 end
 
 function (b::ComplexBias)(params::LuxParams, state::NamedTuple; offset::Real = 0.0, spk_args::SpikingArgs)
-    b = params.bias_real .+ 1.0f0im .* params.bias_imag
-    return t -> bias_current(b, t, offset, spk_args)
+    bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+    return t -> bias_current(bias_val, t, offset, spk_args)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, bias::ComplexBias)
@@ -98,7 +98,7 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:dense, :bias)}
     return_solution::Bool
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
     dense = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
     return PhasorDense(dense, bias, activation, return_solution)
@@ -107,13 +107,17 @@ end
 # Calls
 function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple)
     xz = angle_to_complex(x)
-    y_real, st_real = a.dense(real.(xz), params.dense, state.dense)
-    y_imag, st_imag = a.dense(imag.(xz), params.dense, state.dense)
-    st = (dense_real = st_real, dense_imag = st_imag)
+    #stateless calls to dense
+    y_real, _ = a.dense(real.(xz), params.dense, state.dense)
+    y_imag, _ = a.dense(imag.(xz), params.dense, state.dense)
     y = y_real .+ 1im .* y_imag
-    y = a.bias(y, params.bias, state.bias)
-    y = a.activation(y)
-    return y, st
+
+    y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
+    y_activated = a.activation(y_biased)
+
+    # New state for PhasorDense layer
+    st_new = (dense = state.dense, bias = st_updated_bias)
+    return y_activated, st_new
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
@@ -156,41 +160,51 @@ struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:conv, :bias)}
     return_solution::Bool
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = nothing, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
     #construct the convolutional layer
-    conv = Conv(k, chs, identity; kwargs...)
+    conv = Conv(k, chs, identity; use_bias=false, kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
     return PhasorConv(conv, bias, activation, return_solution)
 end
 
-function (pc::PhasorConv)(x, ps, st)
+function (pc::PhasorConv)(x::AbstractArray, ps::LuxParams, st::NamedTuple)
     x = angle_to_complex(x)
     x_real = real.(x)
     x_imag = imag.(x)
 
-    conv_call = x -> pc.conv(x, ps.conv, st.conv)[1]
-    y_real = conv_call(x_real)
-    y_im = 1.0f0im .* conv_call(x_imag)
-    y = y_real .+ y_im
-    y = pc.bias(y, ps.bias, st.bias)
-    y = pc.activation(y)
-    
-    return y, NamedTuple()
+    y_real_conv, _ = pc.conv(x_real, ps.conv, st.conv)
+    y_imag_conv, _ = pc.conv(x_imag, ps.conv, st.conv)
+    y = y_real_conv .+ 1.0f0im .* y_imag_conv
+
+    # Apply bias
+    y_biased, st_updated_bias = pc.bias(y, ps.bias, st.bias)
+
+    y_activated = pc.activation(y_biased)
+
+    st_new = (conv = st.conv, bias = st_updated_bias)
+    return y_activated, st_new
 end
 
 function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     #access the current transformations
-    nn_kernel = x -> a.conv(x, params.dense, state.dense)[1]
-    bias = params.bias_real .+ 1.0f0im .* params.bias_imag
+    nn_kernel = x_val -> begin
+        # Lux.Conv is stateless; state.conv is passed and effectively returned.
+        res, _ = a.conv(x_val, params.conv, state.conv)
+        res
+    end
+    
+    bias_val = params.bias.bias_real .+ 1.0f0im .* params.bias.bias_imag
+
     #pass them to the solver
-    sol = oscillator_bank(x.train, nn_kernel, bias, tspan=x.t_span, spk_args=x.spk_args)
+    sol = oscillator_bank(x.train, nn_kernel, bias_val, tspan=x.t_span, spk_args=x.spk_args)
     if a.return_solution
         return sol
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
-    return next_call, state
+    # Return original state, as Lux.Conv is stateless and bias is applied directly.
+    return next_call, state 
 end
 
 ###
@@ -488,6 +502,30 @@ end
 """
 Other utilities
 """
+struct RandomPhaseProjection <: LuxCore.AbstractLuxLayer
+    dims
+end
+
+function RandomPhaseProjection(dims::Tuple{Vararg{Int}})
+    return RandomPhaseProjection(dims)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, layer::RandomPhaseProjection)
+    return NamedTuple() # No trainable parameters
+end
+
+function Lux.initialstates(rng::AbstractRNG, layer::RandomPhaseProjection)
+    # Create a random projection matrix W of size (dim, dim).
+    # This matrix will project a vector of length `dim` to another vector of length `dim`.
+    # Stored in state as it's non-trainable.
+    projection_weights = rand(rng, (-1.0f0, 1.0f0), layer.dims)
+    return (weights = projection_weights, rng = Lux.replicate(rng))
+end
+
+function (p::RandomPhaseProjection)(x::AbstractArray, params::LuxParams, state::NamedTuple)
+    y = batched_mul(x, state.weights)
+    return y, state
+end
 
 struct MinPool <: LuxCore.AbstractLuxWrapperLayer{:pool}
     pool
