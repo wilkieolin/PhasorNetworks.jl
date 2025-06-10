@@ -29,6 +29,104 @@ function (a::MakeSpiking)(x::ODESolution, params::LuxParams, state::NamedTuple)
     return call, state
 end
 
+# Extend Lux.Flatten for SpikeTrain and SpikingCall types, preserving the last dimension (batch)
+function (f::Lux.FlattenLayer)(x::SpikeTrain, params::LuxParams, state::NamedTuple)
+    original_shape = x.shape
+    N_dims = length(original_shape)
+
+    if N_dims == 0
+        # Cannot meaningfully flatten a 0-dimensional SpikeTrain for batch processing
+        return x, state
+    end
+
+    local new_shape::Tuple
+    local feature_shape_tuple::Tuple
+
+    if N_dims == 1 # Input is (Batch,), new shape will be (1, Batch)
+        batch_size = original_shape[1]
+        new_shape = (1, batch_size)
+        feature_shape_tuple = () # No feature dimensions to flatten
+    else # Input is (F1, ..., Fk, Batch), new shape (F1*...*Fk, Batch)
+        batch_size = original_shape[end]
+        feature_shape_tuple = original_shape[1:end-1]
+        num_features_flat = prod(feature_shape_tuple)
+        new_shape = (num_features_flat, batch_size)
+    end
+
+    # Convert original indices to new CartesianIndices for the new_shape
+    new_indices = map(x.indices) do original_idx_val
+        # Ensure original_idx_val is CartesianIndex for original_shape
+        ci_orig::CartesianIndex = original_idx_val isa CartesianIndex ? 
+                                  original_idx_val : 
+                                  CartesianIndices(original_shape)[original_idx_val]
+        
+        # Batch index is the component corresponding to the last dimension of original_shape
+        batch_val = ci_orig[N_dims]
+
+        # Extract feature coordinates as a tuple of integers
+        # For N_dims=1, (N_dims - 1) is 0, so ntuple returns ()
+        feature_coords_as_tuple = ntuple(d -> ci_orig[d], N_dims - 1)
+        
+        # Calculate linear index for the (potentially) flattened features
+        # If feature_shape_tuple is empty (e.g. original was (Batch,)), linear_feature_idx is 1.
+        linear_feature_idx = isempty(feature_shape_tuple) ? 
+                             1 : 
+                             LinearIndices(feature_shape_tuple)[feature_coords_as_tuple...]
+        
+        CartesianIndex(linear_feature_idx, batch_val)
+    end
+
+    flattened_train = SpikeTrain(new_indices, x.times, new_shape, x.offset)
+    return flattened_train, state
+end
+
+function (f::Lux.FlattenLayer)(x::SpikeTrainGPU, params::LuxParams, state::NamedTuple)
+    original_shape = x.shape
+    N_dims = length(original_shape)
+
+    if N_dims == 0
+        return x, state
+    end
+
+    local new_shape::Tuple
+    local feature_shape_tuple::Tuple
+
+    if N_dims == 1 # Input is (Batch,), new shape will be (1, Batch)
+        batch_size = original_shape[1]
+        new_shape = (1, batch_size)
+        feature_shape_tuple = ()
+    else # Input is (F1, ..., Fk, Batch), new shape (F1*...*Fk, Batch)
+        batch_size = original_shape[end]
+        feature_shape_tuple = original_shape[1:end-1]
+        num_features_flat = prod(feature_shape_tuple)
+        new_shape = (num_features_flat, batch_size)
+    end
+
+    # Convert original linear_indices (for N-D shape) to new CartesianIndices (for 2D shape) on CPU
+    linear_indices_cpu = Array(x.linear_indices)
+    cart_indices_obj_orig = CartesianIndices(original_shape)
+    original_cart_indices_cpu = map(li -> cart_indices_obj_orig[li], linear_indices_cpu)
+
+    new_cart_indices_cpu = map(original_cart_indices_cpu) do ci_orig
+        batch_val = ci_orig[N_dims]
+        feature_coords_as_tuple = ntuple(d -> ci_orig[d], N_dims - 1)
+        linear_feature_idx = isempty(feature_shape_tuple) ? 1 : LinearIndices(feature_shape_tuple)[feature_coords_as_tuple...]
+        CartesianIndex(linear_feature_idx, batch_val)
+    end
+    
+    # SpikeTrainGPU constructor takes AbstractArray for indices (here, CPU Array of CartesianIndex),
+    # and will convert it to CuArray and compute new linear_indices for the new_shape.
+    # x.times is already a CuArray.
+    flattened_train = SpikeTrainGPU(new_cart_indices_cpu, x.times, new_shape, x.offset)
+    return flattened_train, state
+end
+
+function (f::Lux.FlattenLayer)(call::SpikingCall, params::LuxParams, state::NamedTuple)
+    flattened_train, _ = f(call.train, params, state) # Dispatch to SpikeTrain or SpikeTrainGPU method
+    new_call = SpikingCall(flattened_train, call.spk_args, call.t_span)
+    return new_call, state
+end
+
 """
 Extension of dropout to SpikeTrains
 """
@@ -44,6 +142,8 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
 
     return new_call, (), rng
 end
+
+
 
 """
 ComplexBias layer for use in Phase Networks - adds bias in the complex plane
@@ -299,6 +399,31 @@ function (rp::RandomProjection)(x::AbstractArray, params::LuxParams, state::Name
     return y, state # State is not modified in the forward pass for this layer
 end
 
+struct RandomPhaseProjection <: LuxCore.AbstractLuxLayer
+    dims
+end
+
+function RandomPhaseProjection(dims::Tuple{Vararg{Int}})
+    return RandomPhaseProjection(dims)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, layer::RandomPhaseProjection)
+    return NamedTuple() # No trainable parameters
+end
+
+function Lux.initialstates(rng::AbstractRNG, layer::RandomPhaseProjection)
+    # Create a random projection matrix W of size (dim, dim).
+    # This matrix will project a vector of length `dim` to another vector of length `dim`.
+    # Stored in state as it's non-trainable.
+    projection_weights = rand(rng, (-1.0f0, 1.0f0), layer.dims)
+    return (weights = projection_weights, rng = Lux.replicate(rng))
+end
+
+function (p::RandomPhaseProjection)(x::AbstractArray, params::LuxParams, state::NamedTuple)
+    y = batched_mul(x, state.weights)
+    return y, state
+end
+
 """
 Residual blocks
 """
@@ -502,30 +627,6 @@ end
 """
 Other utilities
 """
-struct RandomPhaseProjection <: LuxCore.AbstractLuxLayer
-    dims
-end
-
-function RandomPhaseProjection(dims::Tuple{Vararg{Int}})
-    return RandomPhaseProjection(dims)
-end
-
-function Lux.initialparameters(rng::AbstractRNG, layer::RandomPhaseProjection)
-    return NamedTuple() # No trainable parameters
-end
-
-function Lux.initialstates(rng::AbstractRNG, layer::RandomPhaseProjection)
-    # Create a random projection matrix W of size (dim, dim).
-    # This matrix will project a vector of length `dim` to another vector of length `dim`.
-    # Stored in state as it's non-trainable.
-    projection_weights = rand(rng, (-1.0f0, 1.0f0), layer.dims)
-    return (weights = projection_weights, rng = Lux.replicate(rng))
-end
-
-function (p::RandomPhaseProjection)(x::AbstractArray, params::LuxParams, state::NamedTuple)
-    y = batched_mul(x, state.weights)
-    return y, state
-end
 
 struct MinPool <: LuxCore.AbstractLuxWrapperLayer{:pool}
     pool
