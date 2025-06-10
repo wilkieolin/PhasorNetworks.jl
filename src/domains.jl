@@ -12,20 +12,22 @@ end
 
 struct SpikeTrain{N}
     indices::Array{<:Union{Int, CartesianIndex},1}
-    times::Array{<:Real,1}
+    times::Array{Float32,1}
     shape::Tuple
-    offset::Real
+    offset::Float32
 
     function SpikeTrain(indices::AbstractArray,
         times::AbstractArray,
         shape::Tuple,
         offset::Real)
+        times_f32 = eltype(times) == Float32 ? times : Float32.(times)
         return new{length(shape)}(indices,
-                            times,
+                            times_f32,
                             shape,
-                            offset)
+                            Float32(offset))
     end
 end
+
 
 struct SpikeTrainGPU{N}
     indices::CuArray
@@ -39,15 +41,16 @@ struct SpikeTrainGPU{N}
                             times::AbstractArray,
                             shape::Tuple,
                             offset::Real)
-        return new{length(shape)}(cu(indices), 
+        times_f32 = eltype(times) == Float32 ? times : Float32.(times)
+        cu_times_f32 = cu(times_f32)
+        return new{length(shape)}(cu(indices),
                 CuArray(LinearIndices(shape)[indices]),
-                cu(times),
+                cu_times_f32,
                 shape,
                 reduce(*, shape),
                 Float32(offset))
     end
 end
-
 function SpikeTrainGPU(st::SpikeTrain)
     return SpikeTrainGPU(st.indices,
                         st.times,
@@ -158,13 +161,13 @@ function Base.size(x::SpikeTrain, d::Int)
 end
 
 struct SpikingArgs
-    leakage::Real
-    t_period::Real
-    t_window::Real
-    spk_scale::Real
-    threshold::Real
+    leakage::Float32
+    t_period::Float32
+    t_window::Float32
+    spk_scale::Float32
+    threshold::Float32
     spike_kernel::Union{Symbol, Function}
-    solver
+    solver # Solver type can be kept generic
     solver_args::Dict
     update_fn::Function
 end
@@ -181,20 +184,20 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                                     :save_start => true))
                     
-    return SpikingArgs(leakage,
-            t_period,
-            t_window,
-            spk_scale,
-            threshold,
+    return SpikingArgs(Float32(leakage),
+            Float32(t_period),
+            Float32(t_window),
+            Float32(spk_scale),
+            Float32(threshold),
             spike_kernel,
             solver,
             solver_args,
-            u -> neuron_constant(leakage, t_period) .* u,)
+            u -> neuron_constant(Float32(leakage), Float32(t_period)) .* u,)
 end
 
-function SpikingArgs_NN(; leakage::Real = -0.2, 
+function SpikingArgs_NN(; leakage::Real = -0.2f0, # Changed default to Float32 literal
     t_period::Real = 1.0f0,
-    t_window::Real = 0.01f0,
+    t_window::Real = 0.01f0, # Ensure all Real args are consistently handled
     spk_scale::Real = 1.0f0,
     threshold::Real = 0.001f0,
     spike_kernel = :gaussian,
@@ -205,11 +208,11 @@ function SpikingArgs_NN(; leakage::Real = -0.2,
                     :save_start => true),
     update_fn::Function)
 
-    return SpikingArgs(leakage,
-            t_period,
-            t_window,
-            spk_scale,
-            threshold,
+    return SpikingArgs(Float32(leakage),
+            Float32(t_period),
+            Float32(t_window),
+            Float32(spk_scale),
+            Float32(threshold),
             spike_kernel,
             solver,
             solver_args,
@@ -226,7 +229,7 @@ end
 struct SpikingCall
     train::SpikingTypes
     spk_args::SpikingArgs
-    t_span::Tuple{<:Real, <:Real}
+    t_span::Tuple{Float32, Float32}
 end
 
 function Base.size(x::SpikingCall)
@@ -242,7 +245,15 @@ end
 struct LocalCurrent
     current_fn::Function
     shape::Tuple
-    offset::Real
+    offset::Float32
+end
+
+function LocalCurrent(current_fn::Function, shape::Tuple, offset::Real)
+    return LocalCurrent(current_fn, shape, Float32(offset))
+end
+
+function LocalCurrent(current_fn::Function, shape::Tuple) # Default offset
+    return LocalCurrent(current_fn, shape, 0.0f0)
 end
 
 function Base.size(x::LocalCurrent)
@@ -308,10 +319,13 @@ Converts a matrix of phases into a spike train via phase encoding
 phase_to_train(phases::AbstractMatrix, spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
 """
 function phase_to_time(phases::AbstractArray; offset::Real = 0.0f0, spk_args::SpikingArgs)
-    return phase_to_time(phases, spk_args.t_period, offset)
+    return phase_to_time(phases, spk_args.t_period, Float32(offset))
 end
 
 function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0f0)
+    phases = eltype(phases) == Float32 ? phases : Float32.(phases)
+    period = Float32(period)
+    offset = Float32(offset)
     #convert a potential to the time at which the voltage is maximum - 90* behind phase
     phases = (phases ./ 2.0f0) .+ 0.5f0
     times = phases .* period .+ offset
