@@ -3,8 +3,8 @@ include("imports.jl")
 pi_f32 = convert(Float32, pi)
 
 @kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
-    lr::Float64 = 0.001       ## learning rate
-    batchsize::Int = 256    ## batch size
+    lr::Float64 = 0.003       ## learning rate
+    batchsize::Int = 128    ## batch size
     epochs::Int = 10        ## number of epochs
     use_cuda::Bool = true   ## use gpu (if cuda available)
     rng::Xoshiro = Xoshiro(42) ## global rng
