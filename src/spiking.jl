@@ -7,6 +7,11 @@ function angular_mean(phases::AbstractArray; dims)
     return phase
 end
 
+function bias_current(bias::LuxParams, t::Real, t_offset::Real, spk_args::SpikingArgs)
+    bias = bias.bias_real .+ 1im .* bias.bias_imag
+    return bias_current(bias, t, t_offset, spk_args)
+end
+
 function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     phase = complex_to_angle(bias)
     mag = abs.(bias)
@@ -287,6 +292,14 @@ function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real,
     return sol
 end
 
+function oscillator_bank(u0::AbstractArray, dzdt::Function, params::LuxParams; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    #solve the memory compartment with external parameters passed
+    prob = ODEProblem(dzdt, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
+    
+    return sol
+end
+
 function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
@@ -322,46 +335,26 @@ end
 #     return sol
 # end
 
-function oscillator_bank(x::SpikingTypes, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+function oscillator_bank(x::SpikingTypes, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     update_fn = spk_args.update_fn
 
     #set up compartments for each sample
-    output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
+    output_sample = layer.layer(spike_current(x, 0.0f0, spk_args), params.layer, state.layer)[1]
     u0 = similar(output_sample, ComplexF32)
-    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+    end
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
         s_current = spike_current(x, t, spk_args)
-        transformed_current = kernel_fn(s_current)
-        biasing_current = bias_current(bias, t, x.offset, spk_args)
+        transformed_current = layer.layer(s_current, p.layer, state.layer)[1]
+        biasing_current = bias_current(p.bias, t, x.offset, spk_args)
         return update_fn(u) .+ transformed_current .+ biasing_current
     end
 
     #solve the memory compartment using the base oscillator_bank method
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    return sol
-end
-
-function oscillator_bank(x::SpikingTypes, kernel_fn::Function, bias::AbstractArray{<:Complex}; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-    update_fn = spk_args.update_fn
-
-    #set up compartments for each sample
-    output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
-    u0 = similar(output_sample, ComplexF32)
-    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
-
-    #resonate in time with the input spikes, applying the kernel to the spike current
-    function dzdt(u, p, t)
-        s_current = spike_current(x, t, spk_args)
-        transformed_current = kernel_fn(s_current)
-        biasing_current = bias_current(bias, t, x.offset, spk_args)
-        return update_fn(u) .+ transformed_current .+ biasing_current
-    end
-
-    #solve the memory compartment using the base oscillator_bank method
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
 
     return sol
 end
@@ -381,72 +374,75 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     return sol
 end
 
-function oscillator_bank(x::CurrentCall, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-    return oscillator_bank(x.current, kernel_fn, tspan=x.t_span, spk_args=x.spk_args,)
+function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
+    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
-function oscillator_bank(x::LocalCurrent, kernel_fn::Function; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
     #set up compartments for each sample
-    output_sample = kernel_fn(x.current_fn(0.0f0))
+    output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
     u0 = similar(output_sample, ComplexF32)
-    u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+    end
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
-        transformed_current = kernel_fn(x.current_fn(t))
+        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
+        biasing_current = bias_current(p.bias, t, x.offset, spk_args)
         return update_fn(u) .+ transformed_current
     end
 
     #solve the memory compartment using the base oscillator_bank method
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
 
     return sol
 end
 
-#special version used for ODE layers
-function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
-    #set up functions to define the neuron's differential equations
-    output_shape = (size(params.weight, 1), x.shape[2])
-    #make the initial potential the bias value
-    u0 = zeros(ComplexF32, output_shape)
-    #shift the solver span by the function's time offset
-    tspan = tspan .+ x.offset
+# #special version used for ODE layers
+# function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
+#     #set up functions to define the neuron's differential equations
+#     output_shape = (size(params.weight, 1), x.shape[2])
+#     #make the initial potential the bias value
+#     u0 = zeros(ComplexF32, output_shape)
+#     #shift the solver span by the function's time offset
+#     tspan = tspan .+ x.offset
     
-    #override spk args with params leakage and frequency if provided
-    function calc_k(p)
-        if haskey(p, :leakage) && haskey(p, :t_period)
-            angular_frequency = 2.0f0 * pi_f32 / p.t_period[1]
-            k = (p.leakage[1] + 1.0f0im * angular_frequency)
-        else
-            k = neuron_constant(spk_args)
-        end
-        return k
-    end
+#     #override spk args with params leakage and frequency if provided
+#     function calc_k(p)
+#         if haskey(p, :leakage) && haskey(p, :t_period)
+#             angular_frequency = 2.0f0 * pi_f32 / p.t_period[1]
+#             k = (p.leakage[1] + 1.0f0im * angular_frequency)
+#         else
+#             k = neuron_constant(spk_args)
+#         end
+#         return k
+#     end
     
-    function dzdt(u, p, t)
-        k = calc_k(p)
-        du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
-        return du
-    end
+#     function dzdt(u, p, t)
+#         k = calc_k(p)
+#         du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
+#         return du
+#     end
 
-    function dzdt_nobias(u, p, t)
-        k = calc_k(p)
-        du = k .* u + p.weight * x.current_fn(t)
-        return du
-    end
+#     function dzdt_nobias(u, p, t)
+#         k = calc_k(p)
+#         du = k .* u + p.weight * x.current_fn(t)
+#         return du
+#     end
     
-    #enable bias if used
-    if haskey(params, :bias_real) && haskey(params, :bias_imag)
-        prob = ODEProblem(dzdt, u0, tspan, params)
-    else
-        prob = ODEProblem(dzdt_nobias, u0, tspan, params)
-    end
+#     #enable bias if used
+#     if haskey(params, :bias_real) && haskey(params, :bias_imag)
+#         prob = ODEProblem(dzdt, u0, tspan, params)
+#     else
+#         prob = ODEProblem(dzdt_nobias, u0, tspan, params)
+#     end
     
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    return sol
-end
+#     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+#     return sol
+# end
 
 function vcat_trains(trains::Array{<:SpikingTypes,1})
     check_offsets(trains...)
