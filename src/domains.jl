@@ -51,6 +51,7 @@ struct SpikeTrainGPU{N}
                 Float32(offset))
     end
 end
+
 function SpikeTrainGPU(st::SpikeTrain)
     return SpikeTrainGPU(st.indices,
                         st.times,
@@ -75,6 +76,7 @@ function Base.convert(::Type{SpikeTrainGPU}, st::SpikeTrain)
 end
 
 SpikingTypes = Union{SpikeTrain, SpikeTrainGPU}
+LuxParams = Union{NamedTuple, ComponentArray, SubArray}
 
 function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
