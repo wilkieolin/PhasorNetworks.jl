@@ -165,10 +165,11 @@ function match_tspans(spans::Tuple{<:Real, <:Real}...)
 end
 
 function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0f0, kwargs...)
-    inds = solution.t .> (i_warmup * spk_args.t_period)
+    #inds = solution.t .> (i_warmup * spk_args.t_period)
 
-    u = Array(solution)[:,:,inds]
-    t = solution.t[inds]
+    #u = Array(solution)[:,:,inds]
+    #t = solution.t[inds]
+    u = Array(solution)
     phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args; kwargs...)
     phase = angular_mean(phase, dims=(3))[:,:,1]
 

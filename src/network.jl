@@ -233,7 +233,9 @@ end
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     sol = oscillator_bank(x.train, a, params, state, tspan=x.t_span, spk_args=x.spk_args)   
     if a.return_solution
-        return sol
+        u = Array(sol)
+        t = sol.t
+        return (u, t), state
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
@@ -243,9 +245,11 @@ end
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
-    sol = oscillator_bank(x.current, a.layer, params, state, tspan=x.t_span, spk_args=x.spk_args)
+    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args)
     if a.return_solution
-        return sol
+        u = Array(sol)
+        t = sol.t
+        return (u, t), state
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
