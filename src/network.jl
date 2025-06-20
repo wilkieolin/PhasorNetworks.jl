@@ -231,16 +231,8 @@ function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
-    sol = oscillator_bank(x.train, a, params, state, tspan=x.t_span, spk_args=x.spk_args)   
-    if a.return_solution
-        u = Array(sol)
-        t = sol.t
-        return (u, t), state
-    end
-
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
-    next_call = SpikingCall(train, x.spk_args, x.t_span)
-    return next_call, state
+    current_call = CurrentCall(x)
+    return a(current_call, params, state)
 end
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
@@ -252,7 +244,7 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return (u, t), state
     end
 
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
     return next_call, state
 end

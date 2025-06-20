@@ -258,6 +258,12 @@ function LocalCurrent(current_fn::Function, shape::Tuple) # Default offset
     return LocalCurrent(current_fn, shape, 0.0f0)
 end
 
+function LocalCurrent(st::SpikingTypes, spk_args::SpikingArgs)
+    return LocalCurrent(t -> spike_current(st, t, spk_args),
+                                        st.shape,
+                                        st.offset)
+end
+
 function Base.size(x::LocalCurrent)
     return x.shape
 end
@@ -266,6 +272,12 @@ struct CurrentCall
     current::LocalCurrent
     spk_args::SpikingArgs
     t_span::Tuple{<:Real, <:Real}
+end
+
+function CurrentCall(sc::SpikingCall)
+    return CurrentCall(LocalCurrent(sc.train, sc.spk_args), 
+                        sc.spk_args,
+                        sc.t_span)
 end
 
 function Base.size(x::CurrentCall)
