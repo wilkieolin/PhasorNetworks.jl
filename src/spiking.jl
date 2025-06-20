@@ -164,12 +164,10 @@ function match_tspans(spans::Tuple{<:Real, <:Real}...)
     return (start, stop)
 end
 
-function mean_phase(solution::ODESolution, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0f0, kwargs...)
-    #inds = solution.t .> (i_warmup * spk_args.t_period)
-
-    #u = Array(solution)[:,:,inds]
-    #t = solution.t[inds]
-    u = Array(solution)
+function mean_phase((u, t)::Tuple, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0f0, kwargs...)
+    inds = t .> (i_warmup * spk_args.t_period)
+    u = u[:,:,inds]
+    t = t[inds]
     phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args; kwargs...)
     phase = angular_mean(phase, dims=(3))[:,:,1]
 
@@ -301,46 +299,15 @@ function oscillator_bank(u0::AbstractArray, dzdt::Function, params::LuxParams; t
     return sol
 end
 
-function oscillator_bank(x::SpikeTrain; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-    update_fn = spk_args.update_fn
-
-    #set up compartments for each sample
-    u0 = zeros(ComplexF32, x.shape)
-    #resonate in time with the input spikes
-    dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
-
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    return sol
+function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
+    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args,)
 end
 
-# function oscillator_bank(x::SpikeTrain, kernel_fn::Function, bias::AbstractArray{<:Complex}; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-#     update_fn = spk_args.update_fn
-
-#     #set up compartments for each sample
-#     output_sample = kernel_fn(spike_current(x, 0.0f0, spk_args))
-#     u0 = similar(output_sample, ComplexF32)
-#     u0 .= ComplexF32(0)
-
-#     #resonate in time with the input spikes, applying the kernel to the spike current
-#     function dzdt(u, p, t)
-#         s_current = spike_current(x, t, spk_args)
-#         transformed_current = kernel_fn(s_current)
-#         biasing_current = bias_current(bias, t, x.offset, spk_args)
-#         return update_fn(u) .+ transformed_current .+ biasing_current
-#     end
-
-#     #solve the memory compartment using the base oscillator_bank method
-#     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-#     return sol
-# end
-
-function oscillator_bank(x::SpikingTypes, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
+    #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
-
     #set up compartments for each sample
-    output_sample = layer.layer(spike_current(x, 0.0f0, spk_args), params.layer, state.layer)[1]
+    output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
     u0 = similar(output_sample, ComplexF32)
     ignore_derivatives() do
         u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
@@ -348,8 +315,7 @@ function oscillator_bank(x::SpikingTypes, layer::AbstractLuxLayer, params::LuxPa
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
-        s_current = spike_current(x, t, spk_args)
-        transformed_current = layer.layer(s_current, p.layer, state.layer)[1]
+        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
         biasing_current = bias_current(p.bias, t, x.offset, spk_args)
         return update_fn(u) .+ transformed_current .+ biasing_current
     end
@@ -371,33 +337,6 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     #solve the ODE over the given time span
     dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    return sol
-end
-
-function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
-    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args,)
-end
-
-function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-    #set up compartments for each sample
-    output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
-    u0 = similar(output_sample, ComplexF32)
-    ignore_derivatives() do
-        u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
-    end
-
-    #resonate in time with the input spikes, applying the kernel to the spike current
-    function dzdt(u, p, t)
-        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        biasing_current = bias_current(p.bias, t, x.offset, spk_args)
-        return update_fn(u) .+ transformed_current
-    end
-
-    #solve the memory compartment using the base oscillator_bank method
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
 
     return sol
 end
