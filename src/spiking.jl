@@ -341,6 +341,12 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     return sol
 end
 
+function oscillator_bank(x::SpikingTypes; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    current_fn = t -> spike_current(x, t, spk_args)
+    local_current = LocalCurrent(current_fn, x.shape, x.offset)
+    return oscillator_bank(local_current, tspan=tspan, spk_args=spk_args)
+end
+
 # #special version used for ODE layers
 # function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
 #     #set up functions to define the neuron's differential equations
