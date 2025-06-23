@@ -19,10 +19,7 @@ function network_tests()
         accuracy_test(model, ps_train, st_train, test_loader, args)
         correlation_test(model, spk_model, ps_train, st_train, x)
         spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),], args)
-        #y_cor_chk, lval_chk, grad_chk = ode_correlation(model, ode_model, ps, st, x, y)
-        #@test y_cor_chk
-        #@test lval_chk
-        #@test grad_chk
+        ode_correlation(model, ode_model, ps, st, x, y)
     end
 end
  
@@ -72,13 +69,13 @@ function ode_correlation(model, ode_model, ps, st, x, y)
         @info "Running ODE correlation test..."
         y_f, _ = model(x, ps, st)
         y_ode, _ = ode_model(x, ps, st)
-        y_cor_chk = cor_realvals(vec(y_f), vec(y_ode)) > 0.90
+        @test cor_realvals(vec(y_f), vec(y_ode)) > 0.90
 
         psf = ComponentArray(ps)
         lval, grads = withgradient(p -> mean(quadrature_loss(model(x, p, st)[1], y)), psf)
         lval_ode, grads_ode = withgradient(p -> mean(quadrature_loss(ode_model(x, p, st)[1], y)), psf)
-        lval_chk = abs(lval_ode - lval) < 0.02
-        grad_chk = cor_realvals(vec(real.(grads[1].layer_4.weight)), vec(real.(grads_ode[1].layer_4.weight))) > 0.95
+        @test abs(lval_ode - lval) < 0.02
+        @test cor_realvals(vec(real.(grads[1].layer_3.layer.weight)), vec(real.(grads_ode[1].layer_3.layer.weight))) > 0.95
     end
 end
 
