@@ -162,6 +162,16 @@ function Base.size(x::SpikeTrain, d::Int)
     return x.shape[d]
 end
 
+function get_time(st::SpikeTrainGPU, times::Tuple{<:Real, <:Real})
+    return get_time(SpikeTrain(st), times)
+end
+
+function get_time(st::SpikeTrain, times::Tuple{<:Real, <:Real})
+    valid = findall((st.times .> times[1]) .* (st.times .< times[2]))
+    st = SpikeTrain(st.indices[valid], st.times[valid], st.shape, st.offset)
+    return st
+end
+
 struct SpikingArgs
     leakage::Float32
     t_period::Float32
