@@ -447,7 +447,7 @@ end
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
 function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0, spk_args::SpikingArgs, threshold::Bool=false)
-    current_zero = ones(ComplexF32, (1))
+    current_zero = similar(potential, ComplexF32, (1))
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
@@ -474,7 +474,7 @@ end
 
 function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
-    current_zeros = ones(ComplexF32, (length(ts)))
+    current_zeros = similar(potential, ComplexF32, (length(ts)))
     dims = collect(1:ndims(potential))
 
     ignore_derivatives() do

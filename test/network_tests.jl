@@ -32,19 +32,17 @@ function getdata(args)
 end
 
 function build_mlp(args)
-    phasor_model = Chain(LayerNorm((2,)), 
-                x -> tanh_fast.(x), 
+    phasor_model = Chain(x -> tanh_fast.(x),
                 x -> x, 
-                PhasorDense(2 => 128, soft_angle), 
+                PhasorDense(2 => 128, complex_to_angle), 
                 x -> x,
-                PhasorDense(128 => 2, soft_angle))
+                PhasorDense(128 => 2, complex_to_angle))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
 
 function build_spiking_mlp(args, spk_args)
-    phasor_model = Chain(LayerNorm((2,)), 
-                x -> tanh_fast.(x), 
+    phasor_model = Chain(x -> tanh_fast.(x), 
                 MakeSpiking(spk_args, repeats), 
                 PhasorDense(2 => 128, soft_angle), 
                 x -> x,
@@ -54,12 +52,12 @@ function build_spiking_mlp(args, spk_args)
 end
 
 function build_ode_mlp(args, spk_args)
-    ode_model = Chain(LayerNorm((2,)),
+    ode_model = Chain(
                 x -> tanh_fast.(x),
-                x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0, 10.0)),
-                PhasorDense(2 => 128, soft_angle, return_solution=true),
-                x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0),
-                PhasorDense(128 => 2, soft_angle))
+                x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0f0, 10.0f0)),
+                PhasorDense(2 => 128, complex_to_angle, return_solution=true),
+                x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0f0),
+                PhasorDense(128 => 2, complex_to_angle))
     ps, st = Lux.setup(args.rng, ode_model)
     return ode_model, ps, st
 end

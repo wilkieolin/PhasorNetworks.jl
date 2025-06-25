@@ -1,12 +1,5 @@
 include("gpu.jl")
 
-function angular_mean(phases::AbstractArray; dims)
-    u = exp.(pi_f32 * 1.0f0im .* phases)
-    u_mean = mean(u, dims=dims)
-    phase = angle.(u_mean) ./ pi_f32
-    return phase
-end
-
 function bias_current(bias::LuxParams, t::Real, t_offset::Real, spk_args::SpikingArgs)
     bias = bias.bias_real .+ 1im .* bias.bias_imag
     return bias_current(bias, t, t_offset, spk_args)

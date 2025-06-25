@@ -8,6 +8,13 @@ function arc_error(phases::AbstractArray)
     return arc_error.(phases)
 end
 
+function angular_mean(phases::AbstractArray; dims)
+    u = exp.(pi_f32 * 1.0f0im .* phases)
+    u_mean = mean(u, dims=dims)
+    phase = angle.(u_mean) ./ pi_f32
+    return phase
+end
+
 function exp_score(similarity::AbstractArray; scale::Real = 3.0f0)
     return exp.((1.0f0 .- similarity) .* scale) .- 1.0f0
 end
