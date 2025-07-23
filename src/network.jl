@@ -239,7 +239,7 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args)
     if a.return_solution
-        u = Array(sol)
+        u = sol.u
         t = sol.t
         return (u, t), state
     end
@@ -318,6 +318,7 @@ end
 ###
 struct PhasorResonant <: Lux.AbstractLuxLayer
     shape::Int
+    layer
     init_weight
     return_solution::Bool
     static::Bool
@@ -330,7 +331,7 @@ function PhasorResonant(n::Int, spk_args::SpikingArgs, return_solution::Bool = t
         init_w = rng -> square_variance(rng, n)
     end
         
-    return PhasorResonant(n, init_w, return_solution, static)
+    return PhasorResonant(n, Dense(n => n), init_w, return_solution, static)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
@@ -345,9 +346,9 @@ end
 
 function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     if a.static
-        y = v_bundle_project(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+        y = oscillator_bank(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
     else    
-        y = v_bundle_project(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+        y = oscillator_bank(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
     end
 
     return y, state

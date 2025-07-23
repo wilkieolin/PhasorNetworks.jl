@@ -421,6 +421,34 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real =
     return phases
 end
 
+function phase_to_current(phases::AbstractArray; rng::AbstractRNG, spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, zeta::Real=Float32(1.0e-8))
+    shape = size(phases)
+    
+    function inner(t::Real)
+        output = similar(phases)
+
+        ignore_derivatives() do
+            p = time_to_phase([t,], spk_args = spk_args, offset = offset)[1]
+            current_kernel = x -> gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
+            impulses = current_kernel(phases)
+
+            if zeta > 0.0f0
+                noise = zeta .* randn(rng, Float32, size(impulses))
+                impulses .+= noise
+            end
+            
+            output .= impulses
+        end
+
+        return output
+    end
+
+    current = LocalCurrent(inner, shape, offset)
+    call = CurrentCall(current, spk_args, tspan)
+
+    return call
+end
+
 ###
 ### PHASE - POTENTIAL
 ###
@@ -470,6 +498,22 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     end
 
     return phase
+end
+
+"""
+    potential_to_phase(ut::Tuple{<:AbstractVector{<:AbstractArray}, <:AbstractVector}; spk_args::SpikingArgs, kwargs...)
+
+Decodes the phase from a tuple of potentials and times, as produced by an `ODESolution`.
+This is a convenience function for handling the output of ODE solvers like `(sol.u, sol.t)`.
+"""
+function potential_to_phase(ut::Tuple{<:AbstractVector{<:AbstractArray}, <:AbstractVector}; spk_args::SpikingArgs, kwargs...)
+    u_vec = ut[1]
+    ts = ut[2]
+
+    # Stack the vector of arrays into a single multi-dimensional array, adding a time dimension.
+    potential = stack(u_vec, dims=ndims(u_vec[1]) + 1)
+
+    return potential_to_phase(potential, ts; spk_args=spk_args, kwargs...)
 end
 
 function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)

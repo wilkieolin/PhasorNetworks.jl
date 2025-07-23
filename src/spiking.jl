@@ -159,9 +159,9 @@ end
 
 function mean_phase((u, t)::Tuple, i_warmup::Int; spk_args::SpikingArgs, offset::Real=0.0f0, kwargs...)
     inds = t .> (i_warmup * spk_args.t_period)
-    u = u[:,:,inds]
+    u = u[inds]
     t = t[inds]
-    phase = potential_to_phase(u, t, offset=offset, spk_args=spk_args; kwargs...)
+    phase = potential_to_phase((u, t), offset=offset, spk_args=spk_args; kwargs...)
     phase = angular_mean(phase, dims=(3))[:,:,1]
 
     return phase
@@ -178,33 +178,6 @@ end
 
 function normalize_potential(a::AbstractArray)
     return normalize_potential.(a)
-end
-
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, repeat::Bool=true)
-    shape = size(phases)
-    
-    function inner(t::Real)
-        output = zero(phases)
-
-        ignore_derivatives() do
-            times = phase_to_time(phases, spk_args = spk_args, offset = offset)
-
-            #add currents into the active synapses
-            if repeat
-                t = mod(t, spk_args.t_period)
-            end
-            current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-            impulses = current_kernel(times)
-            output .+= impulses
-        end
-
-        return output
-    end
-
-    current = LocalCurrent(inner, shape, offset)
-    call = CurrentCall(current, spk_args, tspan)
-
-    return call
 end
 
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0f0)
@@ -317,6 +290,10 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
 
     return sol
+end
+
+function oscillator_bank(x::CurrentCall)
+    return oscillator_bank(x.current, tspan=x.t_span, spk_args=x.spk_args)
 end
 
 function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
