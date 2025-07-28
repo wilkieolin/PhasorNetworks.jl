@@ -156,6 +156,10 @@ function default_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
     return ones(ComplexF32, dims)
 end
 
+function zero_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
+    return zeros(ComplexF32, dims)
+end
+
 function ComplexBias(dims::Tuple{Vararg{Int}}; init_bias = default_bias)
     if init_bias == nothing
         init_bias = (rng, dims) -> zeros(ComplexF32, dims)

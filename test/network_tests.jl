@@ -11,6 +11,7 @@ function network_tests()
         x, y = first(train_loader)
 
         model, ps, st = build_mlp(args)
+        model_nb, ps_nb, st_nb = build_mlp_no_bias(args)
         spk_model, _, _ = build_spiking_mlp(args, spk_args)
         ode_model, _, _ = build_ode_mlp(args, spk_args)
 
@@ -19,7 +20,7 @@ function network_tests()
         accuracy_test(model, ps_train, st_train, test_loader, args)
         correlation_test(model, spk_model, ps_train, st_train, x)
         spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),], args)
-        ode_correlation(model, ode_model, ps, st, x, y)
+        ode_correlation(model_nb, ode_model, ps_nb, st_nb, x, y)
     end
 end
  
@@ -41,6 +42,16 @@ function build_mlp(args)
     return phasor_model, ps, st
 end
 
+function build_mlp_no_bias(args)
+    phasor_model = Chain(x -> tanh_fast.(x),
+                x -> x, 
+                PhasorDense(2 => 128, complex_to_angle, init_bias=zero_bias), 
+                x -> x,
+                PhasorDense(128 => 2, complex_to_angle, init_bias=zero_bias))
+    ps, st = Lux.setup(args.rng, phasor_model)
+    return phasor_model, ps, st
+end
+
 function build_spiking_mlp(args, spk_args)
     phasor_model = Chain(x -> tanh_fast.(x), 
                 MakeSpiking(spk_args, repeats), 
@@ -55,9 +66,9 @@ function build_ode_mlp(args, spk_args)
     ode_model = Chain(
                 x -> tanh_fast.(x),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0f0, 10.0f0)),
-                PhasorDense(2 => 128, complex_to_angle, return_solution=true),
+                PhasorDense(2 => 128, complex_to_angle, return_solution=true, init_bias=zero_bias),
                 x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0f0),
-                PhasorDense(128 => 2, complex_to_angle))
+                PhasorDense(128 => 2, complex_to_angle, init_bias=zero_bias))
     ps, st = Lux.setup(args.rng, ode_model)
     return ode_model, ps, st
 end

@@ -106,6 +106,11 @@ function gaussian_kernel(x::AbstractVector, ts::Vector, t_sigma::Real)
     return i
 end
 
+function arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
+    i = exp.(-1.0f0 .* (sin.(0.5f0 * pi_f32 .* (t .- x)) / (2.0f0 .* t_sigma)).^2.0f0)
+    return i
+end
+
 function generate_cycles(tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, offset::Real)
     #determine what the cycle offset should be
     offset = mod(offset, spk_args.t_period)

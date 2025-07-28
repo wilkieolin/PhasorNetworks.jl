@@ -72,6 +72,8 @@ PhasorAttention,
 SingleHeadAttention,
 train,
 soft_angle,
+default_bias,
+zero_bias,
 
 #metrics
 cycle_correlation,

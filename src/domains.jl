@@ -421,7 +421,7 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real =
     return phases
 end
 
-function phase_to_current(phases::AbstractArray; rng::AbstractRNG, spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, zeta::Real=Float32(1.0e-8))
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
     shape = size(phases)
     
     function inner(t::Real)
@@ -429,7 +429,7 @@ function phase_to_current(phases::AbstractArray; rng::AbstractRNG, spk_args::Spi
 
         ignore_derivatives() do
             p = time_to_phase([t,], spk_args = spk_args, offset = offset)[1]
-            current_kernel = x -> gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
+            current_kernel = x -> arc_gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
             impulses = current_kernel(phases)
 
             if zeta > 0.0f0
