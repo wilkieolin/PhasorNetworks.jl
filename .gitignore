@@ -6,4 +6,4 @@
 *debug*
 *.jld2
 figures/*
-tutorial/*.gif
+*.gif
