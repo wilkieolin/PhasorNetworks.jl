@@ -203,13 +203,14 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer
     bias
     activation
+    use_bias::Bool
     return_solution::Bool
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, use_bias::Bool = true, kwargs...)
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorDense(layer, bias, activation, return_solution)
+    return PhasorDense(layer, bias, activation, use_bias, return_solution)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
@@ -226,8 +227,14 @@ function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple
     y_imag, _ = a.layer(imag.(xz), params.layer, state.layer)
     y = y_real .+ 1im .* y_imag
 
-    y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
-    y_activated = a.activation(y_biased)
+    if a.use_bias
+        y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
+        y_activated = a.activation(y_biased)
+    else
+        #passthrough
+        st_updated_bias = state.bias
+        y_activated = a.activation(y)
+    end
 
     # New state for PhasorDense layer
     st_new = (dense = state.layer, bias = st_updated_bias)
@@ -241,7 +248,7 @@ end
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
-    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args)
+    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_solution
         u = sol.u
         t = sol.t

@@ -7,3 +7,4 @@
 *.jld2
 figures/*
 *.gif
+.DS_store

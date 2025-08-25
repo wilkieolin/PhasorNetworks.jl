@@ -305,6 +305,10 @@ function complex_to_angle(x::AbstractArray)
     return angle.(x) ./ pi_f32
 end
 
+function complex_to_angle(x_real::Real, x_imag::Real)
+    return atan(x_imag, x_real) / pi_f32
+end
+
 function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
     s = similar(real.(x))
 

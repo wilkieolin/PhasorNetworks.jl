@@ -45,9 +45,9 @@ end
 function build_mlp_no_bias(args)
     phasor_model = Chain(x -> tanh_fast.(x),
                 x -> x, 
-                PhasorDense(2 => 128, complex_to_angle, init_bias=zero_bias), 
+                PhasorDense(2 => 128, complex_to_angle, use_bias=false,), 
                 x -> x,
-                PhasorDense(128 => 2, complex_to_angle, init_bias=zero_bias))
+                PhasorDense(128 => 2, complex_to_angle, use_bias=false,))
     ps, st = Lux.setup(args.rng, phasor_model)
     return phasor_model, ps, st
 end
@@ -66,9 +66,9 @@ function build_ode_mlp(args, spk_args)
     ode_model = Chain(
                 x -> tanh_fast.(x),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0f0, 10.0f0)),
-                PhasorDense(2 => 128, complex_to_angle, return_solution=true, init_bias=zero_bias),
-                x -> mean_phase(x, 1, spk_args=spk_args, offset=0.0f0),
-                PhasorDense(128 => 2, complex_to_angle, init_bias=zero_bias))
+                PhasorDense(2 => 128, complex_to_angle, return_solution=true, use_bias=false),
+                x -> end_phase(x, spk_args=spk_args, offset=0.0f0),
+                PhasorDense(128 => 2, complex_to_angle, use_bias=false))
     ps, st = Lux.setup(args.rng, ode_model)
     return ode_model, ps, st
 end
@@ -84,7 +84,7 @@ function ode_correlation(model, ode_model, ps, st, x, y)
         lval, grads = withgradient(p -> mean(quadrature_loss(model(x, p, st)[1], y)), psf)
         lval_ode, grads_ode = withgradient(p -> mean(quadrature_loss(ode_model(x, p, st)[1], y)), psf)
         @test abs(lval_ode - lval) < 0.02
-        @test cor_realvals(vec(real.(grads[1].layer_5.layer.weight)), vec(real.(grads_ode[1].layer_5.layer.weight))) > 0.95
+        @test cor_realvals(vec(real.(grads[1].layer_3.layer.weight)), vec(real.(grads_ode[1].layer_3.layer.weight))) > 0.95
     end
 end
 
