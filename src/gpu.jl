@@ -208,3 +208,19 @@ function oscillator_bank(x::SpikeTrainGPU{3}, w::CuArray, b::CuArray; tspan::Tup
     #return full solution
     return sol
 end
+
+function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    tspan = tspan |> f32_tspan
+    #set up functions to define the neuron's differential equations
+    update_fn = spk_args.update_fn
+    #get the number of batches, channels, & output neurons
+    output_shape = (size(w, 1), size(w,2), x.shape[2], x.shape[3])
+    u0 = CUDA.zeros(ComplexF32, output_shape)
+
+    #solve the ODE over the given time span
+    dzdt(u, p, t) = update_fn(u) + batched_mul(x, spike_current(x, t, spk_args)) .+ bias_current(b, t, x.offset, spk_args)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
+
+    #return full solution
+    return sol
+end

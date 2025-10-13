@@ -264,18 +264,19 @@ end
 ### Convolutional Phasor Layer
 ###
 
-struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:conv, :bias)}
+struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer
     bias
     activation
+    use_bias::Bool
     return_solution::Bool
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, use_bias::Bool = true, kwargs...)
     #construct the convolutional layer
     layer = Conv(k, chs, identity; use_bias=false, kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
-    return PhasorConv(layer, bias, activation, return_solution)
+    return PhasorConv(layer, bias, activation, use_bias, return_solution)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorConv)
@@ -303,25 +304,22 @@ function (pc::PhasorConv)(x::AbstractArray, ps::LuxParams, st::NamedTuple)
 end
 
 function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
-    #access the current transformations
-    nn_kernel = x_val -> begin
-        # Lux.Conv is stateless; state.layer is passed and effectively returned.
-        res, _ = a.layer(x_val, params.layer, state.layer)
-        res
-    end
-    
-    bias_val = params.bias.bias_real .+ 1.0f0im .* params.bias.bias_imag
+    current_call = CurrentCall(x)
+    return a(current_call, params, state)
+end
 
-    #pass them to the solver
-    sol = oscillator_bank(x.train, nn_kernel, bias_val, tspan=x.t_span, spk_args=x.spk_args)
+function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    #pass the params and dense kernel to the solver
+    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_solution
-        return sol
+        u = sol.u
+        t = sol.t
+        return (u, t), state
     end
 
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.train.offset)
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
     next_call = SpikingCall(train, x.spk_args, x.t_span)
-    # Return original state, as Lux.Conv is stateless and bias is applied directly.
-    return next_call, state 
+    return next_call, state
 end
 
 ###
