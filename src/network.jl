@@ -200,11 +200,11 @@ end
 PhasorDense layer - implementationof fundamental dense layer using phase tensors
 """
 struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
-    layer
-    bias
-    activation
-    use_bias::Bool
-    return_solution::Bool
+    layer # the conventional layer used to transform inputs
+    bias # the bias in the complex domain used to shift away from the origin
+    activation # the activation function which converts complex values to real phases
+    use_bias::Bool # apply the layer with the bias if true
+    return_solution::Bool # return the full ODE solution from a spiking input
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, use_bias::Bool = true, kwargs...)
@@ -225,7 +225,7 @@ function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple
     #stateless calls to dense
     y_real, _ = a.layer(real.(xz), params.layer, state.layer)
     y_imag, _ = a.layer(imag.(xz), params.layer, state.layer)
-    y = y_real .+ 1im .* y_imag
+    y = y_real .+ 1.0f0im .* y_imag
 
     if a.use_bias
         y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
@@ -295,9 +295,14 @@ function (pc::PhasorConv)(x::AbstractArray, ps::LuxParams, st::NamedTuple)
     y = y_real_conv .+ 1.0f0im .* y_imag_conv
 
     # Apply bias
-    y_biased, st_updated_bias = pc.bias(y, ps.bias, st.bias)
-
-    y_activated = pc.activation(y_biased)
+    if pc.use_bias
+        y_biased, st_updated_bias = pc.bias(y, ps.bias, st.bias)
+        y_activated = pc.activation(y_biased)
+    else
+        #passthrough
+        st_updated_bias = st.bias
+        y_activated = a.activation(y)
+    end
 
     st_new = (layer = st.layer, bias = st_updated_bias)
     return y_activated, st_new

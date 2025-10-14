@@ -102,12 +102,12 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
     return channels, times
 end
 
-function gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
+function gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real)
     i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
     return i
 end
 
-function gaussian_kernel(x::AbstractVector, ts::Vector, t_sigma::Real)
+function gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real)
     i = exp.(-1.0f0 .* ((ts' .- x) / (2.0f0 .* t_sigma)).^2.0f0)
     return i
 end
