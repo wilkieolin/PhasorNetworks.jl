@@ -62,7 +62,7 @@ end
 HD / Attention data
 """
 function generate_codebook(rng::AbstractRNG; vocab_size::Int=100, n_hd::Int=512)
-    symbols = random_symbols((n_hd, vocab_size), rng)
+    symbols = random_symbols(rng, (n_hd, vocab_size))
     codebook = Dict{Int, Vector{<:Real}}()
     for i in 1:vocab_size
         codebook[i] = symbols[:,i]
@@ -79,7 +79,7 @@ function map_symbols(dataset::Vector{<:Any}, codebook::Dict{<:Int, <:Vector{<:Re
 end
 
 function generate_addresses(n_samples::Int,  n_vsa::Int, rng::AbstractRNG)
-    header = random_symbols((n_vsa, 1), rng)
+    header = random_symbols(rng, (n_vsa, 1))
     powers = collect(0:n_samples-1)
     addresses = [v_bind(header, header .* p)[:,1] for p in powers]
     addresses = stack(addresses, dims=2)

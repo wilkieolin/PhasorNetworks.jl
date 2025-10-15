@@ -224,3 +224,39 @@ function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tup
     #return full solution
     return sol
 end
+
+function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
+    D, M, X = size(A)
+    D_B, N, X_B = size(B)
+    @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
+    @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
+
+    output = CUDA.zeros(Float32, M, N, X)
+    
+    #Kernel configuration
+    threads = (16, 16, 1)
+    blocks = (ceil(Int, M/16), ceil(Int, N/16), X)
+    
+    @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
+    synchronize()
+    #output = permutedims(output, (2,3,1))
+
+    return output
+end
+
+function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2})
+    # Treat 2D inputs as 3D with a singleton batch dimension and delegate
+    # to the 3D implementation to avoid duplicating GPU kernel logic.
+    D_A, M = size(A)
+    D_B, N = size(B)
+    @assert D_A == D_B "Feature dimension mismatch (D_A=$D_A vs D_B=$D_B)"
+
+    # create views with a singleton third dimension
+    A3 = reshape(A, D_A, M, 1)
+    B3 = reshape(B, D_B, N, 1)
+
+    out3 = similarity_outer(A3, B3)
+
+    # out3 has shape (M, N, 1) -> remove singleton third dim
+    return reshape(out3, size(out3,1), size(out3,2))
+end

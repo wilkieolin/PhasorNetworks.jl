@@ -328,6 +328,43 @@ function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
 end
 
 ###
+### Codebook layer - converts a vector to a value of similarities
+###
+
+struct Codebook <: LuxCore.AbstractLuxLayer
+    dims
+    Codebook(x::Pair{<:Int, <:Int}) = new(x)
+end
+
+function Base.show(io::IO, cb::Codebook)
+    print(io, "Codebook($(cb.dims))")
+end
+
+function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
+    params = (codes = random_symbols(rng, (cb.dims[1], cb.dims[2])),)
+    return params
+end
+
+function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
+    return NamedTuple()
+end
+
+function (cb::Codebook)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+    return similarity_outer(x, params.codes), NamedTuple()
+end
+
+function (cb::Codebook)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+    current_call = CurrentCall(x)
+    return cb(current_call, params, state), NamedTuple()
+end
+
+function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    code_currents = phase_to_current(params.codes, spk_args=x.spk_args, offset=x.current.offset)
+    return similarity_outer(x, code_currents), NamedTuple()
+end
+
+
+###
 ### Layer which resonates with incoming input currents - mainly with one input and weakly with others
 ###
 struct PhasorResonant <: Lux.AbstractLuxLayer

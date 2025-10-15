@@ -533,7 +533,6 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
     potential = permutedims(potential, reverse(dims))
     arc = angle.(current_zeros) .- angle.(potential) 
     
-
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 

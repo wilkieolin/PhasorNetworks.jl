@@ -158,7 +158,7 @@ function random_symbols(size::Tuple{Vararg{Int}})
     return y
 end
 
-function random_symbols(size::Tuple{Vararg{Int}}, rng::AbstractRNG)
+function random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}})
     y = 2.0f0 .* rand(rng, Float32, size) .- 1.0f0
     return y
 end
@@ -231,7 +231,9 @@ function similarity_outer(x::SpikingCall, y::SpikingCall; automatch::Bool=true)
 end
 
 function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, automatch::Bool=true)
-    @assert length(x.shape) == 3 && length(y.shape) == 3 "Outer similarity for spike trains assumes 3-dimensional inputs (b x d)"
+    # Allow arbitrary dimensionality for spike-train batches. We will slice along
+    # the last two dimensions (batch x features) by default in downstream
+    # similarity_outer for arrays, so no strict shape assertion is required here.
     if !automatch
         if check_offsets(x::SpikingTypes, y::SpikingTypes) @warn "Offsets between spike trains do not match - may not produce desired phases" end
     else
@@ -241,7 +243,6 @@ function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real,
     sol_x = oscillator_bank(x, tspan = tspan, spk_args = spk_args)
     sol_y = oscillator_bank(y, tspan = tspan, spk_args = spk_args)
 
-
     u_x = normalize_potential.(sol_x.u)
     u_y = normalize_potential.(sol_y.u)
     
@@ -250,37 +251,39 @@ function similarity_outer(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real,
     return sim
 end
 
-function similarity_self(x::AbstractArray; dims)
-    return similarity_outer(x, x, dims=dims)
+function similarity_outer(x::CurrentCall, y::CurrentCall)
+    @assert x.spk_args == y.spk_args "Spiking arguments must be identical to calculate similarity"
+    new_span = match_tspans(x.t_span, y.t_span)
+
+    sol_x = oscillator_bank(x)
+    sol_y = oscillator_bank(y)
+
+    u_x = normalize_potential.(sol_x.u)
+    u_y = normalize_potential.(sol_y.u)
+    
+    #add up along the slices
+    return similarity_outer.(u_x, u_y)
 end
 
-function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
-    D, M, X = size(A)
-    D_B, N, X_B = size(B)
-    @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
-    @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
-
-    output = CUDA.zeros(Float32, M, N, X)
-    
-    #Kernel configuration
-    threads = (16, 16, 1)
-    blocks = (ceil(Int, M/16), ceil(Int, N/16), X)
-    
-    @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
-    synchronize()
-    #output = permutedims(output, (2,3,1))
-
-    return output
+function similarity_self(x::AbstractArray; dims)
+    return similarity_outer(x, x, dims=dims)
 end
 
 """
 Slicing each array along 'dims', find the similarity between each corresponding slice and
 reduce along 'reduce_dim'
 """
-function similarity_outer(x::AbstractArray{<:Real}, y::AbstractArray{<:Real}; dims=2)
+function similarity_outer(x::AbstractArray{<:Real,3}, y::AbstractArray{<:Real,3}; dims=2)
     s = [similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
     #stack and reshape to batch-last
     s = permutedims(stack(s), (2,3,1))
+    return s
+end
+
+function similarity_outer(x::AbstractArray{<:Real,2}, y::AbstractArray{<:Real,2}; dims=2)
+    s = [similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
+    #stack and reshape to batch-last
+    s = permutedims(stack(s), (2,1))
     return s
 end
 
