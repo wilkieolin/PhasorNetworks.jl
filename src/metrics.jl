@@ -26,9 +26,14 @@ function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
     return 1.0f0 .- sim
 end
 
-function codebook_loss(similarities::AbstractArray, truth::AbstractArray)
-    arc = truth .- similarities
-    loss = 1.0 .- cos.(arc)
+function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dims=-1)
+    if dims == -1
+        dims = ndims(similarities)
+    end
+
+    prob = softmax(similarities, dims=dims)
+    loss = CrossEntropyLoss(;logits=false, dims=dims)(prob, truth)
+    
     return loss
 end
 
