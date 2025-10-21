@@ -226,32 +226,51 @@ function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tup
 end
 
 function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
+    # Vectorized implementation that avoids custom CUDA kernels and uses
+    # broadcasting + reductions. This form is much simpler for AD backends
+    # (Zygote) to trace through on GPU arrays.
     D, M, X = size(A)
     D_B, N, X_B = size(B)
     @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
     @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
 
-    output = CUDA.zeros(Float32, M, N, X)
-    
-    #Kernel configuration
-    threads = (16, 16, 1)
-    blocks = (ceil(Int, M/16), ceil(Int, N/16), X)
-    
-    @cuda threads=threads blocks=blocks interference_kernel(A, B, output, X, M, N, D)
-    synchronize()
-    #output = permutedims(output, (2,3,1))
+    # Separate into real and imaginary parts
+    realA = real.(A)  # (D, M, X)
+    imagA = imag.(A)
+    realB = real.(B)  # (D, N, X)
+    imagB = imag.(B)
 
-    return output
+    # Reshape for broadcasting to (D, M, N, X)
+    realA4 = reshape(realA, D, M, 1, X)
+    realB4 = reshape(realB, D, 1, N, X)
+    imagA4 = reshape(imagA, D, M, 1, X)
+    imagB4 = reshape(imagB, D, 1, N, X)
+
+    # Compute pairwise sums across vectors for each feature d and batch x
+    sum_real = realA4 .+ realB4
+    sum_imag = imagA4 .+ imagB4
+
+    # Instead of sqrt -> acos -> cos, simplify using trig identity:
+    # sim = cos(2 * acos(0.5 * mag)) == 0.5 * mag^2 - 1
+    # where mag = clamp(|u+v|, 0, 2). So mag^2 = clamp(|u+v|^2, 0, 4).
+    sq = sum_real .^ 2 .+ sum_imag .^ 2
+    sq_clamped = clamp.(sq, 0.0f0, 4.0f0)
+    sim_per_d = 0.5f0 .* sq_clamped .- 1.0f0  # (D, M, N, X)
+
+    # Average over the D dimension
+    sim_avg = mean(sim_per_d, dims=1)  # (1, M, N, X)
+    sim_avg = dropdims(sim_avg, dims=1) # (M, N, X)
+
+    return sim_avg
 end
 
 function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2})
     # Treat 2D inputs as 3D with a singleton batch dimension and delegate
-    # to the 3D implementation to avoid duplicating GPU kernel logic.
+    # to the vectorized 3D implementation.
     D_A, M = size(A)
     D_B, N = size(B)
     @assert D_A == D_B "Feature dimension mismatch (D_A=$D_A vs D_B=$D_B)"
 
-    # create views with a singleton third dimension
     A3 = reshape(A, D_A, M, 1)
     B3 = reshape(B, D_B, N, 1)
 
@@ -259,4 +278,20 @@ function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2})
 
     # out3 has shape (M, N, 1) -> remove singleton third dim
     return reshape(out3, size(out3,1), size(out3,2))
+end
+
+# Support dispatch when inputs are real-valued CuArrays by converting to
+# ComplexF32 on the device and delegating to the complex-valued GPU kernels.
+function similarity_outer(A::CuArray{<:Real,3}, B::CuArray{<:Real,3}; dims=2)
+    # Convert phase angles to complex representation on GPU and delegate to
+    # the complex-valued, vectorized implementation.
+    A_c = angle_to_complex(A)
+    B_c = angle_to_complex(B)
+    return similarity_outer(A_c, B_c)
+end
+
+function similarity_outer(A::CuArray{<:Real,2}, B::CuArray{<:Real,2}; dims=2)
+    A_c = angle_to_complex(A)
+    B_c = angle_to_complex(B)
+    return similarity_outer(A_c, B_c)
 end

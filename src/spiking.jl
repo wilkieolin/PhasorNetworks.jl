@@ -317,8 +317,16 @@ end
 function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     #set up functions to define the neuron's differential equations
     update_fn = spk_args.update_fn
+
+    #call the current function to find if we're on CPU or GPU
+    sample = x.current_fn(tspan[1])
     #make the initial potential the bias value
-    u0 = zeros(ComplexF32, x.shape)
+    if typeof(sample) <: CuArray
+        u0 = CUDA.zeros(ComplexF32, x.shape)
+    else
+        u0 = zeros(ComplexF32, x.shape)
+    end
+    
     #shift the solver span by the function's time offset
     tspan = tspan .+ x.offset
 

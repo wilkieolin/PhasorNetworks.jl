@@ -355,11 +355,11 @@ end
 
 function (cb::Codebook)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     current_call = CurrentCall(x)
-    return cb(current_call, params, state), NamedTuple()
+    return cb(current_call, params, state)
 end
 
 function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    code_currents = phase_to_current(params.codes, spk_args=x.spk_args, offset=x.current.offset)
+    code_currents = phase_to_current(params.codes, spk_args=x.spk_args, offset=x.current.offset, tspan=x.t_span)
     return similarity_outer(x, code_currents), NamedTuple()
 end
 

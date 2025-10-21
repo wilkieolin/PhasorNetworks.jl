@@ -28,7 +28,7 @@ end
 
 function codebook_loss(similarities::AbstractArray, truth::AbstractArray)
     arc = truth .- similarities
-    loss = cos.(arc)
+    loss = 1.0 .- cos.(arc)
     return loss
 end
 
@@ -109,6 +109,18 @@ end
 function predict_quadrature(spikes::SpikingCall)
     phases = train_to_phase(spikes)[end-1, :, :]
     return predict_quadrature(phases)
+end
+
+function predict_codebook(sims::AbstractMatrix; dims=-1)
+    if on_gpu(sims)
+        sims = sims |> cdev
+    end
+    if dims == -1
+        dims = ndims(sims)
+    end
+
+    predictions = vec(getindex.(argmax(sims, dims=dims), dims))
+    return predictions
 end
 
 function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
