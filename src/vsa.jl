@@ -294,6 +294,8 @@ function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Comple
     return s
 end
 
+#Note - additional definitions for similarity_outer included in gpu.jl
+
 function v_unbind(x::AbstractArray, y::AbstractArray)
     y = remap_phase(x .- y)
     return y

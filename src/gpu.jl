@@ -261,6 +261,12 @@ function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
     sim_avg = mean(sim_per_d, dims=1)  # (1, M, N, X)
     sim_avg = dropdims(sim_avg, dims=1) # (M, N, X)
 
+    # Match CPU implementation ordering: CPU stacks and then permutes to
+    # (slice_y_index, batch_index, slice_x_index) using (2,3,1).
+    # GPU current sim_avg is (M, N, X) where M corresponds to slices of A
+    # and N to slices of B. Permute to match CPU's batch-last ordering.
+    sim_avg = permutedims(sim_avg, (2,3,1)) # -> (N, X, M)
+
     return sim_avg
 end
 
@@ -276,8 +282,10 @@ function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2})
 
     out3 = similarity_outer(A3, B3)
 
-    # out3 has shape (M, N, 1) -> remove singleton third dim
-    return reshape(out3, size(out3,1), size(out3,2))
+    # After the 3D implementation permutation, out3 will have shape
+    # (N, 1, M). Reshape to (N, M) to match the CPU 2D similarity_outer
+    # which returns permuted result (dims swapped)
+    return reshape(out3, size(out3,1), size(out3,3))
 end
 
 # Support dispatch when inputs are real-valued CuArrays by converting to
