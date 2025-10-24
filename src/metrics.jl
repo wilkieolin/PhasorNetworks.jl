@@ -31,8 +31,8 @@ function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dims=-
         dims = ndims(similarities)
     end
 
-    prob = softmax(similarities, dims=dims)
-    loss = CrossEntropyLoss(;logits=false, dims=dims)(prob, truth)
+    distance = abs.(truth .- similarities)
+    loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
     
     return loss
 end
@@ -48,7 +48,7 @@ function z_score(phases::AbstractArray)
     return score
 end
 
-function loss_and_accuracy(data_loader, model, ps, st, args)
+function loss_and_accuracy(data_loader, model, ps, st, args; loss_fn = codebook_loss, predict_fn = predict_codebook)
     if args.use_cuda && CUDA.functional()
         dev = gdev
     else
@@ -67,11 +67,27 @@ function loss_and_accuracy(data_loader, model, ps, st, args)
             ŷ, _ = train_to_phase(ŷ)
         end
         
-        ls += sum(quadrature_loss(ŷ, 1.0f0 .* y |> dev))
-        acc += sum(accuracy_quadrature(ŷ, y)) ## Decode the output of the model
+        ls += sum(loss_fn(ŷ, 1.0f0 .* y |> dev))
+        acc += sum(eval_accuracy(ŷ, y, predict_fn=predict_fn)) ## Decode the output of the model
         num +=  size(y)[2]
     end
     return ls/num, acc/num
+end
+
+function evaluate_codebook(data_loader, model, ps, st, args)
+    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=codebook_loss, predict_fn=predict_codebook)
+end
+
+function evaluate_quadrature(data_loader, model, ps, st, args)
+    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=quadrature_loss, predict_fn=predict_quadrature)
+end
+
+function evaluate_codebook(data_loader, model, ps, st, args)
+    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=codebook_loss, predict_fn=predict_codebook)
+end
+
+function evaluate_quadrature(data_loader, model, ps, st, args)
+    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=quadrature_loss, predict_fn=predict_quadrature)
 end
 
 function dense_onehot(x::OneHotMatrix)
@@ -116,10 +132,7 @@ function predict_quadrature(spikes::SpikingCall)
     return predict_quadrature(phases)
 end
 
-function predict_codebook(sims::AbstractMatrix; dims=-1)
-    if on_gpu(sims)
-        sims = sims |> cdev
-    end
+function predict_codebook(sims::AbstractMatrix; dims=1)
     if dims == -1
         dims = ndims(sims)
     end
@@ -128,25 +141,25 @@ function predict_codebook(sims::AbstractMatrix; dims=-1)
     return predictions
 end
 
-function accuracy_quadrature(phases::AbstractMatrix, truth::AbstractMatrix)
+function eval_accuracy(phases::AbstractMatrix, truth::AbstractMatrix; predict_fn::Function = predict_codebook)
     if on_gpu(phases, truth)
         phases = phases |> cdev
         truth = truth |> cdev
     end
 
-    predictions = predict_quadrature(phases)
+    predictions = predict_fn(phases)
     labels = getindex.(findall(truth .== 1.0f0), 1)
     return predictions .== labels
 end
 
-function accuracy_quadrature(phases::Array{<:Real,3}, truth::AbstractMatrix)
+function eval_accuracy(phases::Array{<:Real,3}, truth::AbstractMatrix; predict_fn::Function = predict_codebook)
     if on_gpu(phases, truth)
         phases = phases |> cdev
         truth = truth |> cdev
     end
 
-    return [accuracy_quadrature(phases[i,:,:], truth) for i in axes(phases,1)]
-end
+    return [eval_accuracy(phases[i,:,:], truth, predict_fn=predict_fn) for i in axes(phases,1)]
+end 
 
 function confusion_matrix(sim, truth, threshold::Real)
     truth = hcat(truth .== 1, truth .== 0)
