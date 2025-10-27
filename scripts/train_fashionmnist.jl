@@ -3,7 +3,7 @@ scripts/train_fashionmnist.jl
 
 Run from repository root like:
 
-julia --project=scripts scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --use_cuda true
+julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --use_cuda true
 
 This script:
  1. Activates the project environment
@@ -16,10 +16,32 @@ Notes:
 =#
 
 using Pkg
-# activate repository project
-Pkg.activate("..")
+# activate repository project automatically detecting the repository root
+function find_repo_root(start_dir::String = pwd())
+    dir = start_dir
+    # Loop until we find a directory that contains both Project.toml and a .git folder
+    while !(isfile(joinpath(dir, "Project.toml")) && isdir(joinpath(dir, ".git")))
+        parent = dirname(dir)
+        if parent == dir
+            error("Repository root not found from $(start_dir)")
+        end
+        dir = parent
+    end
+    return dir
+end
 
+repo_root = find_repo_root(@__DIR__)
+cd(repo_root)  # change working directory to repository base
+Pkg.activate(repo_root)
+
+# bring project code into scope
+include("../src/PhasorNetworks.jl")
+using .PhasorNetworks
+
+# dependencies used in notebook
+using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays, CUDA
 using ArgParse, JLD2, Dates
+using Random: Xoshiro
 
 # parse CLI args with ArgParse
 function build_parser()
@@ -37,13 +59,17 @@ function build_parser()
             help = "Batch size"
             arg_type = Int
             default = 128
+        "--seed"
+            help = "RNG seed"
+            arg_type = Int
+            default = 42
         "--optimizer"
             help = "Optimizer name (rmsprop, adam, sgd)"
             default = "rmsprop"
         "--use_cuda"
             help = "Use CUDA if available"
             arg_type = Bool
-            default = false
+            default = true
         "--out"
             help = "Output directory to save run artifacts"
             default = "runs"
@@ -54,34 +80,40 @@ end
 parsed = parse_args(build_parser())
 lr = parsed["lr"]
 epochs = parsed["epochs"]
+seed = parsed["seed"]
 batchsize = parsed["batchsize"]
 optimizer_name = lowercase(parsed["optimizer"])
 use_cuda = parsed["use_cuda"]
 outdir = parsed["out"]
 
+
+args = Args(batchsize = batchsize,
+            epochs = epochs,
+            lr = lr,
+            rng = Xoshiro(seed),
+            use_cuda = use_cuda)
+
 println("Settings: lr=$(lr), epochs=$(epochs), batchsize=$(batchsize), optimizer=$(optimizer_name), use_cuda=$(use_cuda), out=$(outdir)")
 
-# bring project code into scope
-include("../src/PhasorNetworks.jl")
-using .PhasorNetworks
-
-# dependencies used in notebook
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays
-using LinearAlgebra: diag
-using Plots
 
 # devices
 cdev = cpu_device()
 gdev = gpu_device()
 
+if use_cuda
+    dev = gdev
+else 
+    dev = cdev
+end
+
 function get_optimizer(name::String, lr::Float64)
     name = lowercase(name)
     if name in ("rmsprop", "rmsprop()")
-        return Optimisers.RMSProp(lr)
+        return Optimisers.RMSProp
     elseif name in ("adam", "adam()")
-        return Optimisers.Adam(lr)
+        return Optimisers.Adam
     elseif name in ("sgd", "sgd()")
-        return Optimisers.SGD(lr)
+        return Optimisers.SGD
     else
         error("Unknown optimizer: $name. Supported: rmsprop, adam, sgd")
     end
@@ -96,25 +128,26 @@ test_data = MLDatasets.FashionMNIST(split=:test)
 train_loader = DataLoader(train_data, batchsize=batchsize)
 test_loader = DataLoader(test_data, batchsize=batchsize)
 
-# helper to move to device
-to_device(x, dev) = dev === cpu_device() ? x : x |> gpu
-
 # conventional model
-construct_model = n -> Chain(FlattenLayer(), LayerNorm((28^2,)), Dense(28^2 => n, relu), Dense(n => 10), softmax)
+construct_model = n -> Chain(FlattenLayer(),
+                        LayerNorm((28^2,)),
+                        Dense(28^2 => n, relu),
+                        Dense(n => 10),
+                        softmax)
 
-function loss_function(x, y, model, ps, st)
+function loss_function(x, y, model, ps, st, dev=dev)
+    x = x |> dev
+    y = y |> dev
     y_pred, _ = Lux.apply(model, x, ps, st)
     y_onehot = onehotbatch(y, 0:9)
     return CrossEntropyLoss(;logits=false, dims=1)(y_pred, y_onehot)
 end
 
-function test(model, data_loader, ps, st; use_cuda=false)
+function test(model, data_loader, ps, st, dev=dev)
     total_correct = 0
     total_samples = 0
     for (x, y) in data_loader
-        if use_cuda && CUDA.functional()
-            x = x |> gdev
-        end
+        x = x |> dev
         y_pred, _ = Lux.apply(model, x, ps, st)
         pred_labels = onecold(cdev(y_pred))
         total_correct += sum(pred_labels .== y .+ 1)
@@ -132,71 +165,76 @@ function run_training(model, ps, st, train_loader, loss_fn, args)
     end
 end
 
-# prepare args
-mutable struct RunArgs
-    batchsize::Int
-    epochs::Int
-    use_cuda::Bool
-    rng::Random.AbstractRNG
-end
-
-args = RunArgs(batchsize, epochs, use_cuda, Random.Xoshiro())
-
 # Conventional model run
 println("\n=== Conventional network ===")
 model = construct_model(128)
 ps, st = Lux.setup(args.rng, model)
-if use_cuda && CUDA.functional()
-    ps = ps |> gdev
-    st = st |> gdev
-end
+ps = ps |> dev
+st = st |> dev
 
 println("Initial loss (first batch): ", loss_function(first(train_loader)..., model, ps, st))
 
 losses, pst, stt = run_training(model, ps, st, train_loader, loss_function, args)
 println("Conventional final loss: ", losses[end])
-acc = test(model, test_loader, pst, stt; use_cuda=use_cuda)
+acc = test(model, test_loader, pst, stt)
 println("Conventional test accuracy: ", acc)
 
 # Phasor model
 println("\n=== Phasor network ===")
 import .PhasorNetworks: default_bias, Codebook
-p_model = Chain(FlattenLayer(), LayerNorm((28^2,)), x -> tanh.(x), x -> x, PhasorDense(28^2 => 128, soft_angle, init_bias=default_bias), PhasorDense(128 => 16, soft_angle, init_bias=default_bias), Codebook(16 => 10))
+p_model = Chain(FlattenLayer(),
+                LayerNorm((28^2,)),
+                x -> tanh.(x),
+                x -> x,
+                PhasorDense(28^2 => 128, soft_angle, init_bias=default_bias),
+                PhasorDense(128 => 16, soft_angle, init_bias=default_bias),
+                Codebook(16 => 10))
+
 psp, stp = Lux.setup(args.rng, p_model)
+
 if use_cuda && CUDA.functional()
     psp = psp |> gdev
     stp = stp |> gdev
 end
 
-function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dims=-1)
-    if dims == -1
-        dims = ndims(similarities)
-    end
-    prob = softmax(similarities, dims=dims)
-    loss = CrossEntropyLoss(;logits=false, dims=dims)(prob, truth)
-    return loss
-end
-
-function phasor_loss_function(x, y, model, ps, st)
+function phasor_loss_function(x, y, model, ps, st, dev=dev)
+    x = x |> dev
+    y = y |> dev
     y_pred, _ = Lux.apply(model, x, ps, st)
     y_onehot = onehotbatch(y, 0:9)
-    loss = codebook_loss(y_pred, y_onehot, dims=1)
+    loss = codebook_loss(y_pred, y_onehot) 
     loss = mean(loss)
     return loss
+end
+function test_phasor(model, data_loader, ps, st, dev=dev)
+    # Evaluation phase
+    total_correct = 0
+    total_samples = 0
+    for (x, y) in data_loader
+        x = x |> dev
+        
+        y_pred, _ = Lux.apply(model, x, ps, st)
+        pred_labels = predict_codebook(cdev(y_pred))
+        
+        total_correct += sum(pred_labels .== y .+ 1)
+        total_samples += length(y)
+    end
+
+    acc = total_correct / total_samples
 end
 
 println("Initial phasor loss (first batch): ", phasor_loss_function(first(train_loader)..., p_model, psp, stp))
 
 losses_f, ps_train_f, st_train_f = run_training(p_model, psp, stp, train_loader, phasor_loss_function, args)
 println("Phasor final loss: ", losses_f[end])
-acc_p = test(p_model, test_loader, ps_train_f, st_train_f; use_cuda=use_cuda)
+acc_p = test_phasor(p_model, test_loader, ps_train_f, st_train_f)
 println("Phasor test accuracy (codebook prediction): ", acc_p)
 
 println("\nDone.")
 
 
 # --- Save run artifacts (loss histories, trained params, args) using JLD2
-import FilePathsBase: mkpath
+
 function cpuify(x)
     # move CUDA arrays to CPU; recursively handle arrays, tuples, dicts, named tuples
     if typeof(x) <: CUDA.CuArray
@@ -230,7 +268,7 @@ end
 
 # gather info
 info = Dict(
-    :args => Dict(:lr=>lr, :epochs=>epochs, :batchsize=>batchsize, :optimizer=>optimizer_name, :use_cuda=>use_cuda),
+    :args => Dict(:lr=>lr, :epochs=>epochs, :batchsize=>batchsize, :optimizer=>optimizer_name, :use_cuda=>use_cuda, :seed=>seed),
     :conventional => Dict(:losses => cpuify(losses), :params => cpuify(pst), :state => cpuify(stt), :test_accuracy => acc),
     :phasor => Dict(:losses => cpuify(losses_f), :params => cpuify(ps_train_f), :state => cpuify(st_train_f), :test_accuracy => acc_p)
 )

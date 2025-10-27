@@ -26,11 +26,7 @@ function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
     return 1.0f0 .- sim
 end
 
-function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dims=-1)
-    if dims == -1
-        dims = ndims(similarities)
-    end
-
+function codebook_loss(similarities::AbstractArray, truth::AbstractArray)
     distance = abs.(truth .- similarities)
     loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
     
