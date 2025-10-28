@@ -341,16 +341,16 @@ function Base.show(io::IO, cb::Codebook)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
-    params = (codes = random_symbols(rng, (cb.dims[1], cb.dims[2])),)
-    return params
-end
-
-function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
     return NamedTuple()
 end
 
+function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
+    state = (codes = random_symbols(rng, (cb.dims[1], cb.dims[2])),)
+    return state
+end
+
 function (cb::Codebook)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
-    return similarity_outer(x, params.codes), NamedTuple()
+    return similarity_outer(x, state.codes), state
 end
 
 function (cb::Codebook)(x::SpikingCall, params::LuxParams, state::NamedTuple)
@@ -359,8 +359,8 @@ function (cb::Codebook)(x::SpikingCall, params::LuxParams, state::NamedTuple)
 end
 
 function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    code_currents = phase_to_current(params.codes, spk_args=x.spk_args, offset=x.current.offset, tspan=x.t_span)
-    return similarity_outer(x, code_currents), NamedTuple()
+    code_currents = phase_to_current(state.codes, spk_args=x.spk_args, offset=x.current.offset, tspan=x.t_span)
+    return similarity_outer(x, code_currents), state
 end
 
 

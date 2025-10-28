@@ -20,19 +20,17 @@ function exp_score(similarity::AbstractArray; scale::Real = 3.0f0)
 end
 
 function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
-    #truth = 2.0f0 .* truth .- 1.0f0
     targets = 0.5f0 .* truth
     sim = similarity(phases, targets, dim = 1)
     return 1.0f0 .- sim
 end
 
 function codebook_loss(similarities::AbstractArray, truth::AbstractArray)
-    distance = abs.(truth .- similarities)
+    distance = abs.(1.0 .- similarities) .* truth
+    distance = sum(distance .* truth, dims=1)
     loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
-    
     return loss
 end
-
 function similarity_loss(phases::AbstractArray, truth::AbstractArray; dim::Int = 1)
     sim = similarity(phases, truth, dim = dim)
     return 1.0f0 .- sim
@@ -68,14 +66,6 @@ function loss_and_accuracy(data_loader, model, ps, st, args; loss_fn = codebook_
         num +=  size(y)[2]
     end
     return ls/num, acc/num
-end
-
-function evaluate_codebook(data_loader, model, ps, st, args)
-    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=codebook_loss, predict_fn=predict_codebook)
-end
-
-function evaluate_quadrature(data_loader, model, ps, st, args)
-    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=quadrature_loss, predict_fn=predict_quadrature)
 end
 
 function evaluate_codebook(data_loader, model, ps, st, args)

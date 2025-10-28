@@ -111,7 +111,6 @@ function train_and_test_phasor(ea::ExpArgs)
     # Device setup
     device_fn = args.use_cuda ? gpu_device() : cpu_device()
     cdev = cpu_device() # for operations that need to be on CPU like onecold
-    gdev = gpu_device() # for CUDA operations
 
     # --- Data Loading ---
     println("Loading FashionMNIST dataset...")
@@ -136,15 +135,18 @@ function train_and_test_phasor(ea::ExpArgs)
                 PhasorConv((8, 8), 3 => 1, act_fn),
                 FlattenLayer(),
                 PhasorDense(36 => 128, act_fn),
-                PhasorDense(128 => 10, act_fn))
+                Codebook(128 => 10),)
 
     ps_phasor, st_phasor = Lux.setup(args.rng, phasor_model) .|> device_fn
 
     # Loss function for phasor network
     function phasor_loss_function(x, y, model, ps, st)
+        x = x |> device_fn
+        y = y |> device_fn
         y_pred, _ = Lux.apply(model, x, ps, st)
-        y_onehot = onehotbatch(y, 0:9) |> device_fn
-        loss = mean(quadrature_loss(y_pred, y_onehot))
+        y_onehot = onehotbatch(y, 0:9)
+        loss = codebook_loss(y_pred, y_onehot) 
+        loss = mean(loss)
         return loss
     end
 
@@ -156,7 +158,7 @@ function train_and_test_phasor(ea::ExpArgs)
             x = x |> device_fn
             
             y_pred, _ = Lux.apply(model, x, ps, st)
-            pred_labels = predict_quadrature(cdev(y_pred))
+            pred_labels = predict_codebook(cdev(y_pred))
             
             total_correct += sum(pred_labels .== y .+ 1)
             total_samples += length(y)
@@ -241,6 +243,10 @@ end
 
 lrs = [1e-4, 3e-4, 5e-4, 7e-4, 1e-3]
 accs_conv = map(lr -> train_and_test_conv(ExpArgs(lr=lr)), lrs)
+print(accs_conv)
+
+# accs_phasor = map(lr -> train_and_test_phasor(ExpArgs(lr=lr)), lrs)
+# print(accs_phasor)
 
 r_los = [0.1, 0.2, 0.3]
 gaps = [0.1, 0.2, 0.3, 0.4]
@@ -250,7 +256,7 @@ pairs = [(r[1], r[1] + r[2]) for r in pairs]
 exp_args = map(x -> ExpArgs(lr=x[1], r_lo=x[2][1], r_hi=x[2][2]), Iterators.product(lrs, pairs)) |> vec
 accs_phasor = map(ea -> train_and_test_phasor(ea), exp_args)
 
-save("conv_results.jld2", "accs_conv", accs_conv, 
+save(joinpath("runs", "conv_results.jld2"), "accs_conv", accs_conv, 
                         "accs_phasor", accs_phasor,
                         "lrs_conv", lrs,
                         "args_phasor", exp_args)
