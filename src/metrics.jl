@@ -167,7 +167,7 @@ function predict(predictions::AbstractArray, encoding::Symbol = :similarity; red
     if encoding == :quadrature
         predict_fn = x -> predict_quadrature(x, dim=reduce_dim)
     else
-        predict_fn = x -> predict_codebook(x, dim=reduce_dim)
+        predict_fn = x -> predict_similarity(x, dim=reduce_dim)
     end
 
     return predict_fn(predictions)
