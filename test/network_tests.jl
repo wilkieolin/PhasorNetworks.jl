@@ -81,8 +81,8 @@ function ode_correlation(model, ode_model, ps, st, x, y)
         @test cor_realvals(vec(y_f), vec(y_ode)) > 0.90
 
         psf = ComponentArray(ps)
-        lval, grads = withgradient(p -> mean(quadrature_loss(model(x, p, st)[1], y)), psf)
-        lval_ode, grads_ode = withgradient(p -> mean(quadrature_loss(ode_model(x, p, st)[1], y)), psf)
+        lval, grads = withgradient(p -> mean(evaluate_loss(model(x, p, st)[1], y, :quadrature)), psf)
+        lval_ode, grads_ode = withgradient(p -> mean(evaluate_loss(ode_model(x, p, st)[1], y, :quadrature)), psf)
         @test abs(lval_ode - lval) < 0.02
         @test cor_realvals(vec(real.(grads[1].layer_3.layer.weight)), vec(real.(grads_ode[1].layer_3.layer.weight))) > 0.95
     end
@@ -94,7 +94,7 @@ function test_correlation(model, spk_model, ps, st, x)
     #make the spiking (dynamic) call
     y_spk, _ = spk_model(x, ps, st)
     yp = train_to_phase(y_spk)
-    #measure the correlation between results
+    #measure the correlation between results - cycle is now last dimension
     c = cycle_correlation(y, yp)
     return c
 end
@@ -109,7 +109,8 @@ end
 
 function loss(x, y, model, ps, st)
     y_pred, _ = model(x, ps, st)
-    return mean(quadrature_loss(y_pred, y))
+    loss = mean(evaluate_loss(y_pred, y, :quadrature))
+    return loss
 end
 
 function train_test(model, args, ps, st, train_loader, test_loader)
@@ -124,7 +125,7 @@ end
 
 function accuracy_test(model, ps, st, test_loader, args)
     @testset "Accuracy Test" begin
-        _, accuracy = loss_and_accuracy(test_loader, model, ps, st, args)
+        _, accuracy = loss_and_accuracy(test_loader, model, ps, st, args, encoding=:quadrature)
         #usually reaches ~80% after 6 epochs
         @test accuracy > 0.75
     end
@@ -133,9 +134,9 @@ end
 function spiking_accuracy_test(model, ps, st, test_batch, args)
     @testset "Spiking Accuracy Test" begin
         @info "Running spiking accuracy test..."
-        acc = spiking_accuracy(test_batch, model, ps, st, args)
+        _, accuracy = spiking_loss_and_accuracy(test_batch, model, ps, st, args, encoding=:quadrature, repeats=repeats)
         #make sure accuracy is above the baseline (~70% for spiking)
-        @test acc[end-1] > 0.70
+        @test accuracy[end-1] > 0.70
     end
 end
 

@@ -118,7 +118,7 @@ function test_binding()
         #check with spiking outputs
         b2 = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
         b2d = train_to_phase(b2, spk_args=spk_args)
-        enc_error = remove_nan(vec(b2d[5,:,:,:]) .- vec(b)) |> mean
+        enc_error = remove_nan(vec(b2d[:,:,:,5]) .- vec(b)) |> mean
         enc_check = in_tolerance(enc_error)
         @test enc_check 
 
@@ -132,7 +132,7 @@ function test_binding()
         #check unbinding with spiking outputs
         ub2 = v_unbind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
         ub2d = train_to_phase(ub2, spk_args=spk_args)
-        ub_enc_error = remove_nan(vec(ub2d[5,:,:,:]) .- vec(ub)) |> mean
+        ub_enc_error = remove_nan(vec(ub2d[:,:,:,5]) .- vec(ub)) |> mean
         ub_enc_check = in_tolerance(ub_enc_error)
         @test ub_enc_check 
     end
@@ -155,7 +155,7 @@ function test_bundling()
         #check spiking encoding
         b2 = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=false)
         decoded = train_to_phase(b2, spk_args=spk_args)
-        b2_error = remove_nan(vec(decoded[end-1,:,:,:]) .- vec(b)) |> sin_error
+        b2_error = remove_nan(vec(decoded[:,:,:,end-1]) .- vec(b)) |> sin_error
         b2_spike_check = in_tolerance(b2_error)
         @test b2_spike_check
     end

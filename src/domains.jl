@@ -76,7 +76,7 @@ function Base.convert(::Type{SpikeTrainGPU}, st::SpikeTrain)
 end
 
 SpikingTypes = Union{SpikeTrain, SpikeTrainGPU}
-LuxParams = Union{NamedTuple, ComponentArray, ComponentVector, SubArray}
+LuxParams = Union{NamedTuple, AbstractArray}
 
 function Base.show(io::IO, train::SpikeTrain)
     print(io, "Spike Train: ", train.shape, " with ", length(train.times), " spikes.")
@@ -237,11 +237,14 @@ function Base.show(io::IO, spk_args::SpikingArgs)
     print(io, "Threshold: ", spk_args.threshold, " (V)\n")
 end
 
-
 struct SpikingCall
     train::SpikingTypes
     spk_args::SpikingArgs
     t_span::Tuple{Float32, Float32}
+end
+
+function n_cycles(call::SpikingCall)
+    return Int(floor(call.t_span[2] / call.spk_args.t_period))
 end
 
 function Base.size(x::SpikingCall)
@@ -420,8 +423,8 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real =
         phases[cycle[i]][train.indices[i]] = relative_phase[i]
     end
 
-    #stack the arrays to cycle, batch, neuron
-    phases = mapreduce(x->reshape(x, 1, train.shape...), vcat, phases)
+    #stack the arrays to batch, neuron, cycle
+    phases = mapreduce(x->reshape(x, train.shape..., 1), (a,b)->cat(a, b, dims=ndims(a)), phases)
     return phases
 end
 

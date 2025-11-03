@@ -1,5 +1,7 @@
 include("network.jl")
 
+#Misc. metrics
+
 function arc_error(phase::Real)
     return sin(pi_f32 * phase)
 end
@@ -19,152 +21,28 @@ function exp_score(similarity::AbstractArray; scale::Real = 3.0f0)
     return exp.((1.0f0 .- similarity) .* scale) .- 1.0f0
 end
 
-function quadrature_loss(phases::AbstractArray, truth::AbstractArray)
-    targets = 0.5f0 .* truth
-    sim = similarity(phases, targets, dim = 1)
-    return 1.0f0 .- sim
-end
-
-function codebook_loss(similarities::AbstractArray, truth::AbstractArray)
-    distance = abs.(1.0 .- similarities) .* truth
-    distance = sum(distance .* truth, dims=1)
-    loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
-    return loss
-end
-function similarity_loss(phases::AbstractArray, truth::AbstractArray; dim::Int = 1)
-    sim = similarity(phases, truth, dim = dim)
-    return 1.0f0 .- sim
-end
-
 function z_score(phases::AbstractArray)
     arc = remap_phase(phases .- 0.5f0)
     score = abs.(atanh.(arc))
     return score
 end
 
-function loss_and_accuracy(data_loader, model, ps, st, args; loss_fn = codebook_loss, predict_fn = predict_codebook)
-    if args.use_cuda && CUDA.functional()
-        dev = gdev
-    else
-        dev = cdev
-    end
-
-    acc = 0
-    ls = 0.0f0
-    num = 0
-    for (x, y) in data_loader
-        x = x |> dev
-        
-        ŷ, _ = model(x, ps, st)
-
-        if typeof(ŷ) <: SpikingTypes
-            ŷ, _ = train_to_phase(ŷ)
-        end
-        
-        ls += sum(loss_fn(ŷ, 1.0f0 .* y |> dev))
-        acc += sum(eval_accuracy(ŷ, y, predict_fn=predict_fn)) ## Decode the output of the model
-        num +=  size(y)[2]
-    end
-    return ls/num, acc/num
-end
-
-function evaluate_codebook(data_loader, model, ps, st, args)
-    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=codebook_loss, predict_fn=predict_codebook)
-end
-
-function evaluate_quadrature(data_loader, model, ps, st, args)
-    return loss_and_accuracy(data_loader, model, ps, st, args, loss_fn=quadrature_loss, predict_fn=predict_quadrature)
-end
-
-function dense_onehot(x::OneHotMatrix)
-    return 1.0f0 .* x
-end
-
-function spiking_accuracy(data_loader, model, ps, st, args)
-    acc = []
-    n_phases = []
-    num = 0
-
-    n_batches = length(data_loader)
-
-    for (x, y) in data_loader
-        if args.use_cuda && CUDA.functional()
-            x = x |> gdev
-            y = y |> dense_onehot |> gdev
-        end
-        
-        spk_output, _ = model(x, ps, st)
-        ŷ = train_to_phase(spk_output)
-        
-        append!(acc, sum.(accuracy_quadrature(ŷ, y))) ## Decode the output of the model
-        num += size(x)[end]
-    end
-
-    acc = sum(reshape(acc, :, n_batches), dims=2) ./ num
-    return acc
-end
-
-function predict_quadrature(phases::AbstractMatrix)
-    if on_gpu(phases)
-        phases = phases |> cdev
-    end
-
-    predictions = getindex.(argmin(abs.(phases .- 0.5f0), dims=1), 1)'
-    return predictions
-end
-
-function predict_quadrature(spikes::SpikingCall)
-    phases = train_to_phase(spikes)[end-1, :, :]
-    return predict_quadrature(phases)
-end
-
-function predict_codebook(sims::AbstractMatrix; dims=1)
-    if dims == -1
-        dims = ndims(sims)
-    end
-
-    predictions = vec(getindex.(argmax(sims, dims=dims), dims))
-    return predictions
-end
-
-function eval_accuracy(phases::AbstractMatrix, truth::AbstractMatrix; predict_fn::Function = predict_codebook)
-    if on_gpu(phases, truth)
-        phases = phases |> cdev
-        truth = truth |> cdev
-    end
-
-    predictions = predict_fn(phases)
-    labels = getindex.(findall(truth .== 1.0f0), 1)
-    return predictions .== labels
-end
-
-function eval_accuracy(phases::Array{<:Real,3}, truth::AbstractMatrix; predict_fn::Function = predict_codebook)
-    if on_gpu(phases, truth)
-        phases = phases |> cdev
-        truth = truth |> cdev
-    end
-
-    return [eval_accuracy(phases[i,:,:], truth, predict_fn=predict_fn) for i in axes(phases,1)]
-end 
-
-function confusion_matrix(sim, truth, threshold::Real)
-    truth = hcat(truth .== 1, truth .== 0)
-    prediction = hcat(sim .> threshold, sim .<= threshold)
-
-    confusion = truth' * prediction
-    return confusion
+function similarity_correlation(static_similarity::Matrix{<:Real}, dynamic_similarity::Array{<:Real,3})
+    n_steps = axes(dynamic_similarity, 3)
+    cor_vals = [cor_realvals(static_similarity |> vec, dynamic_similarity[:,:,i] |> vec) for i in n_steps]
+    return cor_vals
 end
 
 function cycle_correlation(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
-    n_cycles = axes(dynamic_phases, 1)
-    cor_vals = [cor_realvals(static_phases |> vec, dynamic_phases[i,:,:] |> vec) for i in n_cycles]
+    n_cycles = axes(dynamic_phases, 3)
+    cor_vals = [cor_realvals(static_phases |> vec, dynamic_phases[:,:,i] |> vec) for i in n_cycles]
     return cor_vals
 end
 
 function cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
-    n_cycles = axes(dynamic_phases, 1)
+    n_cycles = axes(dynamic_phases, 3)
     total = reduce(*, size(static_phases))
-    sparsity_vals = [sum(isnan.(dynamic_phases[i,:,:])) / total for i in n_cycles]
+    sparsity_vals = [sum(isnan.(dynamic_phases[:,:,i])) / total for i in n_cycles]
     return sparsity_vals
 end
 
@@ -213,4 +91,169 @@ function interpolate_roc(roc)
     tpr, fpr = roc
     interp = linear_interpolation(fpr, tpr)
     return interp
+end
+
+function dense_onehot(x::OneHotMatrix)
+    return 1.0f0 .* x
+end
+
+function confusion_matrix(sim, truth, threshold::Real)
+    truth = hcat(truth .== 1, truth .== 0)
+    prediction = hcat(sim .> threshold, sim .<= threshold)
+
+    confusion = truth' * prediction
+    return confusion
+end
+
+
+#Loss functions
+
+function quadrature_loss(phases::AbstractArray, truth::AbstractArray; dim::Int = 1)
+    targets = 0.5f0 .* truth
+    sim = similarity(phases, targets, dim = dim)
+    return 1.0f0 .- sim
+end
+
+function similarity_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1)
+    distance = abs.(1.0 .- similarities) .* truth
+    distance = sum(distance .* truth, dims = dim)
+    loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
+    return loss
+end
+
+function evaluate_loss(predictions::AbstractArray, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
+    if encoding == :quadrature
+        loss_fn = quadrature_loss
+    else
+        loss_fn = similarity_loss
+    end
+
+    #match the loss dispatch dimensions against the truth & predictions
+    n_d_pred = ndims(predictions)
+    n_d_truth = ndims(truth)
+    if n_d_pred == 2 && n_d_truth == 2
+        return loss_fn(predictions, truth, dim=reduce_dim)
+    else
+        dispatch_dims = setdiff(Set(1:n_d_pred), Set(1:n_d_truth)) |> Tuple
+        return map(x -> loss_fn(x, truth, dim=reduce_dim), eachslice(predictions, dims=dispatch_dims))
+    end
+end
+
+function evaluate_loss(predictions::SpikingCall, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
+    predictions = train_to_phase(predictions)
+    return evaluate_loss(predictions, truth, encoding, reduce_dim=reduce_dim)
+end
+
+# Prediction functions
+function predict_quadrature(phases::AbstractArray; dim::Int=1)
+    if on_gpu(phases)
+        phases = phases |> cdev
+    end
+
+    predictions = getindex.(argmin(abs.(phases .- 0.5f0), dims=dim), dim)
+    return predictions
+end
+
+function predict_similarity(sims::AbstractArray; dim::Int=1)
+    if on_gpu(sims)
+        sims = sims |> cdev
+    end
+
+    predictions = vec(getindex.(argmax(sims, dims=dim), dim))
+    return predictions
+end
+
+function predict(predictions::AbstractArray, encoding::Symbol = :similarity; reduce_dim=1)
+    if encoding == :quadrature
+        predict_fn = x -> predict_quadrature(x, dim=reduce_dim)
+    else
+        predict_fn = x -> predict_codebook(x, dim=reduce_dim)
+    end
+
+    return predict_fn(predictions)
+end
+
+function predict(predictions::SpikingCall, encoding::Symbol = :similarity; reduce_dim::Int=1)
+    predictions = train_to_phase(predictions)
+    return predict(predictions, encoding, reduce_dim=reduce_dim)
+end
+
+# Performance evaluation functions
+function evaluate_accuracy(values::AbstractArray, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
+    if on_gpu(values, truth)
+        values = values |> cdev
+        truth = truth |> cdev
+    end
+
+    @assert ndims(values) >= ndims(truth) "Dimensionality of truth must be able to map onto values"
+    reshape_dims = [d == reduce_dim ? 1 : size(truth,d) for d in 1:ndims(truth)]
+    idx = reshape(getindex.(findall(truth .== 1.0f0), reduce_dim), reshape_dims...)
+    predict_fn = x -> sum(predict(x, encoding, reduce_dim=reduce_dim) .== idx)
+    n_truth = prod([size(truth, d) for d in setdiff(Set(1:ndims(truth)), Set(reduce_dim))])
+
+    if ndims(values) > ndims(truth)
+        dispatch_dims = setdiff(Set(1:ndims(values)), Set(1:ndims(truth))) |> Tuple
+        response = map(predict_fn, eachslice(values, dims=dispatch_dims))
+    else
+        response = predict_fn(values)
+    end
+    
+    return response, n_truth
+end
+
+function evaluate_accuracy(values::SpikingCall, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
+    values = train_to_phase(values)
+    return evaluate_accuracy(values, truth, encoding, reduce_dim=reduce_dim)
+end
+
+function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
+    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim)
+
+    if args.use_cuda && CUDA.functional()
+        dev = gdev
+    else
+        dev = cdev
+    end
+
+    num = 0
+    correct = 0
+    ls = 0.0f0
+
+    for (x, y) in data_loader
+        x = x |> dev
+        ŷ, _ = model(x, ps, st)
+        @assert typeof(ŷ) != SpikingCall "Must call spiking models with SpikingArgs provided"
+
+        ls += sum(stack(loss_fn(ŷ, y))) #sum across batches
+        model_correct, answers = evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim)
+        correct += model_correct
+        num += answers
+    end
+
+    return ls / num, correct / num
+end
+
+function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook, repeats::Int)
+    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim)
+
+    if args.use_cuda && CUDA.functional()
+        dev = gdev
+    else
+        dev = cdev
+    end
+
+    num = 0
+    correct = zeros(Int64, repeats)
+    ls = zeros(Float32, (1,repeats))
+
+    for (x, y) in data_loader
+        x = x |> dev
+        ŷ, _ = model(x, ps, st)
+        ls .+= sum(stack(loss_fn(ŷ, y)), dims=1) #sum across batches
+        model_correct, answers = evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim)
+        correct .+= model_correct
+        num += answers
+    end
+
+    return ls ./ num, correct ./ num
 end
