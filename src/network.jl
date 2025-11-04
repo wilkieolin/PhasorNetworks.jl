@@ -648,7 +648,7 @@ function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
     return x, merge(st_attn, st_ff)
 end
 
-function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false)
+function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false, sample_gradients::Int = 0)
     if CUDA.functional() && args.use_cuda
        @info "Training on CUDA GPU"
        #CUDA.allowscalar(false)
@@ -661,10 +661,13 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
    ## Optimizer
    opt_state = Optimisers.setup(optimiser(args.lr), ps)
    losses = []
+   gradients = []
+   step_count = 0
 
    ## Training
    for epoch in 1:args.epochs
        for (x, y) in train_loader
+           step_count += 1
            x = x |> device
            y = y |> device
            
@@ -674,11 +677,21 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
                println(reduce(*, ["Epoch ", string(epoch), " loss: ", string(lossval)]))
            end
            append!(losses, lossval)
+           
+           # Save gradients if sampling is enabled and we're at a sampling step
+           if sample_gradients > 0 && (step_count % sample_gradients == 0)
+               push!(gradients, deepcopy(gs[1]))
+           end
+           
            opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
        end
    end
-
-   return losses, ps, st
+   
+   if sample_gradients > 0
+    return losses, ps, st, gradients
+   else
+    return losses, ps, st
+   end
 end
 
 
