@@ -99,7 +99,9 @@ end
 
 function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
     train = SpikeTrain(train)
-    return train_to_phase(train, spk_args=spk_args, offset=train.offset)
+    #preserve device on output
+    phases = train_to_phase(train, spk_args=spk_args, offset=train.offset) |> gdev
+    return phases
 end
 
 function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0f0)

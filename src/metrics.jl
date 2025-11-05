@@ -140,7 +140,8 @@ function evaluate_loss(predictions::AbstractArray, truth::AbstractArray, encodin
 end
 
 function evaluate_loss(predictions::SpikingCall, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
-    predictions = train_to_phase(predictions)
+    predictions = train_to_phase(predictions) 
+    truth = truth
     return evaluate_loss(predictions, truth, encoding, reduce_dim=reduce_dim)
 end
 
