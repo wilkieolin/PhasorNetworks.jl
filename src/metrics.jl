@@ -225,8 +225,8 @@ function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, 
         ŷ, _ = model(x, ps, st)
         @assert typeof(ŷ) != SpikingCall "Must call spiking models with SpikingArgs provided"
 
-        ls += sum(stack(loss_fn(ŷ, y))) #sum across batches
-        model_correct, answers = evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim)
+        ls += sum(stack(cdev(loss_fn(ŷ, y)))) #sum across batches
+        model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct += model_correct
         num += answers
     end
@@ -251,8 +251,8 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
         x = x |> dev
         y = y |> dev
         ŷ, _ = model(x, ps, st)
-        ls .+= sum(stack(loss_fn(ŷ, y)), dims=1) #sum across batches
-        model_correct, answers = evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim)
+        ls .+= sum(stack(cdev(loss_fn(ŷ, y))), dims=1) #sum across batches
+        model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct .+= model_correct
         num += answers
     end
