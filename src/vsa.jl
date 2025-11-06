@@ -1,5 +1,17 @@
 include("spiking.jl")
 
+"""
+    v_bind(x::AbstractArray; dims) -> AbstractArray
+
+Bind vectors in a Vector Symbolic Architecture (VSA) by summing phases along specified dimensions.
+This operation preserves the structure while combining information from multiple vectors.
+
+# Arguments
+- `x::AbstractArray`: Input array of phase values
+- `dims`: Dimensions along which to perform binding
+
+Returns the bound phase values remapped to [-1, 1].
+"""
 function v_bind(x::AbstractArray; dims)
     bz = sum(x, dims = dims)
     y = remap_phase(bz)
@@ -71,6 +83,19 @@ function v_bind(x::SpikingTypes, y::SpikingTypes; tspan::Tuple{<:Real, <:Real} =
     return train
 end
 
+"""
+    v_bundle(x::AbstractArray; dims::Int) -> AbstractArray
+
+Bundle vectors in VSA representation by converting phases to complex numbers,
+summing along specified dimensions, and converting back to phase angles.
+This operation is used to create superpositions of multiple vectors.
+
+# Arguments
+- `x::AbstractArray`: Input array of phase values
+- `dims::Int`: Dimension along which to perform bundling
+
+Returns bundled phases representing the superposition of input vectors.
+"""
 function v_bundle(x::AbstractArray; dims::Int)
     xz = angle_to_complex(x)
     bz = sum(xz, dims = dims)
@@ -104,6 +129,19 @@ function v_bundle(x::SpikingTypes; dims::Int, tspan::Tuple{<:Real, <:Real} = (0.
     return out_train
 end
 
+"""
+    v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat) -> AbstractArray
+
+Project bundled vectors through a linear transformation followed by a soft angle conversion.
+Used in neural network layers to transform VSA representations while maintaining phase-based encoding.
+
+# Arguments
+- `x::AbstractArray`: Input array of phase values
+- `w::AbstractMatrix`: Weight matrix for linear transformation
+- `b::AbstractVecOrMat`: Bias term
+
+Returns transformed phases using a soft angle conversion for stable gradients.
+"""
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
     #y = complex_to_angle(xz)
@@ -144,6 +182,19 @@ function v_bundle_project(x::CurrentCall, params; return_solution::Bool=false)
     return next_call
 end
 
+"""
+    chance_level(nd::Int, samples::Int) -> Float32
+
+Calculate the expected standard deviation of similarities between random VSA symbols.
+This function helps in determining the statistical significance of similarity measurements.
+
+# Arguments
+- `nd::Int`: Number of dimensions for the VSA symbols
+- `samples::Int`: Number of random samples to generate
+
+Returns the standard deviation of similarities between random symbols, which represents
+the expected variation in similarity scores due to chance.
+"""
 function chance_level(nd::Int, samples::Int)
     symbol_0 = random_symbols((1, nd))
     symbols = random_symbols((samples, nd))
@@ -153,6 +204,19 @@ function chance_level(nd::Int, samples::Int)
     return dev
 end
 
+"""
+    random_symbols(size::Tuple{Vararg{Int}}) -> Array{Float32}
+    random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}}) -> Array{Float32}
+
+Generate random VSA symbols with values uniformly distributed in [-1, 1].
+These symbols serve as base vectors for VSA operations.
+
+# Arguments
+- `size::Tuple{Vararg{Int}}`: Dimensions of the output array
+- `rng::AbstractRNG`: Optional random number generator for reproducibility
+
+Returns an array of random phases suitable for VSA operations.
+"""
 function random_symbols(size::Tuple{Vararg{Int}})
     y = 2.0f0 .* rand(Float32, size) .- 1.0f0
     return y
@@ -163,6 +227,21 @@ function random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}})
     return y
 end
 
+"""
+    remap_phase(x::Real) -> Float32
+    remap_phase(x::AbstractArray) -> AbstractArray
+
+Remap phase values to the interval [-1, 1] using modular arithmetic.
+This function maintains the cyclic nature of phases while keeping them in a consistent range.
+
+# Arguments
+- `x`: Phase value(s) to remap
+
+The operation is performed within `ignore_derivatives` to avoid tracking through the modulo operation
+in automatic differentiation.
+
+Returns phase values normalized to [-1, 1].
+"""
 function remap_phase(x::Real)
     ignore_derivatives() do
         x = x + 1.0f0
@@ -181,6 +260,22 @@ function remap_phase(x::AbstractArray)
     return x
 end
 
+"""
+    similarity(x::AbstractArray, y::AbstractArray; dim::Int = 1) -> AbstractArray
+
+Compute the similarity between two arrays of phase values using cosine distance.
+The similarity is calculated by taking the cosine of the phase difference and averaging.
+
+# Arguments
+- `x::AbstractArray`: First array of phase values
+- `y::AbstractArray`: Second array of phase values
+- `dim::Int`: Dimension along which to compute similarity (default: 1, use -1 for last dimension)
+
+Returns similarity scores in [-1, 1], where:
+- 1 indicates identical phases
+- 0 indicates orthogonal phases
+- -1 indicates opposite phases
+"""
 function similarity(x::AbstractArray, y::AbstractArray; dim::Int = 1)
     if dim == -1
         dim = ndims(x)
@@ -210,6 +305,24 @@ function similarity(x::SpikingTypes, y::SpikingTypes; spk_args::SpikingArgs, tsp
     return avg_sim
 end
 
+"""
+    interference_similarity(interference::AbstractArray; dim::Int=-1) -> AbstractArray
+
+Calculate similarity from interference patterns between complex-valued VSA representations.
+This function converts interference magnitudes to similarity scores using geometric relationships.
+
+# Arguments
+- `interference::AbstractArray`: Array of interference magnitudes (typically |u₁ + u₂|)
+- `dim::Int`: Dimension along which to average (default: -1 for last dimension)
+
+# Details
+1. Clamps interference magnitudes to [0, 2]
+2. Converts to half-angles using arccos
+3. Computes similarity using cosine of double angle
+4. Averages along specified dimension
+
+Returns similarity scores in [-1, 1] range, averaged over the specified dimension.
+"""
 function interference_similarity(interference::AbstractArray; dim::Int=-1)
     if dim == -1
         dim = ndims(interference)
@@ -270,8 +383,22 @@ function similarity_self(x::AbstractArray; dims)
 end
 
 """
-Slicing each array along 'dims', find the similarity between each corresponding slice and
-reduce along 'reduce_dim'
+    similarity_outer(x::AbstractArray, y::AbstractArray; dims=2) -> AbstractArray
+
+Compute pairwise similarities between slices of two arrays, supporting both real-valued phases
+and complex-valued representations.
+
+# Arguments
+- `x::AbstractArray`: First array of values
+- `y::AbstractArray`: Second array of values
+- `dims::Int`: Dimension along which to slice the arrays (default: 2)
+
+# Methods
+- For real-valued 3D arrays: Returns similarities with shape (N₁, N₂, B) where N₁,N₂ are slice dimensions and B is batch
+- For real-valued 2D arrays: Returns similarities with shape (N₁, N₂) where N₁,N₂ are slice dimensions
+- For complex-valued arrays: Uses interference-based similarity with shape (N₁, N₂, B)
+
+Returns a similarity matrix reshaped to maintain batch dimension as the last dimension.
 """
 function similarity_outer(x::AbstractArray{<:Real,3}, y::AbstractArray{<:Real,3}; dims=2)
     s = [similarity(xs, ys) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
@@ -296,6 +423,27 @@ end
 
 #Note - additional definitions for similarity_outer included in gpu.jl
 
+"""
+    v_unbind(x::AbstractArray, y::AbstractArray) -> AbstractArray
+    v_unbind(x::SpikingTypes, y::SpikingTypes; kwargs...) -> SpikingTypes
+
+Unbind two VSA vectors by subtracting their phases (inverse of binding).
+This operation is used to recover bound components.
+
+# Arguments
+- For arrays:
+  - `x::AbstractArray`: First array of phase values
+  - `y::AbstractArray`: Second array of phase values
+- For spiking types:
+  - `x::SpikingTypes`: First spike train
+  - `y::SpikingTypes`: Second spike train
+  - `kwargs...`: Additional arguments passed to `v_bind`
+
+The array method performs phase subtraction with remapping to [-1, 1].
+The spiking method uses `v_bind` with `unbind=true` for consistent handling.
+
+Returns unbound phases or spike train.
+"""
 function v_unbind(x::AbstractArray, y::AbstractArray)
     y = remap_phase(x .- y)
     return y
