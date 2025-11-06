@@ -46,6 +46,25 @@ function count_nans(phases::Array{<:Real,3})
     return mapslices(x->sum(isnan.(x)), phases, dims=(2,3)) |> vec
 end
 
+"""
+    delay_train(train::SpikingTypes, t::Real, offset::Real) -> SpikingTypes
+
+Create a new spike train with all spike times shifted by a delay.
+Preserves the type (CPU/GPU) of the input train.
+
+# Arguments
+- `train::SpikingTypes`: Input spike train
+- `t::Real`: Time delay to add to all spikes
+- `offset::Real`: Additional offset for phase alignment
+
+The function:
+1. Shifts all spike times by t
+2. Adjusts the train's offset by the specified amount
+3. Maintains spatial indices and shape
+4. Returns new train of same type as input (SpikeTrain or SpikeTrainGPU)
+
+Used in [`match_offsets`](@ref) to align spike trains for comparison or combination.
+"""
 function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
 
@@ -72,6 +91,28 @@ function find_spikes_rf(sol::ODESolution, spk_args::SpikingArgs; dim::Int=-1)
     return find_spikes_rf(u, t, spk_args, dim=dim)
 end
 
+"""
+    find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingArgs; dim::Int=-1) -> Tuple{Vector{CartesianIndex}, Vector{Float32}}
+    find_spikes_rf(sol::ODESolution, spk_args::SpikingArgs; dim::Int=-1) -> Tuple{Vector{CartesianIndex}, Vector{Float32}}
+
+Detect spikes in resonate-and-fire neuron potentials by analyzing voltage peaks.
+
+# Arguments
+- `u::AbstractArray`: Complex-valued neuron potentials (voltage = imag, current = real)
+- `t::AbstractVector`: Time points corresponding to potentials
+- `spk_args::SpikingArgs`: Neuron parameters including threshold
+- `dim::Int=-1`: Dimension along which to find spikes (default: last dimension)
+
+# Detection Method
+1. Extracts voltage (imaginary) and current (real) components
+2. Finds local voltage maxima using current zero-crossings
+3. Applies threshold to identify spikes
+4. Maps spikes to spatial locations and times
+
+Returns tuple of:
+- Spatial indices of spiking neurons as CartesianIndices
+- Times at which spikes occurred
+"""
 function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingArgs; dim::Int=-1)
     #choose the last dimension as default
     if dim == -1
@@ -102,6 +143,25 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
     return channels, times
 end
 
+"""
+    gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
+    gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real) -> Array{Float32}
+    arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real) -> Array{Float32}
+
+Family of kernel functions for computing spike-induced currents.
+
+# Arguments
+- `x`: Spike times or phase values
+- `t`: Current time (or vector of times for _vec variant)
+- `t_sigma`: Width parameter of the kernel
+
+# Variants
+- `gaussian_kernel`: Standard Gaussian kernel for spike times
+- `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
+- `arc_gaussian_kernel`: Circular/periodic version using sine distance
+
+See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
+"""
 function gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real)
     i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
     return i
@@ -176,6 +236,22 @@ function mean_phase((u, t)::Tuple, warmup::Real; spk_args::SpikingArgs, offset::
     return phase
 end
 
+"""
+    normalize_potential(u::Complex) -> Complex
+    normalize_potential(a::AbstractArray) -> AbstractArray
+
+Normalize complex potentials to unit magnitude while preserving phase.
+Used to analyze phase relationships independent of amplitude.
+
+# Arguments
+- `u::Complex`: Single complex potential
+- `a::AbstractArray`: Array of complex potentials
+
+Handles zero potentials by returning them unchanged.
+Non-zero potentials are divided by their magnitude.
+
+Returns normalized complex values with |z| = 1 or 0.
+"""
 function normalize_potential(u::Complex)
     a = abs(u)
     if a == 0.0f0
@@ -189,6 +265,26 @@ function normalize_potential(a::AbstractArray)
     return normalize_potential.(a)
 end
 
+"""
+    spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0f0) -> Array{Float32}
+
+Compute the current induced by spikes at a given time point.
+Implements the conversion from discrete spikes to continuous currents using a kernel function.
+
+# Arguments
+- `train::SpikeTrain`: Input spike train
+- `t::Real`: Time at which to compute current
+- `spk_args::SpikingArgs`: Neuron parameters including kernel type and scale
+- `sigma::Real=9.0f0`: Width multiplier for active time window
+
+# Implementation Details
+1. Identifies active spikes within time window `[t - σ⋅t_window, t + σ⋅t_window]`
+2. Applies specified kernel (custom function or :gaussian) to active spikes
+3. Scales and accumulates currents at spike locations
+4. Uses `ignore_derivatives` for gradient stability
+
+See also: [`spike_current`](@ref) for GPU implementation with SpikeTrainGPU
+"""
 function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma::Real = 9.0f0)
     @assert typeof(spk_args.spike_kernel) <: Function || spk_args.spike_kernel == :gaussian "Unrecognized kernel type, defaulting to gaussian"
     current = zeros(Float32, train.shape)
@@ -231,6 +327,33 @@ function spiking_offset(spk_args::SpikingArgs)
     return spk_args.t_period / 4.0f0
 end
 
+"""
+    stack_trains(trains::Array{<:SpikeTrain,1}) -> SpikeTrain
+
+Combine multiple spike trains by stacking them along a new first dimension.
+Used for batching or combining parallel neural populations.
+
+# Arguments
+- `trains::Array{<:SpikeTrain,1}`: Array of spike trains to stack
+
+# Requirements
+- All trains must have identical shapes
+- All trains must have identical time offsets
+
+# Implementation
+1. Verifies compatibility of input trains
+2. Creates new shape with added dimension
+3. Remaps spike indices to include stack dimension
+4. Concatenates all spike times
+
+Example:
+```julia
+# If A, B are trains with shape (10, 20)
+C = stack_trains([A, B])  # shape becomes (2, 10, 20)
+```
+
+See also: [`vcat_trains`](@ref) for concatenating along existing dimensions
+"""
 function stack_trains(trains::Array{<:SpikeTrain,1})
     check_offsets(trains...)
     n_t = length(trains)
@@ -337,6 +460,26 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     return sol
 end
 
+"""
+    oscillator_bank(x::SpikingTypes; tspan, spk_args::SpikingArgs) -> ODESolution
+
+Simulate a bank of oscillator neurons driven by spike inputs.
+Core implementation of spiking neural network dynamics.
+
+# Arguments
+- `x::SpikingTypes`: Input spike train (CPU or GPU)
+- `tspan::Tuple{<:Real, <:Real}`: Time interval for simulation
+- `spk_args::SpikingArgs`: Neuron parameters
+
+# Implementation
+1. Converts spike train to continuous current function
+2. Creates LocalCurrent object for simulation
+3. Simulates neural ODEs using specified solver
+
+Returns ODESolution containing the network's temporal evolution.
+
+See also: [`oscillator_bank`](@ref) variants for different input types and architectures
+"""
 function oscillator_bank(x::SpikingTypes; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     current_fn = t -> spike_current(x, t, spk_args)
     local_current = LocalCurrent(current_fn, x.shape, x.offset)
