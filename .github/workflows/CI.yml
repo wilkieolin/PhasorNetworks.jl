@@ -51,6 +51,7 @@ jobs:
       contents: write
       statuses: write
     steps:
+      - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@latest
         with:
           version: '1.11'  # Match the version used in tests

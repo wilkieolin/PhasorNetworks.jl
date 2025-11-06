@@ -1,18 +1,68 @@
 include("types.jl")
 
+"""
+    angle_to_complex(x::AbstractArray)
+
+Convert an array of angles (in units of π radians) to complex numbers on the unit circle.
+Each angle θ is mapped to exp(iπθ), resulting in complex numbers with unit magnitude.
+
+# Arguments
+- `x::AbstractArray`: Array of angles in units of π radians
+
+# Returns
+- Complex array where each element is exp(iπθ) for the corresponding angle θ
+"""
 function angle_to_complex(x::AbstractArray)
     k = pi_f32 * (0.0f0 + 1.0f0im)
     return exp.(k .* x)
 end
 
+"""
+    complex_to_angle(x::AbstractArray)
+
+Convert an array of complex numbers to their angles in units of π radians.
+
+# Arguments
+- `x::AbstractArray`: Array of complex numbers
+
+# Returns
+- Array of angles in units of π radians, in range [-1, 1]
+"""
 function complex_to_angle(x::AbstractArray)
     return angle.(x) ./ pi_f32
 end
 
+"""
+    complex_to_angle(x_real::Real, x_imag::Real)
+
+Convert real and imaginary components to an angle in units of π radians.
+
+# Arguments
+- `x_real::Real`: Real component of complex number
+- `x_imag::Real`: Imaginary component of complex number
+
+# Returns
+- Angle in units of π radians, in range [-1, 1]
+"""
 function complex_to_angle(x_real::Real, x_imag::Real)
     return atan(x_imag, x_real) / pi_f32
 end
 
+"""
+    soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+
+Calculate angles of complex numbers with a soft threshold based on magnitude.
+The output is scaled by a sigmoid function of the magnitude, which smoothly 
+transitions between 0 and 1 in the range [r_lo, r_hi].
+
+# Arguments
+- `x::AbstractArray{<:Complex}`: Array of complex numbers
+- `r_lo::Real = 0.1f0`: Lower threshold for magnitude scaling
+- `r_hi::Real = 0.2f0`: Upper threshold for magnitude scaling
+
+# Returns
+- Array of angles in units of π radians, scaled by magnitude-dependent sigmoid
+"""
 function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
     s = similar(real.(x))
 
@@ -26,6 +76,19 @@ function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real 
 end
 
 
+"""
+    cmpx_to_realvec(u::Array{<:Complex})
+
+Convert an array of complex numbers to a real-valued array by stacking real and imaginary parts.
+The output array has an additional first dimension of size 2, containing real parts in index 1
+and imaginary parts in index 2.
+
+# Arguments
+- `u::Array{<:Complex}`: Input array of complex numbers
+
+# Returns
+- Array of real numbers with shape (2, size(u)...)
+"""
 function cmpx_to_realvec(u::Array{<:Complex})
     nd = ndims(u)
     reals = real.(u)
@@ -34,6 +97,22 @@ function cmpx_to_realvec(u::Array{<:Complex})
     return mat
 end
 
+"""
+    realvec_to_cmpx(u::Array{<:Real})
+
+Convert a real-valued array with a leading dimension of size 2 back to complex numbers.
+The first slice along dimension 1 becomes the real part, and the second slice becomes
+the imaginary part.
+
+# Arguments
+- `u::Array{<:Real}`: Input array with shape (2, ...)
+
+# Returns
+- Complex array with shape matching input dimensions excluding the first
+  
+# Throws
+- AssertionError if first dimension is not of size 2
+"""
 function realvec_to_cmpx(u::Array{<:Real})
     @assert size(u)[1] == 2 "Must have first dimension contain real and imaginary values"
     slices = eachslice(u, dims=1)
@@ -45,15 +124,44 @@ end
 ### PHASE - SPIKE
 ###
 
-"""
-Converts a matrix of phases into a spike train via phase encoding
 
-phase_to_train(phases::AbstractMatrix, spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0)
+"""
+    phase_to_time(phases::AbstractArray; offset::Real = 0.0f0, spk_args::SpikingArgs)
+
+Convert phases to spike times using spiking neuron parameters. Phases are interpreted 
+as relative positions within a neuron's oscillation period.
+
+# Arguments
+- `phases::AbstractArray`: Array of phases in range [-1, 1]
+- `offset::Real = 0.0f0`: Time offset to add to all spike times
+- `spk_args::SpikingArgs`: Spiking neuron parameters including oscillation period
+
+# Returns
+- Array of spike times in absolute time units
 """
 function phase_to_time(phases::AbstractArray; offset::Real = 0.0f0, spk_args::SpikingArgs)
     return phase_to_time(phases, spk_args.t_period, Float32(offset))
 end
 
+"""
+    phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0f0)
+
+Convert phases to spike times using a specified oscillation period. This is the core
+implementation that handles the actual conversion math.
+
+# Arguments
+- `phases::AbstractArray`: Array of phases in range [-1, 1]
+- `period::Real`: Oscillation period length
+- `offset::Real = 0.0f0`: Time offset to add to all spike times
+
+# Returns
+- Array of spike times in absolute time units, normalized to be within [0, period)
+
+# Details 
+The conversion maps phase φ to time t as:
+t = (φ/2 + 0.5) * period + offset
+followed by modulo operation to ensure positive times within one period.
+"""
 function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0f0)
     phases = eltype(phases) == Float32 ? phases : Float32.(phases)
     period = Float32(period)
@@ -67,16 +175,68 @@ function phase_to_time(phases::AbstractArray, period::Real, offset::Real = 0.0f0
     return times
 end
 
+"""
+    time_to_phase(times::AbstractArray; spk_args::SpikingArgs, offset::Real)
+
+Convert spike times to phases using spiking neuron parameters.
+This is a convenience wrapper that uses the neuron's period from spk_args.
+
+# Arguments
+- `times::AbstractArray`: Array of spike times
+- `spk_args::SpikingArgs`: Spiking neuron parameters containing period information
+- `offset::Real`: Time offset to subtract from all spike times
+
+# Returns
+- Array of phases in range [-1, 1]
+"""
 function time_to_phase(times::AbstractArray; spk_args::SpikingArgs, offset::Real)
     return time_to_phase(times, spk_args.t_period, offset)
 end
 
+"""
+    time_to_phase(times::AbstractArray, period::Real, offset::Real)
+
+Convert spike times to phases using a specified oscillation period.
+This is the inverse operation of phase_to_time.
+
+# Arguments
+- `times::AbstractArray`: Array of spike times
+- `period::Real`: Oscillation period length
+- `offset::Real`: Time offset to subtract from all spike times
+
+# Returns
+- Array of phases in range [-1, 1]
+
+# Details
+The conversion maps time t to phase φ as:
+φ = 2(((t - offset) mod period)/period - 0.5)
+"""
 function time_to_phase(times::AbstractArray, period::Real, offset::Real)
     times = mod.((times .- offset), period) ./ period
     phase = (times .- 0.5f0) .* 2.0f0
     return phase
 end
 
+"""
+    phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
+
+Convert an array of phases to a SpikeTrain object, optionally repeating the spike pattern
+multiple times.
+
+# Arguments
+- `phases::AbstractArray`: Array of phases in range [-1, 1]
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `repeats::Int = 1`: Number of times to repeat the spike pattern
+- `offset::Real = 0.0f0`: Time offset for the spike train
+
+# Returns
+- `SpikeTrain`: Object containing spike times and their corresponding indices
+
+# Details
+For each non-NaN phase value, a spike is generated at the corresponding time.
+If repeats > 1, the spike pattern is repeated with appropriate time offsets.
+The spatial structure of the input array is preserved in the SpikeTrain's shape.
+"""
 function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
     shape = phases |> size
     indices = collect(CartesianIndices(shape)) |> vec
@@ -93,10 +253,33 @@ function phase_to_train(phases::AbstractArray; spk_args::SpikingArgs, repeats::I
     return train
 end
 
+"""
+    train_to_phase(call::SpikingCall)
+
+Convert a SpikingCall's spike train to phases using its own spiking parameters.
+
+# Arguments
+- `call::SpikingCall`: Contains a spike train and associated spiking parameters
+
+# Returns
+- Array of phases in range [-1, 1]
+"""
 function train_to_phase(call::SpikingCall)
     return train_to_phase(call.train, spk_args=call.spk_args)
 end
 
+"""
+    train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
+
+Convert a GPU-based spike train to phases. The output remains on the GPU.
+
+# Arguments
+- `train::SpikeTrainGPU`: GPU-based spike train
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- GPU array of phases in range [-1, 1]
+"""
 function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
     train = SpikeTrain(train)
     #preserve device on output
@@ -104,6 +287,34 @@ function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
     return phases
 end
 
+"""
+    train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0f0)
+
+Convert a spike train to a sequence of phase snapshots, one for each oscillation cycle.
+For each cycle, creates a phase array matching the original spatial dimensions, with 
+NaN values for neurons that did not spike in that cycle.
+
+# Arguments
+- `train::SpikeTrain`: The spike train to convert
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `offset::Real = 0.0f0`: Additional time offset for phase calculation
+
+# Returns
+- Array of phases with shape (original_shape..., n_cycles), where n_cycles is determined
+  by the temporal span of the spike train. Each slice along the last dimension represents
+  the phases in one oscillation cycle.
+- Returns `missing` if the spike train is empty
+
+# Throws
+- AssertionError if any spike times are negative
+
+# Details
+1. Converts each spike time to a phase within its cycle
+2. Determines which cycle each spike belongs to
+3. Creates a phase array for each cycle, filling with NaN by default
+4. Places each spike's phase in the appropriate cycle and spatial location
+5. Stacks all cycles into a single array along a new final dimension
+"""
 function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real = 0.0f0)
     if length(train.times) == 0
         return missing
@@ -131,6 +342,33 @@ function train_to_phase(train::SpikeTrain; spk_args::SpikingArgs, offset::Real =
     return phases
 end
 
+"""
+    phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, 
+                    tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, 
+                    zeta::Real=Float32(0.0))
+
+Convert a set of phases to a time-varying current function using a Gaussian kernel.
+The current at each time point is computed based on the phase difference between the
+input phases and the current time, with optional noise.
+
+# Arguments
+- `phases::AbstractArray`: Array of phases in range [-1, 1]
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `offset::Real = 0.0f0`: Time offset for phase calculations
+- `tspan::Tuple{<:Real, <:Real}`: Time span over which the current will be defined
+- `rng::Union{AbstractRNG, Nothing} = nothing`: Random number generator for noise
+- `zeta::Real=Float32(0.0)`: Noise amplitude (0 for no noise)
+
+# Returns
+- `CurrentCall`: Object containing a LocalCurrent function that computes the current
+  at any given time point, along with the spiking parameters and time span
+
+# Details
+The current is computed using a Gaussian kernel centered at each phase, with width
+determined by spk_args.t_window. Optional Gaussian noise can be added with amplitude zeta.
+The returned function preserves the input array's shape and can be evaluated at any time
+within the specified time span.
+"""
 function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
     shape = size(phases)
     
@@ -164,16 +402,74 @@ end
 ###
 
 """
-Convert a static phase to the complex potential of an R&F neuron
+    phase_to_potential(phase::Real, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
+
+Convert a single phase value to a sequence of complex potentials at specified time points
+for a Resonate-and-Fire (R&F) neuron.
+
+# Arguments
+- `phase::Real`: Phase value in range [-1, 1]
+- `ts::AbstractVector`: Vector of time points at which to compute the potential
+- `offset::Real=0.0f0`: Time offset for phase calculations
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Vector of complex potentials, one for each time point in ts
+
+# Details
+The R&F neuron potential follows a circular trajectory in the complex plane, with
+its phase determined by the input phase and time point. The trajectory's frequency
+and damping are specified in spk_args.
 """
 function phase_to_potential(phase::Real, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
     return [phase_to_potential(phase, t, offset=offset, spk_args=spk_args) for t in ts]
 end
 
+"""
+    phase_to_potential(phase::AbstractArray, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
+
+Convert an array of phases to a matrix of complex potentials, computing the potential
+for each phase at each specified time point.
+
+# Arguments
+- `phase::AbstractArray`: Array of phase values in range [-1, 1]
+- `ts::AbstractVector`: Vector of time points
+- `offset::Real=0.0f0`: Time offset for phase calculations
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Matrix of complex potentials with size (length(phase), length(ts))
+
+# Details
+Creates a matrix where each row corresponds to a phase value and each column corresponds
+to a time point, containing the complex potential of an R&F neuron with that phase at
+that time.
+"""
 function phase_to_potential(phase::AbstractArray, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
     return [phase_to_potential(p, t, offset=offset, spk_args=spk_args) for p in phase, t in ts]
 end
 
+"""
+    phase_to_potential(phase::Real, t::Real; offset::Real=0.0f0, spk_args::SpikingArgs)
+
+Convert a single phase value to a complex potential at a specific time point.
+This is the core implementation of the phase-to-potential conversion.
+
+# Arguments
+- `phase::Real`: Phase value in range [-1, 1]
+- `t::Real`: Time point at which to compute the potential
+- `offset::Real=0.0f0`: Time offset for phase calculations
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Complex number representing the neuron's potential at time t
+
+# Details
+The potential is computed as:
+z(t) = exp(ik * (t - offset - (phase - 1)/2 * period))
+where k is the neuron's complex frequency constant (incorporating both oscillation
+frequency and leakage/damping).
+"""
 function phase_to_potential(phase::Real, t::Real; offset::Real=0.0f0, spk_args::SpikingArgs)
     period = Float32(spk_args.t_period)
     k = ComplexF32(1.0f0im * imag(neuron_constant(spk_args)))
@@ -256,6 +552,24 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
     return phase
 end
 
+"""
+    solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
+
+Convert a solution function or ODESolution to an array of complex potentials at specified times.
+
+# Arguments
+- `func_sol::Union{ODESolution, Function}`: ODE solution object or interpolating function
+- `t::Array`: Array of time points at which to evaluate the solution
+
+# Returns
+- Array of complex potentials with time as the last dimension
+
+# Details
+Takes a solution (either as a function or ODESolution object) and evaluates it at
+specified time points, stacking the results along a new final dimension. This is
+useful for converting continuous solution functions into discretely sampled arrays
+of potentials.
+"""
 function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
     u = func_sol.(t)
     d = ndims(u[1])
@@ -264,10 +578,48 @@ function solution_to_potential(func_sol::Union{ODESolution, Function}, t::Array)
     return u
 end
 
+"""
+    solution_to_potential(ode_sol::ODESolution)
+
+Convert an ODESolution directly to an array of complex potentials.
+
+# Arguments
+- `ode_sol::ODESolution`: ODE solution object
+
+# Returns
+- Array of complex potentials sampled at the solution's saved time points
+
+# Details
+Simple conversion of an ODESolution to an array format, using the solution's
+internally saved time points. Useful when you want to work with the exact
+time points at which the ODE solver saved its results.
+"""
 function solution_to_potential(ode_sol::ODESolution)
     return Array(ode_sol)
 end
 
+"""
+    solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0.0f0, 
+                     spk_args::SpikingArgs, kwargs...)
+
+Convert an ODESolution to phases, either at all time points or just the final time.
+
+# Arguments
+- `sol::ODESolution`: ODE solution object
+- `final_t::Bool=false`: If true, only compute phase at final time point
+- `offset::Real=0.0f0`: Time offset for phase calculations
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `kwargs...`: Additional arguments passed to potential_to_phase
+
+# Returns
+- If final_t is true: Array of phases at final time point
+- If final_t is false: Array of phases at all saved time points
+
+# Details
+Converts the ODE solution to potentials and then to phases. Can either process
+the entire time series or just the final state, which is useful for different
+analysis scenarios.
+"""
 function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0.0f0, spk_args::SpikingArgs, kwargs...)
     #convert the ODE solution's saved points to an array
     u = solution_to_potential(sol)
@@ -282,6 +634,27 @@ function solution_to_phase(sol::ODESolution; final_t::Bool=false, offset::Real=0
     return p
 end
 
+"""
+    solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0f0, 
+                     spk_args::SpikingArgs, kwargs...)
+
+Convert a solution (ODE or function) to phases at specified time points.
+
+# Arguments
+- `sol::Union{ODESolution, Function}`: ODE solution object or interpolating function
+- `t::Array`: Array of time points at which to compute phases
+- `offset::Real=0.0f0`: Time offset for phase calculations
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `kwargs...`: Additional arguments passed to potential_to_phase
+
+# Returns
+- Array of phases at the specified time points
+
+# Details
+Evaluates the solution at given time points, converts to potentials, and then
+computes the corresponding phases. This allows for flexible sampling of the
+solution's phase representation at arbitrary time points.
+"""
 function solution_to_phase(sol::Union{ODESolution, Function}, t::Array; offset::Real=0.0f0, spk_args::SpikingArgs, kwargs...)
     #call the solution at the provided times
     u = solution_to_potential(sol, t)
@@ -294,27 +667,116 @@ end
 ### POTENTIAL - TIME
 ###
 
+"""
+    period_to_angfreq(t_period::Real)
+
+Convert a time period to angular frequency.
+
+# Arguments
+- `t_period::Real`: Time period (τ)
+
+# Returns
+- Angular frequency (ω = 2π/τ) in radians per unit time
+
+# Details
+Implements the standard relationship between period and angular frequency:
+ω = 2π/τ where τ is the period and ω is the angular frequency.
+"""
 function period_to_angfreq(t_period::Real)
     angular_frequency = 2.0f0 * pi_f32 / t_period
     return angular_frequency
 end
 
+"""
+    angfreq_to_period(angfreq::Real)
+
+Convert an angular frequency to time period.
+
+# Arguments
+- `angfreq::Real`: Angular frequency (ω) in radians per unit time
+
+# Returns
+- Time period (τ = 2π/ω)
+
+# Details
+This function is auto-inverting due to the reciprocal relationship between
+period and angular frequency. The implementation uses period_to_angfreq
+since τ = 2π/ω = 2π/(2π/τ₀) = τ₀.
+"""
 function angfreq_to_period(angfreq::Real)
     #auto-inverting transform
     return period_to_angfreq(angfreq)
 end
 
+"""
+    neuron_constant(leakage::Real, t_period::Real)
+
+Calculate the complex frequency constant for a Resonate-and-Fire neuron.
+
+# Arguments
+- `leakage::Real`: Leakage/damping rate of the neuron
+- `t_period::Real`: Oscillation period
+
+# Returns
+- Complex frequency constant k = λ + iω, where:
+  - λ is the leakage rate
+  - ω is the angular frequency (2π/period)
+
+# Details
+This complex constant determines both the frequency of oscillation and the rate
+of decay in the neuron's dynamics. The real part (leakage) controls damping,
+while the imaginary part sets the oscillation frequency.
+"""
 function neuron_constant(leakage::Real, t_period::Real)
     angular_frequency = period_to_angfreq(t_period)
     k = ComplexF32(leakage + 1.0f0im * angular_frequency)
     return k
 end
 
+"""
+    neuron_constant(spk_args::SpikingArgs)
+
+Convenience function to calculate the neuron's complex frequency constant from SpikingArgs.
+
+# Arguments
+- `spk_args::SpikingArgs`: Spiking neuron parameters containing leakage and period
+
+# Returns
+- Complex frequency constant k = λ + iω using parameters from spk_args
+
+# Details
+This is a wrapper around neuron_constant(leakage, t_period) that extracts the
+parameters from a SpikingArgs struct.
+"""
 function neuron_constant(spk_args::SpikingArgs)
     k = neuron_constant(spk_args.leakage, spk_args.t_period)
     return k
 end
 
+"""
+    potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
+
+Calculate expected spike times for an array of neuron potentials at a given time.
+
+# Arguments
+- `u::AbstractArray`: Array of complex potentials
+- `t::Real`: Current time point
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Array of predicted spike times
+
+# Details
+For each complex potential:
+1. Calculates angle in complex plane
+2. Determines angular distance to π/2 (spiking threshold)
+3. Converts this angle to time using neuron frequency
+4. Adds to current time to get absolute spike time
+5. Ensures all times are positive by adding period if needed
+
+The spiking angle π/2 represents the phase at which a neuron generates a spike
+in the Resonate-and-Fire model.
+"""
 function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
     spiking_angle = pi_f32 / 2.0f0
 
@@ -329,6 +791,28 @@ function potential_to_time(u::AbstractArray, t::Real; spk_args::SpikingArgs)
     return spikes
 end
 
+"""
+    potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
+
+Calculate spike times for an array of neuron potentials over multiple time points.
+
+# Arguments
+- `u::AbstractArray`: Array of complex potentials
+- `ts::AbstractVector`: Vector of time points
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `dim::Int=-1`: Dimension along which time varies (defaults to last dimension)
+
+# Returns
+- Array of predicted spike times with same shape as input
+
+# Throws
+- AssertionError if size along time dimension doesn't match length of ts
+
+# Details
+Processes each time slice of the potential array separately, computing spike times
+for each potential at the corresponding time point. The results are stacked back
+together along the specified dimension.
+"""
 function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
     if dim == -1
         dim = ndims(u)
@@ -341,6 +825,29 @@ function potential_to_time(u::AbstractArray, ts::AbstractVector; spk_args::Spiki
     return spikes
 end
 
+"""
+    time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs)
+
+Calculate complex potentials at a given time for neurons that spiked at specified times.
+
+# Arguments
+- `spikes::AbstractArray`: Array of spike times
+- `t::Real`: Time at which to compute the potentials
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Array of complex potentials
+
+# Details
+For each spike time:
+1. Computes time elapsed since/until spike
+2. Converts to angular displacement using neuron frequency
+3. Adjusts relative to spiking angle (π/2)
+4. Converts to complex potential on unit circle
+
+The resulting potentials represent the state each neuron would have at time t,
+given their spike times, assuming ideal oscillatory behavior.
+"""
 function time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs)
     spiking_angle = pi_f32 / 2.0f0
 
@@ -353,6 +860,28 @@ function time_to_potential(spikes::AbstractArray, t::Real; spk_args::SpikingArgs
     return potentials
 end
 
+"""
+    time_to_potential(spikes::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
+
+Calculate complex potentials over multiple time points for neurons with specified spike times.
+
+# Arguments
+- `spikes::AbstractArray`: Array of spike times
+- `ts::AbstractVector`: Vector of time points at which to compute potentials
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `dim::Int=-1`: Dimension along which time varies (defaults to last dimension)
+
+# Returns
+- Array of complex potentials with same shape as input
+
+# Throws
+- AssertionError if size along time dimension doesn't match length of ts
+
+# Details
+Processes each time slice of the spike times array separately, computing potentials
+at each corresponding time point. The results are stacked back together along the
+specified dimension, maintaining the original array structure.
+"""
 function time_to_potential(spikes::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, dim::Int=-1)
     if dim == -1
         dim = ndims(spikes)
@@ -365,6 +894,32 @@ function time_to_potential(spikes::AbstractArray, ts::AbstractVector; spk_args::
     return potential
 end
 
+"""
+    solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; 
+                     spk_args::SpikingArgs, offset::Real)
+
+Convert a continuous ODE solution or interpolating function to a discrete spike train
+by sampling at cycle boundaries.
+
+# Arguments
+- `sol::Union{ODESolution,Function}`: Either an ODESolution object or a function that can
+  be evaluated at arbitrary time points to get the system state
+- `tspan::Tuple{<:Real, <:Real}`: Time span (t_start, t_end) over which to generate spikes
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `offset::Real`: Time offset for spike timing calculations
+
+# Returns
+- `SpikeTrain`: Object containing the detected spikes and their timing information
+
+# Details
+1. Determines cycle boundary times within the specified time span
+2. Samples the solution at these cycle boundaries
+3. Converts the sampled potentials to spike times using threshold detection
+
+This function provides a way to discretize a continuous dynamical solution into
+a sequence of spikes, which is useful for analyzing the system's behavior in
+terms of discrete events.
+"""
 function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
