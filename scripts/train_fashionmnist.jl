@@ -202,7 +202,7 @@ function phasor_loss_function(x, y, model, ps, st, dev=dev)
     y = y |> dev
     y_pred, _ = Lux.apply(model, x, ps, st)
     y_onehot = onehotbatch(y, 0:9)
-    loss = codebook_loss(y_pred, y_onehot) 
+    loss = evaluate_loss(y_pred, y_onehot, :similarity) 
     loss = mean(loss)
     return loss
 end
@@ -214,7 +214,7 @@ function test_phasor(model, data_loader, ps, st, dev=dev)
         x = x |> dev
         
         y_pred, _ = Lux.apply(model, x, ps, st)
-        pred_labels = predict_codebook(cdev(y_pred))
+        pred_labels = predict(cdev(y_pred), :similarity)
         
         total_correct += sum(pred_labels .== y .+ 1)
         total_samples += length(y)
