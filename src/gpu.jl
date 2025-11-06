@@ -8,6 +8,14 @@ if CUDA.functional()
     gdev = gpu_device()
 end
 
+"""
+    on_gpu(args...) -> Bool
+
+Check if any of the provided arguments are CUDA arrays.
+
+Used to determine if computation should proceed on GPU or CPU path.
+Returns true if at least one argument is a CuArray.
+"""
 function on_gpu(args...)
     locs = [typeof(x) <: CuArray for x in args]
     return reduce(+, locs) > 0
@@ -20,6 +28,19 @@ function threads_blks(l::Int, threads::Int = N_THREADS)
     return threads, blocks
 end
 
+"""
+    gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
+
+GPU-optimized version of the Gaussian kernel used in spike current calculations.
+All inputs are Float32 for CUDA compatibility.
+
+# Arguments
+- `x::Float32`: Time of the spike
+- `t::Float32`: Current time
+- `t_sigma::Float32`: Width of the Gaussian kernel
+
+Returns the spike current value at time t for a spike at time x.
+"""
 function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     i = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
     return i
@@ -35,6 +56,24 @@ function scatter_add_kernel!(output, values, indices)
     return nothing
 end
 
+"""
+    parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_size::Int) where T -> CuArray{T}
+
+Perform parallel scatter-add operation on GPU using atomic operations.
+Used for efficiently accumulating spike currents in the network.
+
+# Arguments
+- `indices::CuArray{Int}`: Target indices for the values
+- `values::CuArray{T}`: Values to be scattered and added
+- `output_size::Int`: Size of the output array
+
+# Implementation
+Uses CUDA atomic operations to safely accumulate values in parallel.
+Each thread processes one (index, value) pair and atomically adds
+to the corresponding location in the output array.
+
+Returns a CuArray of size `output_size` containing the accumulated values.
+"""
 function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_size::Int) where T
     @assert length(indices) == length(values) "Length of indices and values must match"
     
@@ -74,6 +113,27 @@ end
 
 # Domains
 
+"""
+    potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false) -> CuArray
+
+GPU implementation of potential to phase conversion for neural states.
+Extends the CPU version in domains.jl with CUDA-optimized array operations.
+
+# Arguments
+- `potential::CuArray`: Complex-valued neural potentials on GPU
+- `ts::AbstractVector`: Time points corresponding to potential values
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `offset::Real=0.0f0`: Time offset for phase calculation
+- `threshold::Bool=false`: Whether to apply threshold checks
+
+# Implementation
+1. Computes reference zero-phase potentials
+2. Calculates phase differences using complex angles
+3. Normalizes to [-1, 1] range
+4. Marks sub-threshold neurons with NaN
+
+See also: [`potential_to_phase`](@ref) for CPU version
+"""
 function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     dims = collect(1:ndims(potential))
@@ -159,6 +219,24 @@ function oscillator_bank(u0::CuArray, dzdt::Function; tspan::Tuple{<:Float32, <:
     return sol
 end
 
+"""
+    oscillator_bank(x::SpikeTrainGPU; tspan=(0.0f0, 10.0f0), spk_args::SpikingArgs) -> ODESolution
+
+GPU implementation of oscillator bank simulation for spiking neural networks.
+Simulates the dynamics of a bank of oscillators driven by spike inputs.
+
+# Arguments
+- `x::SpikeTrainGPU`: Input spike train on GPU
+- `tspan::Tuple{<:Real, <:Real}`: Time span for simulation
+- `spk_args::SpikingArgs`: Parameters for neuron dynamics
+
+# Implementation
+Sets up and solves the ODE system:
+dz/dt = update_fn(z) + spike_current(x, t)
+where z is the complex potential of each neuron.
+
+See also: [`oscillator_bank`](@ref) in spiking.jl for CPU version
+"""
 function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     tspan = tspan |> f32_tspan 
     update_fn = spk_args.update_fn
@@ -193,6 +271,27 @@ function oscillator_bank(x::SpikeTrainGPU{2}, w::CuArray, b::CuArray; tspan::Tup
     return sol
 end
 
+"""
+    oscillator_bank(x::SpikeTrainGPU{3}, w::CuArray, b::CuArray; tspan, spk_args) -> ODESolution
+
+GPU-optimized neural network layer simulation for 3D spike trains (batched 2D data).
+Implements the weighted connections and bias terms for network layers.
+
+# Arguments
+- `x::SpikeTrainGPU{3}`: Input spike train with shape (features, spatial_dim, batch)
+- `w::CuArray`: Weight matrix
+- `b::CuArray`: Bias terms
+- `tspan`: Time span for simulation
+- `spk_args::SpikingArgs`: Neuron parameters
+
+# Implementation
+Solves the neural ODE:
+dz/dt = update_fn(z) + W * spike_current(x, t) + bias_current(b, t)
+
+Returns an ODESolution object containing the network dynamics.
+
+See also: Other `oscillator_bank` methods for different dimensionalities
+"""
 function oscillator_bank(x::SpikeTrainGPU{3}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     tspan = tspan |> f32_tspan
     #set up functions to define the neuron's differential equations
@@ -225,6 +324,28 @@ function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tup
     return sol
 end
 
+"""
+    similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}) -> CuArray{Float32,3}
+
+GPU-optimized pairwise similarity computation between sets of complex-valued vectors.
+Provides a vectorized implementation that is efficient on GPUs and compatible with automatic differentiation.
+
+# Arguments
+- `A::CuArray{ComplexF32,3}`: First set of vectors, shape (D, M, X)
+- `B::CuArray{ComplexF32,3}`: Second set of vectors, shape (D, N, X)
+where:
+- D: feature dimension
+- M, N: number of vectors in each set
+- X: batch size
+
+# Implementation Details
+- Uses broadcasting for vectorized operations
+- Avoids custom CUDA kernels for AD compatibility (e.g., with Zygote)
+- Optimizes similarity calculation using trigonometric identities
+- Returns shape (N, X, M) to match CPU implementation ordering
+
+See also: [`similarity_outer`](@ref) in vsa.jl for CPU version
+"""
 function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
     # Vectorized implementation that avoids custom CUDA kernels and uses
     # broadcasting + reductions. This form is much simpler for AD backends
