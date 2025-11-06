@@ -276,9 +276,37 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             u -> neuron_constant(Float32(leakage), Float32(t_period)) .* u,)
 end
 
-function SpikingArgs_NN(; leakage::Real = -0.2f0, # Changed default to Float32 literal
+"""
+    SpikingArgs_NN(;
+        leakage::Real = -0.2f0,
+        t_period::Real = 1.0f0,
+        t_window::Real = 0.01f0,
+        spk_scale::Real = 1.0f0,
+        threshold::Real = 0.001f0,
+        spike_kernel = :gaussian,
+        solver = Heun(),
+        solver_args = Dict(...),
+        update_fn::Function)
+
+Neural network specific variant of spiking arguments configuration.
+
+# Arguments
+- `leakage`: Neuron leakage rate (default: -0.2f0)
+- `t_period`: Time period for oscillation (default: 1.0f0)
+- `t_window`: Time window for spike integration (default: 0.01f0)
+- `spk_scale`: Scaling factor for spikes (default: 1.0f0)
+- `threshold`: Spike threshold value (default: 0.001f0)
+- `spike_kernel`: Type of spike kernel to use (default: :gaussian)
+- `solver`: ODE solver to use (default: Heun())
+- `solver_args`: Dictionary of solver arguments
+- `update_fn`: Function for updating neuron state
+
+# Returns
+- SpikingArgs configuration object for neural networks
+"""
+function SpikingArgs_NN(; leakage::Real = -0.2f0,
     t_period::Real = 1.0f0,
-    t_window::Real = 0.01f0, # Ensure all Real args are consistently handled
+    t_window::Real = 0.01f0,
     spk_scale::Real = 1.0f0,
     threshold::Real = 0.001f0,
     spike_kernel = :gaussian,

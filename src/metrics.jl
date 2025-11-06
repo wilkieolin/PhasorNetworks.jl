@@ -177,12 +177,39 @@ function cor_realvals(x, y)
     end
 end
 
+"""
+    OvR_matrices(predictions, labels, threshold::Real)
+
+Compute One-vs-Rest confusion matrices for multi-class classification.
+
+# Arguments
+- `predictions`: Array of model predictions, with classes along first dimension
+- `labels`: Array of true labels in one-hot format
+- `threshold`: Classification threshold value
+
+# Returns
+- Array of confusion matrices, one for each class vs rest
+"""
 function OvR_matrices(predictions, labels, threshold::Real)
     #get the confusion matrix for each class verus the rest
     mats = diag([confusion_matrix(ys, ts, threshold) for ys in eachslice(predictions, dims=1), ts in eachslice(labels, dims=1)])
     return mats
 end
 
+"""
+    tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
+
+Calculate True Positive Rate (TPR) and False Positive Rate (FPR) curves for ROC analysis.
+
+# Arguments
+- `prediction`: Model predictions array
+- `labels`: True labels array
+- `points`: Number of threshold points to evaluate (default: 201)
+- `epsilon`: Small value to prevent division by zero (default: 0.01f0)
+
+# Returns
+- Tuple of (TPR, FPR) arrays for ROC curve plotting
+"""
 function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
     test_points = range(start = 0.0f0, stop = -20.0f0, length = points)
     test_points = vcat(exp.(test_points), 0.0f0, reverse(-1.0f0 .* exp.(test_points)))

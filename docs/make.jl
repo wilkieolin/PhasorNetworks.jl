@@ -14,6 +14,12 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Manual" => [
+            "Types" => "manual/types.md",
+            "Neural Networks" => "manual/network.md",
+            "Spiking Networks" => "manual/spiking.md",
+            "Metrics" => "manual/metrics.md",
+        ]
     ],
 )
 

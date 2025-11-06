@@ -529,6 +529,20 @@ end
 #     return sol
 # end
 
+"""
+    vcat_trains(trains::Array{<:SpikingTypes,1})
+
+Vertically concatenate multiple spike trains with identical shapes and offsets.
+
+# Arguments
+- `trains`: Array of spike trains to concatenate
+
+# Returns
+- A concatenated spike train
+
+# Notes
+All input trains must have identical shapes and offsets.
+"""
 function vcat_trains(trains::Array{<:SpikingTypes,1})
     check_offsets(trains...)
     n_t = length(trains)
