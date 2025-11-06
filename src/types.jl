@@ -2,6 +2,18 @@ include("imports.jl")
 
 pi_f32 = convert(Float32, pi)
 
+"""
+    Args
+
+Configuration parameters for training neural networks in the PhasorNetworks framework.
+
+# Fields
+- `lr::Float64`: Learning rate for optimization (default: 0.0003). Kept as Float64 for Optimisers.jl compatibility
+- `batchsize::Int`: Number of samples per batch during training (default: 128)
+- `epochs::Int`: Number of training epochs (default: 10)
+- `use_cuda::Bool`: Whether to use GPU acceleration if available (default: true)
+- `rng::Xoshiro`: Random number generator for reproducibility (default: Xoshiro(42))
+"""
 @kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
     lr::Float64 = 0.0003       ## learning rate
     batchsize::Int = 128    ## batch size
@@ -10,6 +22,23 @@ pi_f32 = convert(Float32, pi)
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 
+"""
+    SpikeTrain{N}
+
+A data structure representing a sequence of spikes (neural impulses) in N-dimensional space.
+Used for modeling spiking neural networks and implementing Vector Symbolic Architectures (VSA).
+
+# Fields
+- `indices::Array{<:Union{Int, CartesianIndex},1}`: Location of spikes in N-dimensional space
+- `times::Array{Float32,1}`: Timing of each spike in seconds
+- `shape::Tuple`: Dimensions of the spike space
+- `offset::Float32`: Time offset of the spike train, used in synchronization
+
+# Type Parameter
+- `N`: Number of dimensions in the spike space
+
+See also: [`SpikeTrainGPU`](@ref) for GPU-accelerated version.
+"""
 struct SpikeTrain{N}
     indices::Array{<:Union{Int, CartesianIndex},1}
     times::Array{Float32,1}
@@ -29,6 +58,26 @@ struct SpikeTrain{N}
 end
 
 
+"""
+    SpikeTrainGPU{N}
+
+GPU-accelerated version of SpikeTrain, optimized for CUDA operations.
+Provides the same functionality as SpikeTrain but with additional fields for efficient GPU computation.
+
+# Fields
+- `indices::CuArray`: GPU array of spike locations in N-dimensional space
+- `linear_indices::CuArray`: Linearized indices for efficient GPU memory access
+- `times::CuArray{<:Real}`: GPU array of spike timings in seconds
+- `shape::Tuple`: Dimensions of the spike space
+- `linear_shape::Int`: Total size of the flattened spike space
+- `offset::Float32`: Time offset of the spike train
+
+# Type Parameter
+- `N`: Number of dimensions in the spike space
+
+Can be converted to/from CPU SpikeTrain using Base.convert.
+See also: [`SpikeTrain`](@ref)
+"""
 struct SpikeTrainGPU{N}
     indices::CuArray
     linear_indices::CuArray
@@ -172,6 +221,26 @@ function get_time(st::SpikeTrain, times::Tuple{<:Real, <:Real})
     return st
 end
 
+"""
+    SpikingArgs
+
+Configuration parameters for spiking neural network simulation.
+Controls neuron dynamics, spike generation, and numerical integration.
+
+# Fields
+- `leakage::Float32`: Leakage term in neuron dynamics
+- `t_period::Float32`: Time period of oscillation in seconds
+- `t_window::Float32`: Time window for spike current kernel
+- `spk_scale::Float32`: Scaling factor for spike currents
+- `threshold::Float32`: Voltage threshold for spike generation
+- `spike_kernel::Union{Symbol, Function}`: Spike kernel function (e.g., :gaussian) or custom function
+- `solver`: ODE solver for neural dynamics (typically Heun())
+- `solver_args::Dict`: Arguments for the ODE solver
+- `update_fn::Function`: Update function for neural state
+
+Used in both simulation and training of spiking neural networks.
+See also: [`SpikingArgs_NN`](@ref) for neural network specific variant.
+"""
 struct SpikingArgs
     leakage::Float32
     t_period::Float32
@@ -237,6 +306,20 @@ function Base.show(io::IO, spk_args::SpikingArgs)
     print(io, "Threshold: ", spk_args.threshold, " (V)\n")
 end
 
+"""
+    SpikingCall
+
+A complete specification for running a spiking neural network simulation.
+Bundles a spike train with its simulation parameters and time span.
+
+# Fields
+- `train::SpikingTypes`: The spike train (CPU or GPU) to be simulated
+- `spk_args::SpikingArgs`: Simulation parameters
+- `t_span::Tuple{Float32, Float32}`: Time interval for simulation (start, end)
+
+Used in the neural network layers and VSA operations for consistent simulation settings.
+Created by MakeSpiking layer when converting phase data to spike representations.
+"""
 struct SpikingCall
     train::SpikingTypes
     spk_args::SpikingArgs
@@ -257,6 +340,20 @@ function Base.getindex(x::SpikingCall, inds...)
     return new_call
 end
 
+"""
+    LocalCurrent
+
+Represents a spatially distributed current source in the neural network.
+Used to model current injection into neurons based on spike inputs.
+
+# Fields
+- `current_fn::Function`: Function that computes current at a given time
+- `shape::Tuple`: Spatial dimensions of the current distribution
+- `offset::Float32`: Time offset for the current function
+
+Can be created from SpikingTypes using SpikingArgs to define the current kernel.
+Used in oscillator bank simulations for neural dynamics.
+"""
 struct LocalCurrent
     current_fn::Function
     shape::Tuple
@@ -281,6 +378,20 @@ function Base.size(x::LocalCurrent)
     return x.shape
 end
 
+"""
+    CurrentCall
+
+A complete specification for simulating neural dynamics with a current input.
+Combines a current source with simulation parameters and time span.
+
+# Fields
+- `current::LocalCurrent`: The current source to be applied
+- `spk_args::SpikingArgs`: Simulation parameters
+- `t_span::Tuple{<:Real, <:Real}`: Time interval for simulation (start, end)
+
+Can be created from a SpikingCall to transform spike-based input into continuous current.
+Used in oscillator bank simulations and neural network dynamics.
+"""
 struct CurrentCall
     current::LocalCurrent
     spk_args::SpikingArgs
