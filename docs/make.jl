@@ -14,11 +14,14 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
-        "Manual" => [
-            "Types" => "manual/types.md",
-            "Neural Networks" => "manual/network.md",
-            "Spiking Networks" => "manual/spiking.md",
-            "Metrics" => "manual/metrics.md",
+        "API Reference" => [
+            "Types" => "api/types.md",
+            "Networks" => "api/network.md",
+            "Spiking" => "api/spiking.md",
+            "Domains" => "api/domains.md",
+            "VSA" => "api/vsa.md",
+            "GPU" => "api/gpu.md",
+            "Metrics" => "api/metrics.md",
         ]
     ],
 )
