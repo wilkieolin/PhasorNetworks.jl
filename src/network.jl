@@ -142,10 +142,22 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
 end
 
 
-
 """
-ComplexBias layer for use in Phase Networks - adds bias in the complex plane
-    during calls
+    ComplexBias <: LuxCore.AbstractLuxLayer
+
+Layer that adds learnable complex-valued biases to phase networks.
+
+# Fields
+- `dims`: Dimensions of the bias terms
+- `init_bias`: Function to initialize bias values (default: ones)
+
+# Initialization Options
+- `default_bias`: Initialize with ones in complex plane
+- `zero_bias`: Initialize with zeros
+- Custom initialization function with signature (rng, dims) -> ComplexF32 array
+
+Used as a component in [`PhasorDense`](@ref) and [`PhasorConv`](@ref) layers
+to provide phase shifts in the complex plane.
 """
 struct ComplexBias <: LuxCore.AbstractLuxLayer
     dims
@@ -197,7 +209,25 @@ function Lux.initialstates(rng::AbstractRNG, bias::ComplexBias)
 end
 
 """
-PhasorDense layer - implementationof fundamental dense layer using phase tensors
+    PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
+
+A dense (fully-connected) layer that operates on phase/complex-valued inputs.
+Combines a standard dense layer with complex bias and phase-based activation.
+
+# Fields
+- `layer`: Standard dense layer for linear transformation
+- `bias`: Complex-valued bias for phase shift
+- `activation`: Function to convert complex values to phases
+- `use_bias::Bool`: Whether to apply complex bias
+- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+
+# Layer Operation
+1. Converts input phases to complex numbers
+2. Applies linear transformation separately to real/imaginary parts
+3. Optionally applies complex bias
+4. Applies activation function to map back to phases
+
+Supports both direct phase inputs and spiking inputs through ODEs.
 """
 struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer # the conventional layer used to transform inputs
@@ -264,6 +294,27 @@ end
 ### Convolutional Phasor Layer
 ###
 
+"""
+    PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
+
+Convolutional layer for phase-valued inputs and spiking neural networks.
+Implements complex-valued convolution with phase-based activation.
+
+# Fields
+- `layer`: Standard convolutional layer for spatial operations
+- `bias`: Complex-valued bias terms
+- `activation`: Phase activation function
+- `use_bias::Bool`: Whether to apply complex bias
+- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+
+# Implementation
+- Separates input into real/imaginary components
+- Applies convolution separately to each component
+- Recombines into complex values
+- Optionally applies complex bias and activation
+
+See also: [`PhasorDense`](@ref) for fully-connected equivalent
+"""
 struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer
     bias
@@ -331,6 +382,30 @@ end
 ### Codebook layer - converts a vector to a value of similarities
 ###
 
+"""
+    Codebook <: LuxCore.AbstractLuxLayer
+
+Layer that accesses a fixed set of phase codes and computes similarities with inputs.
+Used for discrete embedding or classification tasks in phase-based networks.
+
+# Fields
+- `dims::Pair{<:Int, <:Int}`: Input dimension => Number of codes
+
+# State
+- `codes`: Random phase symbols initialized as the codebook
+- Codes are fixed after initialization (non-trainable)
+
+# Forward Pass
+1. For phase inputs: Computes similarity with all codes
+2. For spiking inputs: Converts codes to currents and computes temporal similarity
+
+# Use Cases
+- Discrete symbol encoding in Vector Symbolic Architectures
+- Classification by similarity to learned phase patterns
+- Phase-based memory or lookup mechanisms
+
+See also: [`similarity_outer`](@ref) for similarity computation
+"""
 struct Codebook <: LuxCore.AbstractLuxLayer
     dims
     Codebook(x::Pair{<:Int, <:Int}) = new(x)
@@ -364,10 +439,32 @@ function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
 end
 
 
-###
-### Layer which resonates with incoming input currents - mainly with one input and weakly with others
-###
-struct PhasorResonant <: Lux.AbstractLuxLayer
+"""
+    PhasorFixed <: Lux.AbstractLuxLayer
+
+A layer that responds to input currents or spikes with a predetermined phase pattern.
+The weights are fixed (e.g., identity matrix) and non-trainable.
+
+# Fields
+- `shape::Int`: Layer dimension
+- `layer`: The underlying fixed phase pattern layer
+- `init_weight`: Function to initialize the fixed weight pattern
+- `return_solution::Bool`: Whether to return the phase solution
+- `static::Bool`: If true, maintains fixed phase relationships
+
+# Forward Pass
+1. Receives input currents or spikes
+2. Neurons respond according to fixed weight pattern
+3. Produces output phases and spikes based on predetermined pattern
+
+# Use Cases
+- Fixed pattern detection
+- Identity or permutation mapping
+- Simple phase transformations with predetermined patterns
+
+See also: [`SpikeTrain`](@ref) for spike input/output format
+"""
+struct PhasorFixed <: Lux.AbstractLuxLayer
     shape::Int
     layer
     init_weight
@@ -375,17 +472,17 @@ struct PhasorResonant <: Lux.AbstractLuxLayer
     static::Bool
 end
 
-function PhasorResonant(n::Int, spk_args::SpikingArgs, return_solution::Bool = true, static::Bool = true)
+function PhasorFixed(n::Int, spk_args::SpikingArgs, return_solution::Bool = true, static::Bool = true)
     if static
         init_w = () -> Matrix(ones(Float32, 1) .* I(n))
     else
         init_w = rng -> square_variance(rng, n)
     end
         
-    return PhasorResonant(n, Dense(n => n), init_w, return_solution, static)
+    return PhasorFixed(n, Dense(n => n), init_w, return_solution, static)
 end
 
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorResonant)
+function Lux.initialparameters(rng::AbstractRNG, layer::PhasorFixed)
     if layer.static
         params = NamedTuple()
     else
@@ -395,7 +492,7 @@ end
 
 # Calls
 
-function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     if a.static
         y = oscillator_bank(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
     else    
@@ -405,7 +502,7 @@ function (a::PhasorResonant)(x::CurrentCall, params::LuxParams, state::NamedTupl
     return y, state
 end
 
-function (a::PhasorResonant)(x::SpikingCall, params::LuxParams)
+function (a::PhasorFixed)(x::SpikingCall, params::LuxParams)
     if a.static
         y = v_bundle_project(x, a.init_weight(), zeros(ComplexF32, (a.shape)), return_solution = a.return_solution)
     else
@@ -486,6 +583,26 @@ end
 Residual blocks
 """
 
+"""
+    ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
+
+Residual block for phase-based neural networks, implementing skip connections
+through phase binding.
+
+# Fields
+- `ff`: Feed-forward chain of phase-based layers
+
+# Implementation Details
+1. Processes input through feed-forward path
+2. Binds (combines) original input with processed output
+3. Maintains phase-based representation throughout
+
+Used to build deep phase networks while mitigating phase degradation,
+similar to residual connections in standard neural networks but using
+phase binding for combination.
+
+See also: [`v_bind`](@ref) for the phase binding operation
+"""
 struct ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
     ff
 end
@@ -536,6 +653,31 @@ function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3};
     return scaled
 end
 
+"""
+    attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args, tspan, return_solution=false, scale=[1.0f0]) -> Tuple
+
+Compute attention between spiking neural representations using phase similarity.
+Core attention mechanism for spiking transformer architectures.
+
+# Arguments
+- `q, k, v`: Query, key, and value spike trains
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `tspan`: Time span for simulation
+- `return_solution::Bool`: Whether to return raw potentials
+- `scale::AbstractArray`: Attention scaling factor
+
+# Implementation
+1. Computes temporal similarity between query and key spikes
+2. Converts value spikes to oscillator potentials
+3. Scales and combines values based on similarities
+4. Optionally converts back to spike train
+
+Returns:
+- Spike train or potentials representing attended values
+- Attention scores over time
+
+See also: [`attend`](@ref) for phase-based version
+"""
 function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0f0, 10.0f0), return_solution::Bool = false, scale::AbstractArray=[1.0f0,])
     #compute the similarity between the spike trains
     #produces [time][b qt kt]
@@ -573,6 +715,28 @@ end
 
 identity_layer = Chain(x -> x,)
 
+"""
+    SingleHeadAttention <: LuxCore.AbstractLuxContainerLayer{(:q_proj, :k_proj, :v_proj, :attention, :out_proj)}
+
+Single-head attention mechanism for phase-based transformers.
+Implements attention using phase similarity for key-query interactions.
+
+# Fields
+- `q_proj`: Query projection layer
+- `k_proj`: Key projection layer
+- `v_proj`: Value projection layer
+- `attention`: Attention scoring mechanism
+- `out_proj`: Output projection layer
+
+# Implementation Details
+1. Projects input to query/key/value representations
+2. Computes attention scores using phase similarity
+3. Combines values weighted by attention scores
+4. Projects combined values to output space
+
+Can operate on both direct phase inputs and spiking representations.
+See also: [`attend`](@ref) for the core attention computation
+"""
 struct SingleHeadAttention <: LuxCore.AbstractLuxContainerLayer{(:q_proj, :k_proj, :v_proj, :attention, :out_proj)}
     q_proj
     k_proj
@@ -648,6 +812,30 @@ function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
     return x, merge(st_attn, st_ff)
 end
 
+"""
+    train(model, ps, st, train_loader, loss, args; optimiser=Optimisers.Adam, verbose=false, sample_gradients=0)
+
+Train a phase-based neural network using gradient descent.
+
+# Arguments
+- `model`: Network model (any Lux.jl compatible architecture)
+- `ps`: Model parameters
+- `st`: Model state
+- `train_loader`: Data loader providing (x, y) batches
+- `loss`: Loss function(x, y, model, params, state)
+- `args::Args`: Training configuration
+- `optimiser`: Optimization algorithm (default: Adam)
+- `verbose::Bool`: Whether to print loss values
+- `sample_gradients::Int`: Frequency of gradient sampling (0 to disable)
+
+# Returns
+- `losses`: Array of loss values during training
+- `ps`: Updated parameters
+- `st`: Updated state
+- `gradients`: Sampled gradients if enabled
+
+Automatically handles CPU/GPU device placement based on args.use_cuda.
+"""
 function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false, sample_gradients::Int = 0)
     if CUDA.functional() && args.use_cuda
        @info "Training on CUDA GPU"
@@ -712,6 +900,28 @@ function (mp::MinPool)(x, ps, st)
     return y
 end 
 
+"""
+    TrackOutput{L<:Lux.AbstractLuxLayer} <: Lux.AbstractLuxLayer
+
+Wrapper layer that records intermediate outputs during forward passes.
+Useful for analyzing internal representations in phase networks.
+
+# Fields
+- `layer::L`: The layer whose outputs to track
+
+# State
+Maintains a tuple of all intermediate outputs in the state.outputs field.
+Each forward pass appends its output to this tuple.
+
+# Usage
+```julia
+tracked_layer = TrackOutput(PhasorDense(64 => 32))
+y, st = tracked_layer(x, ps, st)
+intermediate_outputs = st.outputs  # Access all recorded outputs
+```
+
+Useful for visualization, analysis, and debugging of phase networks.
+"""
 struct TrackOutput{L<:Lux.AbstractLuxLayer} <: Lux.AbstractLuxLayer
     layer::L
 end
@@ -732,6 +942,26 @@ function (t::TrackOutput)(x, ps, st)
     return y, new_st
 end
 
+"""
+    variance_scaling(rng::AbstractRNG, shape::Integer...; mode="avg", scale=0.66f0)
+
+Initialize network weights using variance scaling initialization.
+Adapts the scale based on input/output dimensions to maintain stable variances.
+
+# Arguments
+- `rng::AbstractRNG`: Random number generator
+- `shape::Integer...`: Dimensions of weight matrix/tensor
+- `mode::String`: Scaling mode ("fan_in", "fan_out", or "avg")
+- `scale::Real`: Base scaling factor (default: 0.66f0)
+
+# Modes
+- "fan_in": Scale based on input dimension
+- "fan_out": Scale based on output dimension
+- "avg": Scale based on average of input/output dimensions
+
+Returns weights initialized from truncated normal distribution with
+computed standard deviation.
+"""
 function variance_scaling(rng::AbstractRNG, shape::Integer...; mode::String = "avg", scale::Real = 0.66f0)
     fan_in = shape[end]
     fan_out = shape[1]
