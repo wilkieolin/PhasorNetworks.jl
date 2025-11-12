@@ -608,14 +608,15 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
     end
 
     num = 0
-    correct = zeros(Int64, repeats+1)
-    ls = zeros(Float32, (1,repeats+1))
+    correct = zeros(Int64, repeats)
+    ls = zeros(Float32, (1,repeats))
 
     for (x, y) in data_loader
         x = x |> dev
         y = y |> dev
         ŷ, _ = model(x, ps, st)
-        ls .+= sum(stack(zero_nans.(loss_fn(ŷ, y))), dims=1) #sum across batches
+        loss_vals = stack(zero_nans.(loss_fn(ŷ, y)))
+        ls .+= sum(loss_vals, dims=1)[:,1:repeats] #sum across batches & remove last incomplete cycle if present
         model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct .+= model_correct
         num += answers
