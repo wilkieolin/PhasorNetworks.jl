@@ -103,7 +103,7 @@ Compute correlation between static similarity matrix and each time step of dynam
 # Returns
 Vector of correlation values, one for each time step
 """
-function similarity_correlation(static_similarity::Matrix{<:Real}, dynamic_similarity::Array{<:Real,3})
+function similarity_correlation(static_similarity::AbstractMatrix{<:Real}, dynamic_similarity::AbstractArray{<:Real,3})
     n_steps = axes(dynamic_similarity, 3)
     cor_vals = [cor_realvals(static_similarity |> vec, dynamic_similarity[:,:,i] |> vec) for i in n_steps]
     return cor_vals
@@ -123,7 +123,7 @@ Vector of correlation values, one for each cycle
 
 See also: [`cor_realvals`](@ref) for handling NaN values in correlation
 """
-function cycle_correlation(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractMatrix{<:Real,3})
+function cycle_correlation(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractArray{<:Real,3})
     n_cycles = axes(dynamic_phases, 3)
     cor_vals = [cor_realvals(static_phases |> vec, dynamic_phases[:,:,i] |> vec) for i in n_cycles]
     return cor_vals
