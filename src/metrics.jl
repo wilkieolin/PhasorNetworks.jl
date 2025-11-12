@@ -123,7 +123,7 @@ Vector of correlation values, one for each cycle
 
 See also: [`cor_realvals`](@ref) for handling NaN values in correlation
 """
-function cycle_correlation(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
+function cycle_correlation(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractMatrix{<:Real,3})
     n_cycles = axes(dynamic_phases, 3)
     cor_vals = [cor_realvals(static_phases |> vec, dynamic_phases[:,:,i] |> vec) for i in n_cycles]
     return cor_vals
@@ -599,7 +599,7 @@ Tuple of (losses, accuracies) where:
 Useful for assessing the reliability of spiking network performance.
 """
 function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook, repeats::Int)
-    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim)
+    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cdev
 
     if args.use_cuda && CUDA.functional()
         dev = gdev
@@ -608,14 +608,14 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
     end
 
     num = 0
-    correct = zeros(Int64, repeats)
-    ls = zeros(Float32, (1,repeats))
+    correct = zeros(Int64, repeats+1)
+    ls = zeros(Float32, (1,repeats+1))
 
     for (x, y) in data_loader
         x = x |> dev
         y = y |> dev
         ŷ, _ = model(x, ps, st)
-        ls .+= sum(stack(cdev(loss_fn(ŷ, y))), dims=1) #sum across batches
+        ls .+= sum(stack(zero_nans.(loss_fn(ŷ, y))), dims=1) #sum across batches
         model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct .+= model_correct
         num += answers
