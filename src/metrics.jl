@@ -618,7 +618,7 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
         loss_vals = stack(zero_nans.(loss_fn(ŷ, y)))
         ls .+= sum(loss_vals, dims=1)[:,1:repeats] #sum across batches & remove last incomplete cycle if present
         model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
-        correct .+= model_correct
+        correct .+= model_correct[1:repeats]
         num += answers
     end
 
