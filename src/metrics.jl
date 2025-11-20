@@ -386,6 +386,12 @@ function evaluate_loss(predictions::AbstractArray, truth::AbstractArray, encodin
     end
 end
 
+function evaluate_loss(predictions::AbstractVector{<:AbstractArray}, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
+    #if we have an ODE solution vector, stack it and pass it to array dispatch
+    predictions = stack(predictions)
+    return evaluate_loss(predictions, truth, encoding, reduce_dim=reduce_dim)
+end
+
 function evaluate_loss(predictions::SpikingCall, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
     predictions = train_to_phase(predictions) 
     truth = truth
@@ -393,6 +399,13 @@ function evaluate_loss(predictions::SpikingCall, truth::AbstractArray, encoding:
 end
 
 # Prediction functions
+
+function reduce_shape(dimensions::Tuple{Vararg{Int}}, dim::Int)
+    dims = setdiff(Set(1:length(dimensions)), Set(dim))
+    shape = [dimensions[d] for d in dims]
+    return shape
+end
+
 """
     predict_quadrature(phases::AbstractArray; dim::Int=1) -> AbstractArray
 
@@ -411,7 +424,9 @@ function predict_quadrature(phases::AbstractArray; dim::Int=1)
         phases = phases |> cdev
     end
 
+    answer_shape = reduce_shape(size(phases), dim)
     predictions = getindex.(argmin(abs.(phases .- 0.5f0), dims=dim), dim)
+    predictions = reshape(predictions, answer_shape...)
     return predictions
 end
 
@@ -433,7 +448,9 @@ function predict_similarity(sims::AbstractArray; dim::Int=1)
         sims = sims |> cdev
     end
 
+    answer_shape = reduce_shape(size(sims), dim)
     predictions = vec(getindex.(argmax(sims, dims=dim), dim))
+    predictions = reshape(predictions, answer_shape...)
     return predictions
 end
 
@@ -507,20 +524,17 @@ function evaluate_accuracy(values::AbstractArray, truth::AbstractArray, encoding
         truth = truth |> cdev
     end
 
-    @assert ndims(values) >= ndims(truth) "Dimensionality of truth must be able to map onto values"
-    reshape_dims = [d == reduce_dim ? 1 : size(truth,d) for d in 1:ndims(truth)]
-    idx = reshape(getindex.(findall(truth .== 1.0f0), reduce_dim), reshape_dims...)
-    predict_fn = x -> sum(predict(x, encoding, reduce_dim=reduce_dim) .== idx)
-    n_truth = prod([size(truth, d) for d in setdiff(Set(1:ndims(truth)), Set(reduce_dim))])
-
-    if ndims(values) > ndims(truth)
-        dispatch_dims = setdiff(Set(1:ndims(values)), Set(1:ndims(truth))) |> Tuple
-        response = map(predict_fn, eachslice(values, dims=dispatch_dims))
-    else
-        response = predict_fn(values)
-    end
+    predictions = predict(values, encoding, reduce_dim=reduce_dim)
+    idx = getindex.(findall(truth .== 1.0f0), reduce_dim)
+    correct = sum(predictions .== idx, dims=reduce_dim)
+    n_truth = size(predictions, reduce_dim)
     
-    return response, n_truth
+    return correct, n_truth
+end
+
+function evaluate_accuracy(values::AbstractVector{<:AbstractArray}, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
+    values = stack(values)
+    return evaluate_accuracy(values, truth, encoding, reduce_dim=reduce_dim)
 end
 
 function evaluate_accuracy(values::SpikingCall, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
@@ -568,9 +582,9 @@ function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, 
         @assert typeof(ŷ) != SpikingCall "Must call spiking models with SpikingArgs provided"
 
         ls += sum(stack(cdev(loss_fn(ŷ, y)))) #sum across batches
-        model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
-        correct += model_correct
-        num += answers
+        model_correct, n_answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
+        correct += model_correct[1]
+        num += n_answers
     end
 
     return ls / num, correct / num
