@@ -394,7 +394,6 @@ end
 
 function evaluate_loss(predictions::SpikingCall, truth::AbstractArray, encoding::Symbol = :similarity; reduce_dim::Int = 1)
     predictions = train_to_phase(predictions) 
-    truth = truth
     return evaluate_loss(predictions, truth, encoding, reduce_dim=reduce_dim)
 end
 
@@ -612,7 +611,7 @@ Tuple of (losses, accuracies) where:
 
 Useful for assessing the reliability of spiking network performance.
 """
-function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook, repeats::Int)
+function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
     loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cdev
 
     if args.use_cuda && CUDA.functional()
@@ -622,19 +621,21 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
     end
 
     num = 0
-    correct = zeros(Int64, repeats)
-    ls = zeros(Float32, (1,repeats))
+    correct = []
+    ls = []
 
     for (x, y) in data_loader
         x = x |> dev
         y = y |> dev
         ŷ, _ = model(x, ps, st)
-        loss_vals = stack(zero_nans.(loss_fn(ŷ, y)))
-        ls .+= sum(loss_vals, dims=1)[:,1:repeats] #sum across batches & remove last incomplete cycle if present
+        loss_vals = sum.(zero_nans.(loss_fn(ŷ, y)))
+        append!(ls, [loss_vals,])
         model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
-        correct .+= model_correct[1:repeats]
+        append!(correct, model_correct)
         num += answers
     end
 
-    return ls ./ num, correct ./ num
+    correct = stack(correct) ./ num
+    ls = stack(ls) ./ num
+    return ls, correct
 end
