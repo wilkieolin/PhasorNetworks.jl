@@ -9,3 +9,5 @@ figures/*
 *.gif
 .DS_store
 .vscode/*
+coverage/*
+coverage
