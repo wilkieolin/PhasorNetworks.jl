@@ -134,7 +134,7 @@ end
 function spiking_accuracy_test(model, ps, st, test_batch, args)
     @testset "Spiking Accuracy Test" begin
         @info "Running spiking accuracy test..."
-        _, accuracy = spiking_loss_and_accuracy(test_batch, model, ps, st, args, encoding=:quadrature, repeats=repeats)
+        _, accuracy = spiking_loss_and_accuracy(test_batch, model, ps, st, args, encoding=:quadrature)
         #make sure accuracy is above the baseline (~70% for spiking)
         @test accuracy[end-1] > 0.70
     end

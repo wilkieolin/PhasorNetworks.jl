@@ -68,7 +68,7 @@ Used in [`match_offsets`](@ref) to align spike trains for comparison or combinat
 function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
 
-    if typeof(train) == SpikeTrain
+    if !on_gpu(train)
         new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
     else
         new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset)
@@ -530,44 +530,49 @@ end
 # end
 
 """
-    vcat_trains(trains::Array{<:SpikingTypes,1})
+    vcat_trains(trains::SpikingTypes...) -> SpikingTypes
 
-Vertically concatenate multiple spike trains with identical shapes and offsets.
+Concatenate multiple spike trains by combining their spikes into a single train.
+
+All input trains must have identical shapes and offsets. The resulting train
+contains all spikes from all input trains, preserving temporal information.
 
 # Arguments
-- `trains`: Array of spike trains to concatenate
+- `trains::SpikingTypes...`: Variable number of spike trains to concatenate
 
 # Returns
-- A concatenated spike train
+- `SpikeTrain` or `SpikeTrainGPU`: Combined spike train with all input spikes
 
-# Notes
-All input trains must have identical shapes and offsets.
+# Requirements
+- All input trains must have identical shapes
+- All input trains must have identical offsets
 """
-function vcat_trains(trains::Array{<:SpikingTypes,1})
+function vcat_trains(trains::SpikeTrain...)
+    n_trains = length(trains)
+    @assert n_trains > 0 "Must provide at least one spike train"
+    
     check_offsets(trains...)
-    n_t = length(trains)
     shape = trains[1].shape
     offset = trains[1].offset
+    
     for t in trains
-        @assert shape == t.shape "Spike trains must have identical shape to be stacked"
-        @assert offset == t.offset "Spike trains must have identical offsets"
+        @assert shape == t.shape "All spike trains must have identical shape"
+        @assert offset == t.offset "All spike trains must have identical offsets"
     end
-
-    new_shape = (n_t, shape[2:end]...)
-    all_indices = []
-
-    for (i, train) in enumerate(trains)
-        old_indices = train.indices
-        #add the new dimension for each index
-        new_indices = [CartesianIndex((i, Tuple(idx)[2:end]...)) for idx in old_indices]
-        append!(all_indices, new_indices)
+    
+    # Collect all indices and times from all trains
+    all_indices = CartesianIndex[]
+    all_times = Float32[]
+    
+    for train in trains
+        append!(all_indices, train.indices)
+        append!(all_times, train.times)
     end
-
-    all_indices = vcat(all_indices...)
-    all_times = reduce(vcat, collect(t.times for t in trains))
-
-    new_train = SpikeTrain(all_indices, all_times, new_shape, offset)
-    return new_train
+    
+    # Create output train with combined spikes
+    output_train = SpikeTrain(all_indices, all_times, shape, offset)
+    
+    return output_train
 end
 
 function zero_nans(phases::AbstractArray)

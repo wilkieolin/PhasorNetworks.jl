@@ -898,7 +898,62 @@ end
 function (mp::MinPool)(x, ps, st)
     y = -1.0f0 .* mp(-1.0f0 .* x, ps, st)
     return y
-end 
+end
+
+"""
+    (m::Union{MaxPool, MinPool})(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+
+Extend MaxPool to handle SpikeTrain inputs by selecting the spike with maximum
+decoded phase value over the pooling dimensions.
+
+# Arguments
+- `x::SpikingCall`: Input spiking call
+- `ps::LuxParams`: Layer parameters
+- `st::NamedTuple`: Layer state
+
+# Operation
+1. Converts each spike to its corresponding phase value using `train_to_phase`
+2. Finds the maximum phase value over the pooling dimensions
+3. Returns a new SpikeTrain with the selected spike(s), preserving temporal offset
+
+# Returns
+- `output_train::SpikeTrain`: Spike train containing only maximum phase spikes
+- `st::NamedTuple`: Unchanged state
+"""
+function (pool::Union{MaxPool, MinPool})(call::SpikingCall, params::LuxParams, state::NamedTuple)
+    if on_gpu(call.train)
+        #move to CPU if necessary
+        gpu = true
+        train = SpikeTrain(call.train)
+    else
+        gpu = false
+        train = call.train
+    end
+
+    #calculate the phase values represented by each spike in each resonant period
+    phases = train_to_phase(train, spk_args=call.spk_args)
+    max_phases = map(x -> pool(x, params, state)[1],
+                    eachslice(phases, dims=ndims(phases)))
+    #convert those extremum phase values back to spikes
+    trains = map(x -> phase_to_train(x, 
+                                    spk_args=call.spk_args,
+                                    repeats=1,
+                                    offset=call.train.offset),
+                                    max_phases)
+    #look up what the offset for that spiking cycle is & adjust the spikes to match
+    n_slices = size(phases, ndims(phases))
+    cycles = generate_cycles(call.t_span, call.spk_args, call.train.offset)[1:n_slices]
+    trains = map(x -> delay_train(x[1], call.spk_args.t_period * x[2], 0.0f0),
+                        zip(trains, cycles))
+    #concatenate each train together for a single pooled output
+    new_train = vcat_trains(trains...)
+
+    if gpu
+        new_train = SpikeTrainGPU(new_train)
+    end
+    new_call = SpikingCall(new_train, call.spk_args, call.t_span)
+    return new_call, state
+end
 
 """
     TrackOutput{L<:Lux.AbstractLuxLayer} <: Lux.AbstractLuxLayer

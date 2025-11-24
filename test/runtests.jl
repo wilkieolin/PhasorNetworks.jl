@@ -40,11 +40,18 @@ include("data.jl")
 include("domain_tests.jl")
 include("vsa_tests.jl")
 include("network_tests.jl")
+#include("PROPOSED_metrics_tests.jl")
+#include("PROPOSED_network_layers_tests.jl")
+#include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
     domain_tests()
     vsa_tests()
     network_tests()
+    #new tests
+    #metrics_tests()
+    #network_layers_tests()
+    #spiking_operations_tests()
 
     if CUDA.functional()
         @info "CUDA device detected and functional. Running CUDA tests..."
