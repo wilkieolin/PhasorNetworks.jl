@@ -469,31 +469,32 @@ struct PhasorFixed <: Lux.AbstractLuxLayer
     layer
     init_weight
     return_solution::Bool
-    static::Bool
+    trainable::Bool
 end
 
-function PhasorFixed(n::Int, spk_args::SpikingArgs, return_solution::Bool = true, static::Bool = true)
-    if static
+function PhasorFixed(n::Int, return_solution::Bool = true, trainable::Bool = false)
+    if !trainable
         init_w = () -> Matrix(ones(Float32, 1) .* I(n))
     else
         init_w = rng -> square_variance(rng, n)
     end
         
-    return PhasorFixed(n, Dense(n => n), init_w, return_solution, static)
+    return PhasorFixed(n, Dense(n => n), init_w, return_solution, trainable)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, layer::PhasorFixed)
-    if layer.static
+    if !layer.trainable
         params = NamedTuple()
     else
-        params = (weight = layer.init_weight(rng))
+        params = (weight = layer.init_weight(rng),)
     end
+    return params
 end
 
 # Calls
 
 function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    if a.static
+    if !a.trainable
         y = oscillator_bank(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
     else    
         y = oscillator_bank(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
@@ -502,8 +503,8 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     return y, state
 end
 
-function (a::PhasorFixed)(x::SpikingCall, params::LuxParams)
-    if a.static
+function (a::PhasorFixed)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+    if !a.trainable
         y = v_bundle_project(x, a.init_weight(), zeros(ComplexF32, (a.shape)), return_solution = a.return_solution)
     else
         y = v_bundle_project(x, params, spk_args = x.spk_args, return_solution = a.return_solution)
