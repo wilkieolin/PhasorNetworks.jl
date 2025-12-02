@@ -173,7 +173,7 @@ function zero_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
 end
 
 function ComplexBias(dims::Tuple{Vararg{Int}}; init_bias = default_bias)
-    if init_bias == nothing
+    if init_bias === nothing
         init_bias = (rng, dims) -> zeros(ComplexF32, dims)
     end
 
@@ -440,77 +440,138 @@ end
 
 
 """
-    PhasorFixed <: Lux.AbstractLuxLayer
+    PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:bias,)}
 
-A layer that responds to input currents or spikes with a predetermined phase pattern.
-The weights are fixed (e.g., identity matrix) and non-trainable.
+A dense layer with non-trainable weights stored in state.
+The weights are fixed after initialization and not updated during training.
 
 # Fields
-- `shape::Int`: Layer dimension
-- `layer`: The underlying fixed phase pattern layer
-- `init_weight`: Function to initialize the fixed weight pattern
-- `return_solution::Bool`: Whether to return the phase solution
-- `static::Bool`: If true, maintains fixed phase relationships
+- `shape::Pair{<:Integer,<:Integer}`: Input => Output dimensions
+- `bias`: Complex-valued bias for phase shift (optional)
+- `activation`: Function to convert complex values to phases
+- `use_bias::Bool`: Whether to apply complex bias
+- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+- `init_weight`: Function to initialize fixed weights
+
+# Constructor
+```julia
+PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=identity;
+    init_weight=nothing,  # Custom weight initialization, e.g. identity_init
+    init_bias=default_bias,
+    use_bias=false,
+    return_solution=false)
+```
+
+# Weight Initialization
+- `init_weight=nothing`: Uses Glorot uniform initialization
+- `init_weight=identity_init`: Creates identity matrix (requires square shape)
+- Custom function: `(rng, in_dim, out_dim) -> weight_matrix`
 
 # Forward Pass
-1. Receives input currents or spikes
-2. Neurons respond according to fixed weight pattern
-3. Produces output phases and spikes based on predetermined pattern
+1. Converts input phases to complex numbers
+2. Applies fixed linear transformation separately to real/imaginary parts
+3. Optionally applies complex bias
+4. Applies activation function to map back to phases
 
 # Use Cases
 - Fixed pattern detection
 - Identity or permutation mapping
-- Simple phase transformations with predetermined patterns
+- Non-trainable projection layers
+- Frozen layers in transfer learning
 
-See also: [`SpikeTrain`](@ref) for spike input/output format
+See also: [`PhasorDense`](@ref) for trainable version
 """
-struct PhasorFixed <: Lux.AbstractLuxLayer
-    shape::Int
-    layer
-    init_weight
-    return_solution::Bool
-    trainable::Bool
+
+struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
+    layer # the conventional layer used to transform inputs (fixed weights)
+    bias # the bias in the complex domain used to shift away from the origin
+    activation # the activation function which converts complex values to real phases
+    use_bias::Bool # apply the layer with the bias if true
+    return_solution::Bool # return the full ODE solution from a spiking input
+    init_weight # function to initialize fixed weights, or nothing for default
 end
 
-function PhasorFixed(n::Int, return_solution::Bool = true, trainable::Bool = false)
-    if !trainable
-        init_w = () -> Matrix(ones(Float32, 1) .* I(n))
+function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity; 
+                     return_solution::Bool = false, 
+                     init_bias = default_bias, 
+                     use_bias::Bool = false,
+                     init_weight = nothing,
+                     kwargs...)
+    # Create a fixed Dense layer with use_bias=false and weights initialized later
+    layer = Dense(shape, identity; use_bias=false, kwargs...)
+    bias = ComplexBias((shape[2],); init_bias = init_bias)
+    return PhasorFixed(layer, bias, activation, use_bias, return_solution, init_weight)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorFixed)
+    # No trainable parameters - weights are stored in state
+    return NamedTuple()
+end
+
+function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
+    # Initialize weights in state (non-trainable)
+    in_dim = l.layer.in_dims
+    out_dim = l.layer.out_dims
+    if l.init_weight === nothing
+        # Default: Glorot uniform initialization
+        weight = glorot_uniform(rng, out_dim, in_dim)
     else
-        init_w = rng -> square_variance(rng, n)
+        # Custom initialization
+        weight = l.init_weight(rng, in_dim, out_dim)
     end
-        
-    return PhasorFixed(n, Dense(n => n), init_w, return_solution, trainable)
+    
+    # Initialize bias parameters (stored in state, non-trainable)
+    ps_bias = Lux.initialparameters(rng, l.bias)
+    st_bias = Lux.initialstates(rng, l.bias)
+    
+    # Store weight in a nested structure matching what oscillator_bank expects
+    return (weight = weight, layer = (weight = weight,), bias_params = ps_bias, bias = st_bias)
 end
 
-function Lux.initialparameters(rng::AbstractRNG, layer::PhasorFixed)
-    if !layer.trainable
-        params = NamedTuple()
+function (a::PhasorFixed)(x::AbstractArray, params::LuxParams, state::NamedTuple)
+    xz = angle_to_complex(x)
+    
+    # Apply fixed weights from state
+    y_real = state.weight * real.(xz)
+    y_imag = state.weight * imag.(xz)
+    y = y_real .+ 1.0f0im .* y_imag
+
+    if a.use_bias
+        # Use bias params from state (non-trainable)
+        y_biased, st_updated_bias = a.bias(y, state.bias_params, state.bias)
+        y_activated = a.activation(y_biased)
+        st_new = (weight = state.weight, bias_params = state.bias_params, bias = st_updated_bias)
     else
-        params = (weight = layer.init_weight(rng),)
-    end
-    return params
-end
-
-# Calls
-
-function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    if !a.trainable
-        y = oscillator_bank(x.current, a.init_weight(), zeros(ComplexF32, (a.shape)), spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
-    else    
-        y = oscillator_bank(x.current, params, spk_args=x.spk_args, tspan = x.t_span, return_solution = a.return_solution)
+        y_activated = a.activation(y)
+        st_new = state
     end
 
-    return y, state
+    return y_activated, st_new
 end
 
 function (a::PhasorFixed)(x::SpikingCall, params::LuxParams, state::NamedTuple)
-    if !a.trainable
-        y = v_bundle_project(x, a.init_weight(), zeros(ComplexF32, (a.shape)), return_solution = a.return_solution)
-    else
-        y = v_bundle_project(x, params, spk_args = x.spk_args, return_solution = a.return_solution)
+    current_call = CurrentCall(x)
+    return a(current_call, params, state)
+end
+
+function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    # Create a pseudo-params structure for oscillator_bank that includes weights from state
+    # The layer field must contain weight for the Dense layer call in oscillator_bank
+    fixed_params = (layer = (weight = state.weight,), bias = state.bias_params)
+    # Create a state structure that oscillator_bank expects (with layer field)
+    fixed_state = (layer = NamedTuple(), bias = state.bias)
+    
+    # Pass the fixed params to the solver
+    sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
+    if a.return_solution
+        u = sol.u
+        t = sol.t
+        return (u, t), state
     end
 
-    return y, state
+    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
+    next_call = SpikingCall(train, x.spk_args, x.t_span)
+    return next_call, state
 end
 
 ###
