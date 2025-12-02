@@ -280,9 +280,9 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_solution
-        y = a.activation.(sol.u)
-        t = sol.t
-        return (y, t), state
+        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        y = a.activation.(u)
+        return y, state
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
@@ -368,9 +368,9 @@ function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_solution
-        y = a.activation.(sol.u)
-        t = sol.t
-        return (y, t), state
+        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        y = a.activation.(u)
+        return y, state
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
@@ -564,9 +564,9 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     # Pass the fixed params to the solver
     sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_solution
-        y = a.activation.(sol.u)
-        t = sol.t
-        return (y, t), state
+        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        y = a.activation.(u)
+        return y, state
     end
 
     train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)

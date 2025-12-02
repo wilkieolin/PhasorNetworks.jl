@@ -506,6 +506,18 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     return phase
 end
 
+function unrotate_solution(potentials::AbstractVector{<:AbstractArray}, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
+    current_zeros = similar(potentials[1], ComplexF32, (length(ts)))
+
+    ignore_derivatives() do
+        #find the angle of a neuron representing 0 phase at the current moment in time
+        current_zeros = phase_to_potential(0.0f0, ts, offset=offset, spk_args=spk_args)
+    end
+
+    potentials = current_zeros .* conj.(potentials)
+    return potentials
+end
+
 """
     potential_to_phase(ut::Tuple{<:AbstractVector{<:AbstractArray}, <:AbstractVector}; spk_args::SpikingArgs, kwargs...)
 
