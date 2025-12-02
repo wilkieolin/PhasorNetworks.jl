@@ -45,8 +45,8 @@ include("network_tests.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
-    #domain_tests()
-    #vsa_tests()
+    domain_tests()
+    vsa_tests()
     network_tests()
     #new tests
     #metrics_tests()
