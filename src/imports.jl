@@ -17,3 +17,9 @@ using Zygote: withgradient
 using Random: Xoshiro
 
 import LuxLib: dropout
+
+# Define devices
+cdev = cpu_device()
+if CUDA.functional()
+    gdev = gpu_device()
+end
