@@ -92,8 +92,10 @@ struct SpikeTrainGPU{N}
                             offset::Real)
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
         cu_times_f32 = cu(times_f32)
+        indices = cdev(indices)
+        linear_indices = CuArray(LinearIndices(shape)[indices])
         return new{length(shape)}(cu(indices),
-                CuArray(LinearIndices(shape)[indices]),
+                linear_indices,
                 cu_times_f32,
                 shape,
                 reduce(*, shape),
@@ -246,6 +248,7 @@ struct SpikingArgs
     t_period::Float32
     t_window::Float32
     spk_scale::Float32
+    steepness::Float32
     threshold::Float32
     spike_kernel::Union{Symbol, Function}
     solver # Solver type can be kept generic
@@ -257,6 +260,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                     t_period::Real = 1.0f0,
                     t_window::Real = 0.01f0,
                     spk_scale::Real = 1.0f0,
+                    steepness::Real = 0.05f0,
                     threshold::Real = 0.001f0,
                     spike_kernel = :gaussian,
                     solver = Heun(),
@@ -269,6 +273,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             Float32(t_period),
             Float32(t_window),
             Float32(spk_scale),
+            Float32(steepness),
             Float32(threshold),
             spike_kernel,
             solver,
@@ -308,6 +313,7 @@ function SpikingArgs_NN(; leakage::Real = -0.2f0,
     t_period::Real = 1.0f0,
     t_window::Real = 0.01f0,
     spk_scale::Real = 1.0f0,
+    steepness::Real = 0.05f0,
     threshold::Real = 0.001f0,
     spike_kernel = :gaussian,
     solver = Heun(),
@@ -321,6 +327,7 @@ function SpikingArgs_NN(; leakage::Real = -0.2f0,
             Float32(t_period),
             Float32(t_window),
             Float32(spk_scale),
+            Float32(steepness),
             Float32(threshold),
             spike_kernel,
             solver,
@@ -404,6 +411,17 @@ end
 
 function Base.size(x::LocalCurrent)
     return x.shape
+end
+
+struct SolutionType
+    type::Symbol
+
+    SolutionType(x::Symbol) = if x in [:potential, :current, :phase, :spikes]
+        return new(x)
+    else
+        error("Invalid SolutionType symbol: $x")
+        return nothing
+    end
 end
 
 """

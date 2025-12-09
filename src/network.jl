@@ -219,7 +219,7 @@ Combines a standard dense layer with complex bias and phase-based activation.
 - `bias`: Complex-valued bias for phase shift
 - `activation`: Function to convert complex values to phases
 - `use_bias::Bool`: Whether to apply complex bias
-- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
 
 # Layer Operation
 1. Converts input phases to complex numbers
@@ -234,13 +234,13 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     bias # the bias in the complex domain used to shift away from the origin
     activation # the activation function which converts complex values to real phases
     use_bias::Bool # apply the layer with the bias if true
-    return_solution::Bool # return the full ODE solution from a spiking input
+    return_type::SolutionType # return the full ODE solution from a spiking input
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = :phase, init_bias = default_bias, use_bias::Bool = true, kwargs...)
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorDense(layer, bias, activation, use_bias, return_solution)
+    return PhasorDense(layer, bias, activation, use_bias, return_type)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
@@ -279,15 +279,20 @@ end
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_solution
+    if a.return_type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
+    elseif a.return_type == :potential
+        return sol, state
+    elseif a.return_type == :current
+        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        return f, state
+    else #spiking
+        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        return next_call, state
     end
-
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-    next_call = SpikingCall(train, x.spk_args, x.t_span)
-    return next_call, state
 end
 
 ###
@@ -305,7 +310,7 @@ Implements complex-valued convolution with phase-based activation.
 - `bias`: Complex-valued bias terms
 - `activation`: Phase activation function
 - `use_bias::Bool`: Whether to apply complex bias
-- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
 
 # Implementation
 - Separates input into real/imaginary components
@@ -320,14 +325,14 @@ struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     bias
     activation
     use_bias::Bool
-    return_solution::Bool
+    return_type::SolutionType
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_solution::Bool = false, init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = :phase, init_bias = default_bias, use_bias::Bool = true, kwargs...)
     #construct the convolutional layer
     layer = Conv(k, chs, identity; use_bias=false, kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
-    return PhasorConv(layer, bias, activation, use_bias, return_solution)
+    return PhasorConv(layer, bias, activation, use_bias, return_type)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorConv)
@@ -367,15 +372,20 @@ end
 function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_solution
+    if a.return_type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
+    elseif a.return_type == :potential
+        return sol, state
+    elseif a.return_type == :current
+        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        return f, state
+    else #spiking
+        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        return next_call, state
     end
-
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-    next_call = SpikingCall(train, x.spk_args, x.t_span)
-    return next_call, state
 end
 
 ###
@@ -408,7 +418,8 @@ See also: [`similarity_outer`](@ref) for similarity computation
 """
 struct Codebook <: LuxCore.AbstractLuxLayer
     dims
-    Codebook(x::Pair{<:Int, <:Int}) = new(x)
+    return_type::SolutionType
+    Codebook(x::Pair{<:Int, <:Int}; return_type::SolutionType = :phase) = new(x, return_type)
 end
 
 function Base.show(io::IO, cb::Codebook)
@@ -435,7 +446,15 @@ end
 
 function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     code_currents = phase_to_current(state.codes, spk_args=x.spk_args, offset=x.current.offset, tspan=x.t_span)
-    return similarity_outer(x, code_currents), state
+    similarities = similarity_outer(x, code_currents)
+    
+    if cb.return_type == :phase
+        return similarities, state
+    else  # For spiking output, convert similarities to spike train
+        train = phase_to_train(similarities, spk_args=x.spk_args, repeats=1, offset=x.current.offset)
+        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        return next_call, state
+    end
 end
 
 
@@ -450,7 +469,7 @@ The weights are fixed after initialization and not updated during training.
 - `bias`: Complex-valued bias for phase shift (optional)
 - `activation`: Function to convert complex values to phases
 - `use_bias::Bool`: Whether to apply complex bias
-- `return_solution::Bool`: Whether to return full ODE solution for spiking inputs
+- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
 - `init_weight`: Function to initialize fixed weights
 
 # Constructor
@@ -459,7 +478,7 @@ PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=identity;
     init_weight=nothing,  # Custom weight initialization, e.g. identity_init
     init_bias=default_bias,
     use_bias=false,
-    return_solution=false)
+    return_type=:phase)  # :phase, :potential, :current, or :spiking
 ```
 
 # Weight Initialization
@@ -487,12 +506,12 @@ struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
     bias # the bias in the complex domain used to shift away from the origin
     activation # the activation function which converts complex values to real phases
     use_bias::Bool # apply the layer with the bias if true
-    return_solution::Bool # return the full ODE solution from a spiking input
+    return_type::SolutionType # the type of solution to return from a spiking input
     init_weight # function to initialize fixed weights, or nothing for default
 end
 
 function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity; 
-                     return_solution::Bool = false, 
+                     return_type::SolutionType = :phase, 
                      init_bias = default_bias, 
                      use_bias::Bool = false,
                      init_weight = nothing,
@@ -500,7 +519,7 @@ function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity;
     # Create a fixed Dense layer with use_bias=false and weights initialized later
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorFixed(layer, bias, activation, use_bias, return_solution, init_weight)
+    return PhasorFixed(layer, bias, activation, use_bias, return_type, init_weight)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorFixed)
@@ -563,15 +582,20 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     
     # Pass the fixed params to the solver
     sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_solution
+    if a.return_type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
+    elseif a.return_type == :potential
+        return sol, state
+    elseif a.return_type == :current
+        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        return f, state
+    else #spiking
+        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        return next_call, state
     end
-
-    train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-    next_call = SpikingCall(train, x.spk_args, x.t_span)
-    return next_call, state
 end
 
 ###
@@ -669,11 +693,11 @@ struct ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
     ff
 end
 
-function ResidualBlock(dimensions::Tuple{Vararg{Int}};)
+function ResidualBlock(dimensions::Tuple{Vararg{Int}}, activation::Function; kwargs...)
     @assert length(dimensions) >= 2 "Must have at least 1 layer"
     #construct a Phasor MLP based on the given dimensions
     pairs = [dimensions[i] => dimensions[i+1] for i in 1:length(dimensions) - 1]
-    layers = [PhasorDense(pair) for pair in pairs]
+    layers = [PhasorDense(pair, activation, kwargs...) for pair in pairs]
     ff = Chain(layers...)
 
     return ResidualBlock(ff)
@@ -682,20 +706,33 @@ end
 function (rb::ResidualBlock)(x, ps, st)
     # MLP path
     ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
-    x = v_bind(x, ff_out)
+    y = v_bind(x, ff_out)
     
-    return x, st_ff
+    return y, st_ff
 end
 
 """
 Phasor QKV Attention
 """
+function score_scale(scores::AbstractArray{<:Real,3}; scale::AbstractVector{<:Real})
+    d_k = size(scores,1)
+    return exp.(scale .* scores) ./ d_k
+end
+
+function score_scale(potential::AbstractArray{<:Complex,3}, scores::AbstractArray{<:Real,3}; scale::AbstractVector)
+    @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
+
+    scores = permutedims(scores, (2,1,3))
+    d_k = size(scores,1)
+    scores = exp.(scale .* scores) ./ d_k
+    scaled = batched_mul(potential, scores)
+    return scaled
+end
 
 function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::AbstractArray=[1.0f0,])
     #compute qk scores
     #produces (qt kt b)
-    d_k = size(k,2)
-    scores = exp.(scale .* similarity_outer(q, k, dims=2)) ./ d_k
+    scores = score_scale(similarity_outer(q, k, dims=2), scale=scale)
     #do complex-domain matrix multiply of values by scores (kt v b)
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
@@ -705,15 +742,7 @@ function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::Abs
     return output, scores
 end
 
-function score_scale(potential::CuArray{<:Complex,3}, scores::CuArray{<:Real,3}; d_k::Int, scale::AbstractArray=[1.0f0,])
-    @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
-    scores = permutedims(scores, (2,1,3))
-    d_k = size(scores,1)
-    scores = exp.(scale .* scores) ./ d_k
-    scaled = batched_mul(potential, scores)
-    return scaled
-end
 
 """
     attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args, tspan, return_solution=false, scale=[1.0f0]) -> Tuple
