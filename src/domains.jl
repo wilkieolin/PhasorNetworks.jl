@@ -120,6 +120,52 @@ function realvec_to_cmpx(u::Array{<:Real})
     return mat
 end
 
+"""
+    gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
+    gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real) -> Array{Float32}
+    arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real) -> Array{Float32}
+
+Family of kernel functions for computing spike-induced currents.
+
+# Arguments
+- `x`: Spike times or phase values
+- `t`: Current time (or vector of times for _vec variant)
+- `t_sigma`: Width parameter of the kernel
+
+# Variants
+- `gaussian_kernel`: Standard Gaussian kernel for spike times
+- `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
+- `arc_gaussian_kernel`: Circular/periodic version using sine distance
+
+See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
+"""
+function gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real)
+    i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
+    return i
+end
+
+function gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real)
+    i = exp.(-1.0f0 .* ((ts' .- x) / (2.0f0 .* t_sigma)).^2.0f0)
+    return i
+end
+
+function arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
+    i = exp.(-1.0f0 .* (sin.(0.5f0 * pi_f32 .* (t .- x)) / (2.0f0 .* t_sigma)).^2.0f0)
+    return i
+end
+
+# Converts membrane potential to current by multiplying a sigmoidal function over
+# absolute magnitude with a gaussian function over the complex angle
+function potential_to_current(potential::AbstractArray{<:Complex}; spk_args::SpikingArgs)
+    steepness = spk_args.steepness
+    threshold = spk_args.threshold
+    phase_window = spk_args.t_window / spk_args.t_period
+    abs_scale = sigmoid_fast((abs.(potential) .- threshold) ./ steepness)
+    phase_scale = exp.(-1.0f0 .* (complex_to_angle(potential).^2 / (2.0f0 * phase_window ^ 2.0f0)))
+    current = abs_scale .* phase_scale
+    return current
+end 
+
 ###
 ### PHASE - SPIKE
 ###
@@ -373,28 +419,28 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
     shape = size(phases)
     
     function inner(t::Real)
-        output = similar(phases)
+        p = time_to_phase([t,], spk_args = spk_args, offset = offset)[1]
+        current_kernel = x -> arc_gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
+        impulses = current_kernel(phases)
 
         ignore_derivatives() do
-            p = time_to_phase([t,], spk_args = spk_args, offset = offset)[1]
-            current_kernel = x -> arc_gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
-            impulses = current_kernel(phases)
-
             if zeta > 0.0f0
                 noise = zeta .* randn(rng, Float32, size(impulses))
                 impulses .+= noise
             end
-            
-            output .= impulses
         end
 
-        return output
+        return impulses
     end
 
     current = LocalCurrent(inner, shape, offset)
     call = CurrentCall(current, spk_args, tspan)
 
     return call
+end
+
+function (a::CurrentCall)(time::Real)
+    return a.current.current_fn(time)
 end
 
 ###
