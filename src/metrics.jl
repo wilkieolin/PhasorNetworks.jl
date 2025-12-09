@@ -21,7 +21,7 @@ function arc_error(phase::Real)
 end
 
 function arc_error(phases::AbstractArray)
-    return arc_error.(phases)
+    return sin.(pi_f32 .* phases)
 end
 
 """
