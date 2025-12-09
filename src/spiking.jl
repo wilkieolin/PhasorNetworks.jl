@@ -24,7 +24,11 @@ function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, 
     return bias
 end
 
-function check_offsets(x::SpikeTrain, y::SpikeTrain)
+function check_offsets(x::SpikingCall, y::SpikingCall)
+    return check_offsets(x.train, y.train)
+end
+
+function check_offsets(x::Union{<:SpikeTrain, SpikeTrainGPU}, y::Union{<:SpikeTrain, <:SpikeTrainGPU})
     if x.offset != y.offset
         return false
     else
@@ -32,7 +36,7 @@ function check_offsets(x::SpikeTrain, y::SpikeTrain)
     end
 end
 
-function check_offsets(x::SpikeTrain...)
+function check_offsets(x::Union{<:SpikeTrain, <:SpikeTrainGPU}...)
     offset = x[1].offset
     for st in x
         if st.offset != offset
@@ -68,7 +72,7 @@ Used in [`match_offsets`](@ref) to align spike trains for comparison or combinat
 function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
 
-    if !on_gpu(train)
+    if !on_gpu(train.indices)
         new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
     else
         new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset)
@@ -141,40 +145,6 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
     times = t[getindex.(spikes, dim)]
     
     return channels, times
-end
-
-"""
-    gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
-    gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real) -> Array{Float32}
-    arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real) -> Array{Float32}
-
-Family of kernel functions for computing spike-induced currents.
-
-# Arguments
-- `x`: Spike times or phase values
-- `t`: Current time (or vector of times for _vec variant)
-- `t_sigma`: Width parameter of the kernel
-
-# Variants
-- `gaussian_kernel`: Standard Gaussian kernel for spike times
-- `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
-- `arc_gaussian_kernel`: Circular/periodic version using sine distance
-
-See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
-"""
-function gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real)
-    i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
-end
-
-function gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real)
-    i = exp.(-1.0f0 .* ((ts' .- x) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
-end
-
-function arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
-    i = exp.(-1.0f0 .* (sin.(0.5f0 * pi_f32 .* (t .- x)) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
 end
 
 function generate_cycles(tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, offset::Real)
