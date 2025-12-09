@@ -2,12 +2,6 @@ include("domains.jl")
 
 const N_THREADS = 256
 
-# Define devices
-cdev = cpu_device()
-if CUDA.functional()
-    gdev = gpu_device()
-end
-
 """
     on_gpu(args...) -> Bool
 
@@ -84,6 +78,23 @@ function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_
     @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
     
     return output
+end
+
+"""
+    parallel_scatter_add!(output::CuArray, indices::CuArray{Int}, values::CuArray)
+
+In-place version of parallel_scatter_add that reuses a pre-allocated output buffer.
+The output array must be pre-zeroed before calling this function.
+"""
+function parallel_scatter_add!(output::CuArray, indices::CuArray{Int}, values::CuArray)
+    @assert length(indices) == length(values) "Length of indices and values must match"
+    
+    threads = 256
+    blocks = cld(length(indices), threads)
+    
+    @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
+    
+    return nothing
 end
 
 function interference_kernel(A, B, output, X, M, N, D)
@@ -187,6 +198,40 @@ function spike_current(train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     current = reshape(current, train.shape)
     
     return current
+end
+
+"""
+    spike_current!(output::CuArray, train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs,
+                   currents_buffer::CuArray, scatter_buffer::CuArray)
+
+In-place version of spike_current that reuses pre-allocated buffers to avoid
+GPU memory allocations during ODE integration. This is critical for performance
+when spike_current is called many times per simulation.
+
+# Arguments
+- `output::CuArray`: Pre-allocated output array with shape matching train.shape
+- `train::SpikeTrainGPU`: Input spike train
+- `t::Float32`: Current time
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+- `currents_buffer::CuArray`: Pre-allocated buffer for kernel values (size = n_spikes)
+- `scatter_buffer::CuArray`: Pre-allocated buffer for scatter-add (size = linear_shape)
+"""
+function spike_current!(output::CuArray{Float32}, train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs,
+                        currents_buffer::CuArray{Float32}, scatter_buffer::CuArray{Float32})
+    scale = spk_args.spk_scale
+    t_window = Float32(spk_args.t_window)
+    
+    # Compute kernel values in-place
+    currents_buffer .= gaussian_kernel_gpu.(train.times, t, t_window) .* scale
+    
+    # Zero the scatter buffer and accumulate
+    scatter_buffer .= 0.0f0
+    parallel_scatter_add!(scatter_buffer, train.linear_indices, currents_buffer)
+    
+    # Copy reshaped result to output
+    output .= reshape(scatter_buffer, train.shape)
+    
+    return nothing
 end
 
 function bias_current(bias::CuArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
@@ -325,41 +370,82 @@ function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tup
 end
 
 """
-    similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}) -> CuArray{Float32,3}
+    similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims=2) -> CuArray{Float32,3}
 
 GPU-optimized pairwise similarity computation between sets of complex-valued vectors.
 Provides a vectorized implementation that is efficient on GPUs and compatible with automatic differentiation.
 
 # Arguments
-- `A::CuArray{ComplexF32,3}`: First set of vectors, shape (D, M, X)
-- `B::CuArray{ComplexF32,3}`: Second set of vectors, shape (D, N, X)
-where:
-- D: feature dimension
-- M, N: number of vectors in each set
-- X: batch size
+- `A::CuArray{ComplexF32,3}`: First set of vectors
+- `B::CuArray{ComplexF32,3}`: Second set of vectors
+- `dims::Int=2`: Dimension along which to slice vectors for pairwise comparison
+
+For `dims=2` with shape `(features, n_vectors, batch)`:
+- Returns shape `(n_vectors_A, n_vectors_B, batch)` matching CPU implementation
 
 # Implementation Details
 - Uses broadcasting for vectorized operations
 - Avoids custom CUDA kernels for AD compatibility (e.g., with Zygote)
 - Optimizes similarity calculation using trigonometric identities
-- Returns shape (N, X, M) to match CPU implementation ordering
 
 See also: [`similarity_outer`](@ref) in vsa.jl for CPU version
 """
-function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
+function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims::Int=2)
     # Vectorized implementation that avoids custom CUDA kernels and uses
     # broadcasting + reductions. This form is much simpler for AD backends
     # (Zygote) to trace through on GPU arrays.
-    D, M, X = size(A)
-    D_B, N, X_B = size(B)
-    @assert X == X_B "Batch size mismatch (X_A=$X vs X_B=$X_B)"
-    @assert D == D_B "Feature dimension mismatch (D_A=$D vs D_B=$D_B)"
-
+    #
+    # To match CPU behavior: we slice along `dims`, compute pairwise interference
+    # similarity, and return (n_slices_A, n_slices_B, batch).
+    
+    ndA = ndims(A)
+    @assert size(A, dims) > 0 "dims=$dims out of range for array with $(ndA) dimensions"
+    
+    # Determine which dimensions are: slice_dim (dims), feature_dim, batch_dim
+    # For 3D arrays, we have 3 dims. `dims` is the slice dimension.
+    # The remaining two are feature and batch. We assume:
+    # - The dimension before `dims` (or dim 1 if dims=1) is features
+    # - The dimension after `dims` (or last dim if dims=last) is batch
+    # Following CPU convention for dims=2: (features, vectors, batch)
+    
+    if dims == 2
+        # Standard case: (features, vectors, batch)
+        feature_dim = 1
+        batch_dim = 3
+    elseif dims == 1
+        # (vectors, features, batch) - slice along first dim
+        feature_dim = 2
+        batch_dim = 3
+    elseif dims == 3
+        # (features, batch, vectors) - slice along last dim
+        feature_dim = 1
+        batch_dim = 2
+    else
+        error("dims must be 1, 2, or 3 for 3D arrays")
+    end
+    
+    # Get sizes
+    sz_A = size(A)
+    sz_B = size(B)
+    M = sz_A[dims]  # number of slices in A
+    N = sz_B[dims]  # number of slices in B
+    D = sz_A[feature_dim]  # feature dimension
+    X = sz_A[batch_dim]  # batch dimension
+    
+    @assert sz_B[batch_dim] == X "Batch size mismatch"
+    @assert sz_B[feature_dim] == D "Feature dimension mismatch"
+    
+    # Permute arrays to canonical (D, M, X) and (D, N, X) layout for computation
+    perm_to_canonical = (feature_dim, dims, batch_dim)
+    
+    A_canonical = permutedims(A, perm_to_canonical)  # -> (D, M, X)
+    B_canonical = permutedims(B, perm_to_canonical)  # -> (D, N, X)
+    
     # Separate into real and imaginary parts
-    realA = real.(A)  # (D, M, X)
-    imagA = imag.(A)
-    realB = real.(B)  # (D, N, X)
-    imagB = imag.(B)
+    realA = real.(A_canonical)  # (D, M, X)
+    imagA = imag.(A_canonical)
+    realB = real.(B_canonical)  # (D, N, X)
+    imagB = imag.(B_canonical)
 
     # Reshape for broadcasting to (D, M, N, X)
     realA4 = reshape(realA, D, M, 1, X)
@@ -378,49 +464,54 @@ function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3})
     sq_clamped = clamp.(sq, 0.0f0, 4.0f0)
     sim_per_d = 0.5f0 .* sq_clamped .- 1.0f0  # (D, M, N, X)
 
-    # Average over the D dimension
+    # Average over the D (feature) dimension
     sim_avg = mean(sim_per_d, dims=1)  # (1, M, N, X)
     sim_avg = dropdims(sim_avg, dims=1) # (M, N, X)
 
-    # Match CPU implementation ordering: CPU stacks and then permutes to
-    # (slice_y_index, batch_index, slice_x_index) using (2,3,1).
-    # GPU current sim_avg is (M, N, X) where M corresponds to slices of A
-    # and N to slices of B. Permute to match CPU's batch-last ordering.
-    sim_avg = permutedims(sim_avg, (2,3,1)) # -> (N, X, M)
-
+    # CPU returns (M, N, X) = (n_slices_A, n_slices_B, batch)
+    # Our sim_avg is already (M, N, X), so no permutation needed
     return sim_avg
 end
 
-function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2})
+function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; dims::Int=2)
     # Treat 2D inputs as 3D with a singleton batch dimension and delegate
     # to the vectorized 3D implementation.
-    D_A, M = size(A)
-    D_B, N = size(B)
-    @assert D_A == D_B "Feature dimension mismatch (D_A=$D_A vs D_B=$D_B)"
-
-    A3 = reshape(A, D_A, M, 1)
-    B3 = reshape(B, D_B, N, 1)
-
-    out3 = similarity_outer(A3, B3)
-
-    # After the 3D implementation permutation, out3 will have shape
-    # (N, 1, M). Reshape to (N, M) to match the CPU 2D similarity_outer
-    # which returns permuted result (dims swapped)
-    return reshape(out3, size(out3,1), size(out3,3))
+    # 
+    # For dims=2 (default): input is (features, vectors)
+    # We add singleton batch dim at the end -> (features, vectors, 1)
+    # Output from 3D version is (M, N, 1), we squeeze to (M, N)
+    
+    if dims == 2
+        # (features, vectors) -> (features, vectors, 1)
+        A3 = reshape(A, size(A, 1), size(A, 2), 1)
+        B3 = reshape(B, size(B, 1), size(B, 2), 1)
+        out3 = similarity_outer(A3, B3; dims=2)
+    elseif dims == 1
+        # (vectors, features) -> (vectors, features, 1) 
+        # then slice along dim 1
+        A3 = reshape(A, size(A, 1), size(A, 2), 1)
+        B3 = reshape(B, size(B, 1), size(B, 2), 1)
+        out3 = similarity_outer(A3, B3; dims=1)
+    else
+        error("dims must be 1 or 2 for 2D arrays")
+    end
+    
+    # out3 has shape (M, N, 1), squeeze the batch dimension
+    return dropdims(out3, dims=3)
 end
 
 # Support dispatch when inputs are real-valued CuArrays by converting to
 # ComplexF32 on the device and delegating to the complex-valued GPU kernels.
-function similarity_outer(A::CuArray{<:Real,3}, B::CuArray{<:Real,3}; dims=2)
+function similarity_outer(A::CuArray{<:Real,3}, B::CuArray{<:Real,3}; dims::Int=2)
     # Convert phase angles to complex representation on GPU and delegate to
     # the complex-valued, vectorized implementation.
     A_c = angle_to_complex(A)
     B_c = angle_to_complex(B)
-    return similarity_outer(A_c, B_c)
+    return similarity_outer(A_c, B_c; dims=dims)
 end
 
-function similarity_outer(A::CuArray{<:Real,2}, B::CuArray{<:Real,2}; dims=2)
+function similarity_outer(A::CuArray{<:Real,2}, B::CuArray{<:Real,2}; dims::Int=2)
     A_c = angle_to_complex(A)
     B_c = angle_to_complex(B)
-    return similarity_outer(A_c, B_c)
+    return similarity_outer(A_c, B_c; dims=dims)
 end
