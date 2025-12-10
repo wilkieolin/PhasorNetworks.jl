@@ -14,8 +14,8 @@ end
 function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     #what times to the bias values correlate to?
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
-    #determine the time within the cycle
-    t = mod(t, spk_args.t_period)
+    #determine the time within the cycle - ensure Float32 to avoid mixed-precision issues
+    t = mod(Float32(t), spk_args.t_period)
 
     #add the active currents, scaled by the gaussian kernel & bias magnitude
     current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
@@ -259,6 +259,8 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
     @assert typeof(spk_args.spike_kernel) <: Function || spk_args.spike_kernel == :gaussian "Unrecognized kernel type, defaulting to gaussian"
     current = zeros(Float32, train.shape)
     scale = spk_args.spk_scale
+    # Ensure t is Float32 to avoid mixed-precision issues
+    t = Float32(t)
 
     ignore_derivatives() do
         #find which channels are active 
@@ -283,6 +285,8 @@ end
 
 function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
     scale = spk_args.spk_scale
+    # Ensure t is Float32 to avoid mixed-precision issues
+    t = Float32(t)
 
     #add currents into the synapses
     current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)

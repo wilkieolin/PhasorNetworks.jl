@@ -419,7 +419,9 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
     shape = size(phases)
     
     function inner(t::Real)
-        p = time_to_phase([t,], spk_args = spk_args, offset = offset)[1]
+        # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
+        t_f32 = Float32(t)
+        p = time_to_phase([t_f32,], spk_args = spk_args, offset = Float32(offset))[1]
         current_kernel = x -> arc_gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
         impulses = current_kernel(phases)
 
