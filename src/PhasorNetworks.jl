@@ -11,6 +11,11 @@ SpikingCall,
 CurrentCall,
 SpikingArgs_NN,
 TrackOutput,
+SolutionType,
+PhaseSolution,
+PotentialSolution,
+SpikingSolution,
+CurrentSolution,
 Args,
 
 #domain conversions

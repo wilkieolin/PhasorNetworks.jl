@@ -416,13 +416,18 @@ end
 struct SolutionType
     type::Symbol
 
-    SolutionType(x::Symbol) = if x in [:potential, :current, :phase, :spikes]
+    SolutionType(x::Symbol) = if x in [:potential, :current, :phase, :spiking]
         return new(x)
     else
         error("Invalid SolutionType symbol: $x")
         return nothing
     end
 end
+
+PhaseSolution = SolutionType(:phase)
+PotentialSolution = SolutionType(:potential)
+CurrentSolution = SolutionType(:current)
+SpikingSolution = SolutionType(:spiking)
 
 """
     CurrentCall

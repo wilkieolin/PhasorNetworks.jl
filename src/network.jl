@@ -237,7 +237,7 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     return_type::SolutionType # return the full ODE solution from a spiking input
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = :phase, init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = SolutionType(:spiking), init_bias = default_bias, use_bias::Bool = true, kwargs...)
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
     return PhasorDense(layer, bias, activation, use_bias, return_type)
@@ -279,13 +279,13 @@ end
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_type == :phase
+    if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
-    elseif a.return_type == :potential
+    elseif a.return_type.type == :potential
         return sol, state
-    elseif a.return_type == :current
+    elseif a.return_type.type == :current
         f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
         return f, state
     else #spiking
@@ -328,7 +328,7 @@ struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     return_type::SolutionType
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = :phase, init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = SolutionType(:spiking), init_bias = default_bias, use_bias::Bool = true, kwargs...)
     #construct the convolutional layer
     layer = Conv(k, chs, identity; use_bias=false, kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
@@ -372,13 +372,13 @@ end
 function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     #pass the params and dense kernel to the solver
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_type == :phase
+    if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
-    elseif a.return_type == :potential
+    elseif a.return_type.type == :potential
         return sol, state
-    elseif a.return_type == :current
+    elseif a.return_type.type == :current
         f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
         return f, state
     else #spiking
@@ -418,8 +418,7 @@ See also: [`similarity_outer`](@ref) for similarity computation
 """
 struct Codebook <: LuxCore.AbstractLuxLayer
     dims
-    return_type::SolutionType
-    Codebook(x::Pair{<:Int, <:Int}; return_type::SolutionType = :phase) = new(x, return_type)
+    Codebook(x::Pair{<:Int, <:Int}) = new(x)
 end
 
 function Base.show(io::IO, cb::Codebook)
@@ -448,13 +447,7 @@ function (cb::Codebook)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     code_currents = phase_to_current(state.codes, spk_args=x.spk_args, offset=x.current.offset, tspan=x.t_span)
     similarities = similarity_outer(x, code_currents)
     
-    if cb.return_type == :phase
-        return similarities, state
-    else  # For spiking output, convert similarities to spike train
-        train = phase_to_train(similarities, spk_args=x.spk_args, repeats=1, offset=x.current.offset)
-        next_call = SpikingCall(train, x.spk_args, x.t_span)
-        return next_call, state
-    end
+    return similarities, state
 end
 
 
@@ -511,7 +504,7 @@ struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
 end
 
 function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity; 
-                     return_type::SolutionType = :phase, 
+                     return_type::SolutionType = SolutionType(:spiking), 
                      init_bias = default_bias, 
                      use_bias::Bool = false,
                      init_weight = nothing,
@@ -582,13 +575,13 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     
     # Pass the fixed params to the solver
     sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
-    if a.return_type == :phase
+    if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
         return y, state
-    elseif a.return_type == :potential
+    elseif a.return_type.type == :potential
         return sol, state
-    elseif a.return_type == :current
+    elseif a.return_type.type == :current
         f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
         return f, state
     else #spiking
@@ -776,7 +769,7 @@ function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::Spi
     #convert the values to potentials
     d_k = size(k)[2]
     values = oscillator_bank(v, tspan=tspan, spk_args=spk_args)
-    #multiply by the scores found at each time step
+    #multiply by the scores found at eachb time step
     output_u = score_scale.(values.u, scores, scale=scale, d_k=d_k)
     if return_solution 
         return output_u 
