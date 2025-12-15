@@ -1,7 +1,3 @@
-include("domains.jl")
-
-const N_THREADS = 256
-
 """
     on_gpu(args...) -> Bool
 
@@ -284,12 +280,11 @@ See also: [`oscillator_bank`](@ref) in spiking.jl for CPU version
 """
 function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
     tspan = tspan |> f32_tspan 
-    update_fn = spk_args.update_fn
 
     #set up compartments for each sample
     u0 = CUDA.zeros(ComplexF32, x.shape)
     #resonate in time with the input spikes
-    dzdt(u, p, t) = update_fn(u) .+ spike_current(x, t, spk_args)
+    dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) .+ spike_current(x, t, spk_args)
 
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
@@ -302,14 +297,12 @@ end
 
 function oscillator_bank(x::SpikeTrainGPU{2}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
     tspan = tspan |> f32_tspan
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
     #get the number of batches & output neurons
     output_shape = (size(w, 1), x.shape[2])
     u0 = CUDA.zeros(ComplexF32, output_shape)
 
     #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
+    dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     #return full solution

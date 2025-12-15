@@ -1,7 +1,3 @@
-include("imports.jl")
-
-pi_f32 = convert(Float32, pi)
-
 """
     Args
 
@@ -253,7 +249,6 @@ struct SpikingArgs
     spike_kernel::Union{Symbol, Function}
     solver # Solver type can be kept generic
     solver_args::Dict
-    update_fn::Function
 end
 
 function SpikingArgs(; leakage::Real = -0.2f0, 
@@ -277,8 +272,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             Float32(threshold),
             spike_kernel,
             solver,
-            solver_args,
-            u -> neuron_constant(Float32(leakage), Float32(t_period)) .* u,)
+            solver_args,)
 end
 
 """
@@ -313,12 +307,13 @@ function SpikingArgs_NN(; leakage::Real = -0.2f0,
     t_period::Real = 1.0f0,
     t_window::Real = 0.01f0,
     spk_scale::Real = 1.0f0,
-    steepness::Real = 0.05f0,
+    steepness::Real = 1000.0f0,
     threshold::Real = 0.001f0,
     spike_kernel = :gaussian,
     solver = Heun(),
     solver_args = Dict(:dt => 0.01f0,
                     :adaptive => false,
+                    :dense => false,
                     :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                     :save_start => true),
     update_fn::Function)
@@ -459,4 +454,20 @@ function Base.size(x::CurrentCall)
     return x.current.shape
 end
 
-PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
+struct PhaseArray{N} <: AbstractArray{Float32, N}
+    data::Array{Float32, N}
+
+    function PhaseArray(data::AbstractArray{<:Real, N}) where N
+        converted = Float32.(data)
+        if any(x -> x < -1 || x > 1, converted)
+            throw(DomainError(converted, "All values must be in [-1, 1]"))
+        end
+        new{N}(converted)
+    end
+end
+
+Base.size(p::PhaseArray) = size(p.data)
+Base.getindex(p::PhaseArray, i::Int) = p.data[i]
+Base.getindex(p::PhaseArray{N}, I::Vararg{Int, N}) where N = p.data[I...]
+
+PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, PhaseArray, ODESolution}

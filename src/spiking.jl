@@ -1,5 +1,3 @@
-include("gpu.jl")
-
 function bias_current(bias::LuxParams, t::Real, t_offset::Real, spk_args::SpikingArgs)
     bias = bias.bias_real .+ 1im .* bias.bias_imag
     return bias_current(bias, t, t_offset, spk_args)
@@ -283,6 +281,14 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
     return current
 end
 
+function resonant_update(u::AbstractArray{<:Complex}, leakage::Real, t_period::Real)
+    return neuron_constant(Float32(leakage), Float32(t_period)) .* u
+end
+
+function resonant_update(u::AbstractArray{<:Complex}, leakage::AbstractArray, t_period::AbstractArray)
+    return neuron_constant(Float32.(leakage), Float32.(t_period)) .* u
+end
+
 function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
     scale = spk_args.spk_scale
     # Ensure t is Float32 to avoid mixed-precision issues
@@ -376,8 +382,6 @@ function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxPar
 end
 
 function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, use_bias::Bool=true)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
     #set up compartments for each sample
     output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
     u0 = similar(output_sample, ComplexF32)
@@ -387,14 +391,38 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
 
     #resonate in time with the input spikes, applying the kernel to the spike current
     function dzdt(u, p, t)
+        if layer.trainable_leakage
+            leak_scale = p.leakage
+        else
+            leak_scale = state.leakage
+        end
+
+        if layer.trainable_period
+            period_scale = p.period
+        else
+            period_scale = state.leakage
+        end
+
         transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
         biasing_current = bias_current(p.bias, t, x.offset, spk_args)
-        return update_fn(u) .+ transformed_current .+ biasing_current
+        return resonant_update(u, leak_scale .* spk_args.leakage, period_scale .* spk_args.t_period) .+ transformed_current .+ biasing_current
     end
 
     function dzdt_nobias(u, p, t)
+        if layer.trainable_leakage
+            leak_scale = p.leakage
+        else
+            leak_scale = state.leakage
+        end
+
+        if layer.trainable_period
+            period_scale = p.period
+        else
+            period_scale = state.leakage
+        end
+
         transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        return update_fn(u) .+ transformed_current
+        return resonant_update(u, leak_scale .* spk_args.leakage, period_scale .* spk_args.t_period) .+ transformed_current
     end
 
      #solve the memory compartment using the base oscillator_bank method
@@ -412,9 +440,6 @@ function oscillator_bank(x::CurrentCall)
 end
 
 function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-
     #call the current function to find if we're on CPU or GPU
     sample = x.current_fn(tspan[1])
     #make the initial potential the bias value
@@ -428,7 +453,7 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     tspan = tspan .+ x.offset
 
     #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
+    dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) + x.current_fn(t)
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
@@ -459,49 +484,6 @@ function oscillator_bank(x::SpikingTypes; tspan::Tuple{<:Real, <:Real}, spk_args
     local_current = LocalCurrent(current_fn, x.shape, x.offset)
     return oscillator_bank(local_current, tspan=tspan, spk_args=spk_args)
 end
-
-# #special version used for ODE layers
-# function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
-#     #set up functions to define the neuron's differential equations
-#     output_shape = (size(params.weight, 1), x.shape[2])
-#     #make the initial potential the bias value
-#     u0 = zeros(ComplexF32, output_shape)
-#     #shift the solver span by the function's time offset
-#     tspan = tspan .+ x.offset
-    
-#     #override spk args with params leakage and frequency if provided
-#     function calc_k(p)
-#         if haskey(p, :leakage) && haskey(p, :t_period)
-#             angular_frequency = 2.0f0 * pi_f32 / p.t_period[1]
-#             k = (p.leakage[1] + 1.0f0im * angular_frequency)
-#         else
-#             k = neuron_constant(spk_args)
-#         end
-#         return k
-#     end
-    
-#     function dzdt(u, p, t)
-#         k = calc_k(p)
-#         du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
-#         return du
-#     end
-
-#     function dzdt_nobias(u, p, t)
-#         k = calc_k(p)
-#         du = k .* u + p.weight * x.current_fn(t)
-#         return du
-#     end
-    
-#     #enable bias if used
-#     if haskey(params, :bias_real) && haskey(params, :bias_imag)
-#         prob = ODEProblem(dzdt, u0, tspan, params)
-#     else
-#         prob = ODEProblem(dzdt_nobias, u0, tspan, params)
-#     end
-    
-#     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-#     return sol
-# end
 
 """
     vcat_trains(trains::SpikingTypes...) -> SpikingTypes

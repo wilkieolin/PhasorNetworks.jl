@@ -1,5 +1,3 @@
-include("vsa.jl")
-
 """
 MakeSpiking - a layer to include in Chains to convert phase tensors
 into SpikeTrains
@@ -234,19 +232,70 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     bias # the bias in the complex domain used to shift away from the origin
     activation # the activation function which converts complex values to real phases
     use_bias::Bool # apply the layer with the bias if true
+    init_leakage::Function # initializer for the values to scale the leakge in spk_args
+    init_period::Function # initializer for the values to scale the t_period in spk_args
+    trainable_leakage::Bool # can the ODE optimizer access leakage in params
+    trainable_period::Bool # can the ODE optimizer access period in params
     return_type::SolutionType # return the full ODE solution from a spiking input
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = SolutionType(:spiking), init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorDense(shape::Pair{<:Integer,<:Integer}, 
+                    activation = identity;
+                    return_type::SolutionType = SolutionType(:spiking),
+                    init_bias = default_bias,
+                    use_bias::Bool = true,
+                    init_leakage = ones32,
+                    init_period = ones32,
+                    trainable_leakage::Bool = false,
+                    trainable_period::Bool = false,
+                    kwargs...)
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorDense(layer, bias, activation, use_bias, return_type)
+    return PhasorDense(layer, 
+                        bias, 
+                        activation,
+                        use_bias,
+                        init_leakage,
+                        init_period,
+                        trainable_leakage,
+                        trainable_period,
+                        return_type)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
+    ps_layer = Lux.initialparameters(rng, l.layer)
+    ps_bias = Lux.initialparameters(rng, l.bias)
+    parameters = (layer = ps_layer, bias = ps_bias,)
+
+    n_out = l.layer.out_dims
+    if l.trainable_leakage
+        ps_leakage = l.init_leakage(rng, n_out,)
+        parameters = merge(parameters, (leakage = ps_leakage,))
+    end
+
+    if l.trainable_period
+        ps_period = l.init_leakage(rng, n_out,)
+        parameters = merge(parameters, (period = ps_period,))
+    end
+    return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
     st_layer = Lux.initialstates(rng, l.layer)
     st_bias = Lux.initialstates(rng, l.bias)
-    return (layer = st_layer, bias = st_bias)
+    state = (layer = st_layer, bias = st_bias,)
+
+    n_out = l.layer.out_dims
+    if !l.trainable_leakage
+        st_leakage = l.init_leakage(rng, n_out,)
+        state = merge(state, (leakage = st_leakage,))
+    end
+
+    if !l.trainable_period
+        st_period = l.init_leakage(rng, n_out,)
+        state = merge(state, (period = st_period,))
+    end
+    return state
 end
 
 # Calls
@@ -281,13 +330,16 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
-        y = a.activation.(u)
+        y = a.activation(stack(u))
         return y, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
-        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        return f, state
+        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
+                                x.spk_args,
+                                x.t_span)
+        return next_call, state
     else #spiking
         train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
         next_call = SpikingCall(train, x.spk_args, x.t_span)
@@ -379,8 +431,11 @@ function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
-        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        return f, state
+        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
+                                x.spk_args,
+                                x.t_span)
+        return next_call, state
     else #spiking
         train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
         next_call = SpikingCall(train, x.spk_args, x.t_span)
@@ -582,8 +637,11 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
-        f = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        return f, state
+        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
+                                x.spk_args,
+                                x.t_span)
+        return next_call, state
     else #spiking
         train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
         next_call = SpikingCall(train, x.spk_args, x.t_span)

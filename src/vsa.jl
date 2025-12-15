@@ -1,5 +1,3 @@
-include("spiking.jl")
-
 """
     v_bind(x::AbstractArray; dims) -> AbstractArray
 

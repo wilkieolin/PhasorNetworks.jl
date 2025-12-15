@@ -1,5 +1,3 @@
-include("types.jl")
-
 """
     angle_to_complex(x::AbstractArray)
 
@@ -160,8 +158,8 @@ function potential_to_current(potential::AbstractArray{<:Complex}; spk_args::Spi
     steepness = spk_args.steepness
     threshold = spk_args.threshold
     phase_window = spk_args.t_window / spk_args.t_period
-    abs_scale = sigmoid_fast((abs.(potential) .- threshold) ./ steepness)
-    phase_scale = exp.(-1.0f0 .* (complex_to_angle(potential).^2 / (2.0f0 * phase_window ^ 2.0f0)))
+    abs_scale = sigmoid_fast((abs.(potential) .- threshold) .* steepness)
+    phase_scale = exp.(-1.0f0 .* (complex_to_angle(potential) .^ 2.0f0 / (2.0f0 * phase_window ^ 2.0f0)))
     current = abs_scale .* phase_scale
     return current
 end 
@@ -747,6 +745,11 @@ function period_to_angfreq(t_period::Real)
     return angular_frequency
 end
 
+function period_to_angfreq(t_period::AbstractArray)
+    angular_frequency = 2.0f0 .* pi_f32 ./ t_period
+    return angular_frequency
+end
+
 """
     angfreq_to_period(angfreq::Real)
 
@@ -790,6 +793,12 @@ while the imaginary part sets the oscillation frequency.
 function neuron_constant(leakage::Real, t_period::Real)
     angular_frequency = period_to_angfreq(t_period)
     k = ComplexF32(leakage + 1.0f0im * angular_frequency)
+    return k
+end
+
+function neuron_constant(leakage::AbstractArray, t_period::AbstractArray)
+    angular_frequency = period_to_angfreq(t_period)
+    k = ComplexF32.(leakage .+ 1.0f0im .* angular_frequency)
     return k
 end
 

@@ -3,6 +3,8 @@ module PhasorNetworks
 export 
 #types
 SpikeTrain, 
+CoupledChain,
+CoupledLayerOutput, 
 SpikeTrainGPU,
 MakeSpiking,
 LocalCurrent,
@@ -16,6 +18,7 @@ PhaseSolution,
 PotentialSolution,
 SpikingSolution,
 CurrentSolution,
+PhaseArray,
 Args,
 
 #domain conversions
@@ -68,6 +71,9 @@ codebook_loss,
 
 #network
 attend,
+solve_coupled,
+get_layer_potential,
+get_layer_phase,
 variance_scaling,
 dense_onehot,
 Codebook,
@@ -98,6 +104,16 @@ OvR_matrices,
 tpr_fpr,
 interpolate_roc
 
+include("imports.jl")
+include("constants.jl")
+include("types.jl")
+include("domains.jl")
+include("gpu.jl")
+include("spiking.jl")
+include("vsa.jl")
+include("network.jl")
 include("metrics.jl")
+#include("coupled.jl")
+
 
 end

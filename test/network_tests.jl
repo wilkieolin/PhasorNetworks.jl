@@ -66,12 +66,13 @@ function build_ode_mlp(args, spk_args)
     ode_model = Chain(
                 x -> tanh_fast.(x),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0f0, 10.0f0)),
-                PhasorDense(2 => 128, complex_to_angle, return_type=SolutionType(:phase), use_bias=false),
-                x -> x[end],
+                PhasorDense(2 => 128, complex_to_angle, return_type=SolutionType(:potential), use_bias=false),
+                x -> potential_to_phase(x.u[end], x.t[end], offset=0.0f0, spk_args=spk_args),
                 PhasorDense(128 => 2, complex_to_angle, use_bias=false))
     ps, st = Lux.setup(args.rng, ode_model)
     return ode_model, ps, st
 end
+
 
 function ode_correlation(model, ode_model, ps, st, x, y)
     @testset "ODE Correlation Test" begin

@@ -15,11 +15,6 @@ using NNlib: batched_mul
 using Base: @kwdef
 using Zygote: withgradient
 using Random: Xoshiro
+using WeightInitializers: ones32
 
 import LuxLib: dropout
-
-# Define devices
-cdev = cpu_device()
-if CUDA.functional()
-    gdev = gpu_device()
-end
