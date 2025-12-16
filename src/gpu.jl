@@ -374,7 +374,9 @@ Provides a vectorized implementation that is efficient on GPUs and compatible wi
 - `dims::Int=2`: Dimension along which to slice vectors for pairwise comparison
 
 For `dims=2` with shape `(features, n_vectors, batch)`:
-- Returns shape `(n_vectors_A, n_vectors_B, batch)` matching CPU implementation
+- Returns shape `(n_vectors_A, n_vectors_B, batch)` matching CPU real-valued implementation
+
+Note: The 2D version returns `(n_vectors_B, n_vectors_A)` to match CPU's transposed output.
 
 # Implementation Details
 - Uses broadcasting for vectorized operations
@@ -490,7 +492,9 @@ function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; di
     end
     
     # out3 has shape (M, N, 1), squeeze the batch dimension
-    return dropdims(out3, dims=3)
+    out2 = dropdims(out3, dims=3)
+    # CPU 2D version returns (N, M) due to permutedims(..., (2,1)), so transpose to match
+    return permutedims(out2, (2, 1))
 end
 
 # Support dispatch when inputs are real-valued CuArrays by converting to
