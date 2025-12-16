@@ -209,23 +209,69 @@ end
 """
     PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 
-A dense (fully-connected) layer that operates on phase/complex-valued inputs.
-Combines a standard dense layer with complex bias and phase-based activation.
+A dense (fully-connected) layer for phase-valued and spiking neural networks.
+Implements complex-valued linear transformations with phase-based activation,
+supporting both direct phase inputs and spike train inputs through ODE integration.
 
 # Fields
-- `layer`: Standard dense layer for linear transformation
-- `bias`: Complex-valued bias for phase shift
-- `activation`: Function to convert complex values to phases
-- `use_bias::Bool`: Whether to apply complex bias
-- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
+- `layer`: Underlying `Dense` layer for linear transformation (no internal bias)
+- `bias`: [`ComplexBias`](@ref) layer for phase shifts in the complex plane
+- `activation`: Activation function applied after bias (e.g., `identity`, `complex_to_angle`)
+- `use_bias::Bool`: Whether to apply the complex bias term
+- `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
+- `init_period::Function`: Initializer for per-neuron period scaling factors
+- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
+- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `return_type::SolutionType`: Output format for spiking inputs
 
-# Layer Operation
-1. Converts input phases to complex numbers
-2. Applies linear transformation separately to real/imaginary parts
-3. Optionally applies complex bias
-4. Applies activation function to map back to phases
+# Constructor
+```julia
+PhasorDense(shape::Pair{<:Integer,<:Integer}, activation=identity;
+    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
+    init_bias=default_bias,               # Bias initialization function
+    use_bias=true,                         # Apply complex bias
+    init_leakage=ones32,                   # Leakage factor initializer
+    init_period=ones32,                    # Period factor initializer
+    trainable_leakage=false,               # Make leakage trainable
+    trainable_period=false,                # Make period trainable
+    kwargs...)                             # Passed to Dense layer
+```
 
-Supports both direct phase inputs and spiking inputs through ODEs.
+# Return Types (for spiking inputs)
+- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:potential`: Return raw ODE solution object
+- `:current`: Convert solution to current, return `CurrentCall` for next layer
+- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
+
+# Forward Pass
+For phase array inputs:
+1. Converts input phases to complex numbers via `angle_to_complex`
+2. Applies linear transformation separately to real and imaginary parts
+3. Optionally adds complex bias
+4. Applies activation function
+
+For spiking inputs (`SpikingCall` or `CurrentCall`):
+1. Converts to `CurrentCall` if needed
+2. Integrates coupled oscillator ODEs via `oscillator_bank`
+3. Returns output based on `return_type`
+
+# Example
+```julia
+# Basic dense layer
+layer = PhasorDense(64 => 32, complex_to_angle)
+
+# With trainable dynamics
+layer = PhasorDense(64 => 32, complex_to_angle;
+    trainable_leakage=true,
+    return_type=SolutionType(:current))
+
+# Initialize and apply
+rng = Random.default_rng()
+ps, st = Lux.setup(rng, layer)
+y, st_new = layer(x, ps, st)
+```
+
+See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
 """
 struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer # the conventional layer used to transform inputs
@@ -354,43 +400,146 @@ end
 """
     PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 
-Convolutional layer for phase-valued inputs and spiking neural networks.
-Implements complex-valued convolution with phase-based activation.
+A convolutional layer for phase-valued and spiking neural networks.
+Implements complex-valued convolution with phase-based activation,
+supporting both direct phase inputs and spike train inputs through ODE integration.
 
 # Fields
-- `layer`: Standard convolutional layer for spatial operations
-- `bias`: Complex-valued bias terms
-- `activation`: Phase activation function
-- `use_bias::Bool`: Whether to apply complex bias
-- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
+- `layer`: Underlying `Conv` layer for spatial convolution (no internal bias)
+- `bias`: [`ComplexBias`](@ref) layer for phase shifts, shaped for broadcasting over spatial dims
+- `activation`: Activation function applied after bias (e.g., `identity`, `complex_to_angle`)
+- `use_bias::Bool`: Whether to apply the complex bias term
+- `init_leakage::Function`: Initializer for per-channel leakage scaling factors
+- `init_period::Function`: Initializer for per-channel period scaling factors
+- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
+- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `return_type::SolutionType`: Output format for spiking inputs
 
-# Implementation
-- Separates input into real/imaginary components
-- Applies convolution separately to each component
-- Recombines into complex values
-- Optionally applies complex bias and activation
+# Constructor
+```julia
+PhasorConv(kernel::Tuple{Vararg{Integer}}, channels::Pair{<:Integer,<:Integer}, 
+           activation=identity;
+    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
+    init_bias=default_bias,               # Bias initialization function
+    use_bias=true,                         # Apply complex bias
+    init_leakage=ones32,                   # Leakage factor initializer
+    init_period=ones32,                    # Period factor initializer
+    trainable_leakage=false,               # Make leakage trainable
+    trainable_period=false,                # Make period trainable
+    kwargs...)                             # Passed to Conv layer (stride, pad, dilation, etc.)
+```
 
-See also: [`PhasorDense`](@ref) for fully-connected equivalent
+# Arguments
+- `kernel`: Tuple specifying convolution kernel size, e.g., `(3, 3)` for 2D
+- `channels`: Input channels => Output channels, e.g., `3 => 16`
+
+# Return Types (for spiking inputs)
+- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:potential`: Return raw ODE solution object
+- `:current`: Convert solution to current, return `CurrentCall` for next layer
+- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
+
+# Forward Pass
+For phase array inputs (H, W, C, B):
+1. Converts input phases to complex numbers via `angle_to_complex`
+2. Applies convolution separately to real and imaginary parts
+3. Optionally adds complex bias (broadcast over spatial dimensions)
+4. Applies activation function
+
+For spiking inputs (`SpikingCall` or `CurrentCall`):
+1. Converts to `CurrentCall` if needed
+2. Integrates coupled oscillator ODEs via `oscillator_bank`
+3. Returns output based on `return_type`
+
+# Example
+```julia
+# Basic conv layer: 3x3 kernel, 3 input channels, 16 output channels
+layer = PhasorConv((3, 3), 3 => 16, complex_to_angle; pad=1)
+
+# With trainable dynamics and strided convolution
+layer = PhasorConv((5, 5), 16 => 32, complex_to_angle;
+    stride=2,
+    trainable_leakage=true,
+    return_type=SolutionType(:current))
+
+# Initialize and apply
+rng = Random.default_rng()
+ps, st = Lux.setup(rng, layer)
+y, st_new = layer(x, ps, st)  # x: (H, W, C_in, batch)
+```
+
+See also: [`PhasorDense`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
 """
 struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer
     bias
     activation
     use_bias::Bool
+    init_leakage::Function
+    init_period::Function
+    trainable_leakage::Bool
+    trainable_period::Bool
     return_type::SolutionType
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity; return_type::SolutionType = SolutionType(:spiking), init_bias = default_bias, use_bias::Bool = true, kwargs...)
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity;
+                    return_type::SolutionType = SolutionType(:spiking),
+                    init_bias = default_bias,
+                    use_bias::Bool = true,
+                    init_leakage = ones32,
+                    init_period = ones32,
+                    trainable_leakage::Bool = false,
+                    trainable_period::Bool = false,
+                    kwargs...)
     #construct the convolutional layer
     layer = Conv(k, chs, identity; use_bias=false, kwargs...)
     bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
-    return PhasorConv(layer, bias, activation, use_bias, return_type)
+    return PhasorConv(layer, 
+                      bias, 
+                      activation, 
+                      use_bias, 
+                      init_leakage,
+                      init_period,
+                      trainable_leakage,
+                      trainable_period,
+                      return_type)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorConv)
+    ps_layer = Lux.initialparameters(rng, l.layer)
+    ps_bias = Lux.initialparameters(rng, l.bias)
+    parameters = (layer = ps_layer, bias = ps_bias,)
+
+    # Get output channels for leakage/period initialization
+    n_out = l.layer.out_chs
+    if l.trainable_leakage
+        ps_leakage = l.init_leakage(rng, n_out,)
+        parameters = merge(parameters, (leakage = ps_leakage,))
+    end
+
+    if l.trainable_period
+        ps_period = l.init_period(rng, n_out,)
+        parameters = merge(parameters, (period = ps_period,))
+    end
+    return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorConv)
     st_layer = Lux.initialstates(rng, l.layer)
     st_bias = Lux.initialstates(rng, l.bias)
-    return (layer = st_layer, bias = st_bias)
+    state = (layer = st_layer, bias = st_bias,)
+
+    n_out = l.layer.out_chs
+    if !l.trainable_leakage
+        st_leakage = l.init_leakage(rng, n_out,)
+        state = merge(state, (leakage = st_leakage,))
+    end
+
+    if !l.trainable_period
+        st_period = l.init_period(rng, n_out,)
+        state = merge(state, (period = st_period,))
+    end
+    return state
 end
 
 function (pc::PhasorConv)(x::AbstractArray, ps::LuxParams, st::NamedTuple)
@@ -507,46 +656,103 @@ end
 
 
 """
-    PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:bias,)}
+    PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 
-A dense layer with non-trainable weights stored in state.
-The weights are fixed after initialization and not updated during training.
+A dense layer with non-trainable (fixed) weights for phase-valued and spiking networks.
+Weights are stored in layer state rather than parameters, making them immune to
+gradient updates while still supporting the full range of input types.
 
 # Fields
-- `shape::Pair{<:Integer,<:Integer}`: Input => Output dimensions
-- `bias`: Complex-valued bias for phase shift (optional)
-- `activation`: Function to convert complex values to phases
-- `use_bias::Bool`: Whether to apply complex bias
-- `return_type::SolutionType`: Output format for spiking inputs (:phase, :potential, :current, or :spiking)
-- `init_weight`: Function to initialize fixed weights
+- `layer`: Template `Dense` layer (weights stored in state, not used directly)
+- `bias`: [`ComplexBias`](@ref) layer for phase shifts (parameters also stored in state)
+- `activation`: Activation function applied after bias
+- `use_bias::Bool`: Whether to apply the complex bias term
+- `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
+- `init_period::Function`: Initializer for per-neuron period scaling factors
+- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
+- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `return_type::SolutionType`: Output format for spiking inputs
+- `init_weight`: Weight initialization function, or `nothing` for Glorot uniform
 
 # Constructor
 ```julia
 PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=identity;
-    init_weight=nothing,  # Custom weight initialization, e.g. identity_init
-    init_bias=default_bias,
-    use_bias=false,
-    return_type=:phase)  # :phase, :potential, :current, or :spiking
+    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
+    init_weight=nothing,                   # Custom weight init: (rng, in, out) -> matrix
+    init_bias=default_bias,                # Bias initialization function
+    use_bias=false,                        # Apply complex bias (default off)
+    init_leakage=ones32,                   # Leakage factor initializer
+    init_period=ones32,                    # Period factor initializer
+    trainable_leakage=false,               # Make leakage trainable
+    trainable_period=false,                # Make period trainable
+    kwargs...)                             # Additional options
 ```
 
-# Weight Initialization
-- `init_weight=nothing`: Uses Glorot uniform initialization
+# Weight Initialization Options
+- `init_weight=nothing`: Uses Glorot uniform initialization (default)
 - `init_weight=identity_init`: Creates identity matrix (requires square shape)
-- Custom function: `(rng, in_dim, out_dim) -> weight_matrix`
+- Custom function with signature `(rng, in_dim, out_dim) -> weight_matrix`
+
+# State Structure
+The layer state contains:
+- `weight`: The fixed weight matrix (out_dim × in_dim)
+- `layer`: Nested structure with weight for `oscillator_bank` compatibility
+- `bias_params`: Complex bias parameters (real and imaginary parts)
+- `bias`: Bias layer state
+- `leakage`: Per-neuron leakage factors (if not trainable)
+- `period`: Per-neuron period factors (if not trainable)
+
+# Return Types (for spiking inputs)
+- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:potential`: Return raw ODE solution object
+- `:current`: Convert solution to current, return `CurrentCall` for next layer
+- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
 
 # Forward Pass
-1. Converts input phases to complex numbers
-2. Applies fixed linear transformation separately to real/imaginary parts
-3. Optionally applies complex bias
-4. Applies activation function to map back to phases
+For phase array inputs:
+1. Converts input phases to complex numbers via `angle_to_complex`
+2. Applies fixed weight matrix separately to real and imaginary parts
+3. Optionally adds complex bias
+4. Applies activation function
+
+For spiking inputs (`SpikingCall` or `CurrentCall`):
+1. Converts to `CurrentCall` if needed
+2. Constructs pseudo-params from state for `oscillator_bank`
+3. Integrates coupled oscillator ODEs
+4. Returns output based on `return_type`
+
+# Example
+```julia
+# Fixed random projection
+layer = PhasorFixed(64 => 64, complex_to_angle)
+
+# Identity layer (no transformation)
+identity_init(rng, in_dim, out_dim) = Matrix{Float32}(I, out_dim, in_dim)
+layer = PhasorFixed(64 => 64, identity; init_weight=identity_init)
+
+# Fixed layer with trainable dynamics
+layer = PhasorFixed(128 => 64, complex_to_angle;
+    trainable_leakage=true,
+    return_type=SolutionType(:current))
+
+# Initialize and apply
+rng = Random.default_rng()
+ps, st = Lux.setup(rng, layer)
+y, st_new = layer(x, ps, st)
+
+# Weights are in state, not params
+@assert !haskey(ps, :weight)  # No weights in params
+@assert haskey(st, :weight)   # Weights in state
+```
 
 # Use Cases
-- Fixed pattern detection
-- Identity or permutation mapping
-- Non-trainable projection layers
-- Frozen layers in transfer learning
+- Fixed random projections for reservoir computing
+- Identity or permutation mappings
+- Frozen pretrained layers in transfer learning
+- Non-trainable feature extractors
+- Dimensionality-preserving transformations
 
-See also: [`PhasorDense`](@ref) for trainable version
+See also: [`PhasorDense`](@ref) for trainable version, [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
 """
 
 struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
@@ -554,6 +760,10 @@ struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
     bias # the bias in the complex domain used to shift away from the origin
     activation # the activation function which converts complex values to real phases
     use_bias::Bool # apply the layer with the bias if true
+    init_leakage::Function # initializer for the values to scale the leakage in spk_args
+    init_period::Function # initializer for the values to scale the t_period in spk_args
+    trainable_leakage::Bool # can the ODE optimizer access leakage in params
+    trainable_period::Bool # can the ODE optimizer access period in params
     return_type::SolutionType # the type of solution to return from a spiking input
     init_weight # function to initialize fixed weights, or nothing for default
 end
@@ -562,17 +772,43 @@ function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity;
                      return_type::SolutionType = SolutionType(:spiking), 
                      init_bias = default_bias, 
                      use_bias::Bool = false,
+                     init_leakage = ones32,
+                     init_period = ones32,
+                     trainable_leakage::Bool = false,
+                     trainable_period::Bool = false,
                      init_weight = nothing,
                      kwargs...)
     # Create a fixed Dense layer with use_bias=false and weights initialized later
     layer = Dense(shape, identity; use_bias=false, kwargs...)
     bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorFixed(layer, bias, activation, use_bias, return_type, init_weight)
+    return PhasorFixed(layer, 
+                       bias, 
+                       activation, 
+                       use_bias, 
+                       init_leakage,
+                       init_period,
+                       trainable_leakage,
+                       trainable_period,
+                       return_type, 
+                       init_weight)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorFixed)
-    # No trainable parameters - weights are stored in state
-    return NamedTuple()
+    # Weights are stored in state (non-trainable)
+    # But leakage/period can be trainable
+    parameters = NamedTuple()
+
+    n_out = l.layer.out_dims
+    if l.trainable_leakage
+        ps_leakage = l.init_leakage(rng, n_out,)
+        parameters = merge(parameters, (leakage = ps_leakage,))
+    end
+
+    if l.trainable_period
+        ps_period = l.init_period(rng, n_out,)
+        parameters = merge(parameters, (period = ps_period,))
+    end
+    return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
@@ -592,7 +828,19 @@ function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
     st_bias = Lux.initialstates(rng, l.bias)
     
     # Store weight in a nested structure matching what oscillator_bank expects
-    return (weight = weight, layer = (weight = weight,), bias_params = ps_bias, bias = st_bias)
+    state = (weight = weight, layer = (weight = weight,), bias_params = ps_bias, bias = st_bias)
+
+    n_out = l.layer.out_dims
+    if !l.trainable_leakage
+        st_leakage = l.init_leakage(rng, n_out,)
+        state = merge(state, (leakage = st_leakage,))
+    end
+
+    if !l.trainable_period
+        st_period = l.init_period(rng, n_out,)
+        state = merge(state, (period = st_period,))
+    end
+    return state
 end
 
 function (a::PhasorFixed)(x::AbstractArray, params::LuxParams, state::NamedTuple)
@@ -625,8 +873,25 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     # Create a pseudo-params structure for oscillator_bank that includes weights from state
     # The layer field must contain weight for the Dense layer call in oscillator_bank
     fixed_params = (layer = (weight = state.weight,), bias = state.bias_params)
+    
+    # Add leakage/period to params if trainable, otherwise they come from state
+    if a.trainable_leakage
+        fixed_params = merge(fixed_params, (leakage = params.leakage,))
+    end
+    if a.trainable_period
+        fixed_params = merge(fixed_params, (period = params.period,))
+    end
+    
     # Create a state structure that oscillator_bank expects (with layer field)
     fixed_state = (layer = NamedTuple(), bias = state.bias)
+    
+    # Add leakage/period to state if not trainable
+    if !a.trainable_leakage
+        fixed_state = merge(fixed_state, (leakage = state.leakage,))
+    end
+    if !a.trainable_period
+        fixed_state = merge(fixed_state, (period = state.period,))
+    end
     
     # Pass the fixed params to the solver
     sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)

@@ -400,7 +400,7 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
         if layer.trainable_period
             period_scale = p.period
         else
-            period_scale = state.leakage
+            period_scale = state.period
         end
 
         transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
@@ -418,7 +418,7 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
         if layer.trainable_period
             period_scale = p.period
         else
-            period_scale = state.leakage
+            period_scale = state.period
         end
 
         transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
