@@ -274,7 +274,7 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
     end
 
     if l.trainable_period
-        ps_period = l.init_leakage(rng, n_out,)
+        ps_period = l.init_period(rng, n_out,)
         parameters = merge(parameters, (period = ps_period,))
     end
     return parameters
@@ -292,7 +292,7 @@ function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
     end
 
     if !l.trainable_period
-        st_period = l.init_leakage(rng, n_out,)
+        st_period = l.init_period(rng, n_out,)
         state = merge(state, (period = st_period,))
     end
     return state
