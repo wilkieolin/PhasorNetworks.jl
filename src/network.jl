@@ -356,13 +356,9 @@ function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple
         y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
         y_activated = a.activation(y_biased)
     else
-        #passthrough
-        st_updated_bias = state.bias
         y_activated = a.activation(y)
     end
 
-    # New state for PhasorDense layer
-    st_new = (dense = state.layer, bias = st_updated_bias)
     return y_activated, st_new
 end
 
@@ -812,23 +808,16 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorFixed)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
-    # Initialize weights in state (non-trainable)
-    in_dim = l.layer.in_dims
-    out_dim = l.layer.out_dims
-    if l.init_weight === nothing
-        # Default: Glorot uniform initialization
-        weight = glorot_uniform(rng, out_dim, in_dim)
-    else
-        # Custom initialization
-        weight = l.init_weight(rng, in_dim, out_dim)
-    end
-    
-    # Initialize bias parameters (stored in state, non-trainable)
+    ps_layer = Lux.initialparameters(rng, l.layer)
     ps_bias = Lux.initialparameters(rng, l.bias)
+
+    st_layer = Lux.initialstates(rng, l.layer)
     st_bias = Lux.initialstates(rng, l.bias)
-    
-    # Store weight in a nested structure matching what oscillator_bank expects
-    state = (weight = weight, layer = (weight = weight,), bias_params = ps_bias, bias = st_bias)
+
+    state = (ps_layer = ps_layer,
+            ps_bias = ps_bias,
+            st_layer = st_layer,
+            st_bias = st_bias,)
 
     n_out = l.layer.out_dims
     if !l.trainable_leakage
@@ -845,17 +834,20 @@ end
 
 function (a::PhasorFixed)(x::AbstractArray, params::LuxParams, state::NamedTuple)
     xz = angle_to_complex(x)
-    
-    # Apply fixed weights from state
-    y_real = state.weight * real.(xz)
-    y_imag = state.weight * imag.(xz)
+
+    #stateless calls to dense
+    y_real, _ = a.layer(real.(xz), state.ps_layer, state.st_layer)
+    y_imag, _ = a.layer(imag.(xz), state.ps_layer, state.st_layer)
     y = y_real .+ 1.0f0im .* y_imag
 
     if a.use_bias
         # Use bias params from state (non-trainable)
-        y_biased, st_updated_bias = a.bias(y, state.bias_params, state.bias)
+
         y_activated = a.activation(y_biased)
-        st_new = (weight = state.weight, bias_params = state.bias_params, bias = st_updated_bias)
+        st_new = (ps_layer = state.ps_layer,
+                st_layer = state.st_layer,
+                ps_bias = state.ps_bias,
+                st_bias = st_updated_bias)
     else
         y_activated = a.activation(y)
         st_new = state
@@ -872,7 +864,9 @@ end
 function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     # Create a pseudo-params structure for oscillator_bank that includes weights from state
     # The layer field must contain weight for the Dense layer call in oscillator_bank
-    fixed_params = (layer = (weight = state.weight,), bias = state.bias_params)
+    # state.ps_layer contains the layer parameters (including weight)
+    # state.ps_bias contains the bias parameters (bias_real, bias_imag)
+    fixed_params = (layer = state.ps_layer, bias = state.ps_bias)
     
     # Add leakage/period to params if trainable, otherwise they come from state
     if a.trainable_leakage
@@ -883,7 +877,8 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     end
     
     # Create a state structure that oscillator_bank expects (with layer field)
-    fixed_state = (layer = NamedTuple(), bias = state.bias)
+    # state.st_layer and state.st_bias contain the actual layer/bias states
+    fixed_state = (layer = state.st_layer, bias = state.st_bias)
     
     # Add leakage/period to state if not trainable
     if !a.trainable_leakage
