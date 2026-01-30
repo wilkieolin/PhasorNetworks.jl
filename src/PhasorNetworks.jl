@@ -91,6 +91,11 @@ default_bias,
 zero_bias,
 
 #metrics
+arc_error,
+angular_mean,
+exp_score,
+z_score,
+similarity_correlation,
 cycle_correlation,
 cycle_sparsity,
 cor_realvals,
@@ -113,7 +118,5 @@ include("spiking.jl")
 include("vsa.jl")
 include("network.jl")
 include("metrics.jl")
-#include("coupled.jl")
-
 
 end

@@ -141,7 +141,7 @@ Vector of sparsity values (0.0-1.0) for each cycle, where:
 - 0.0 indicates no NaN values
 - 1.0 indicates all values are NaN
 """
-function cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
+function cycle_sparsity(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractArray{<:Real,3})
     n_cycles = axes(dynamic_phases, 3)
     total = reduce(*, size(static_phases))
     sparsity_vals = [sum(isnan.(dynamic_phases[:,:,i])) / total for i in n_cycles]
@@ -208,25 +208,27 @@ Calculate True Positive Rate (TPR) and False Positive Rate (FPR) curves for ROC 
 # Returns
 - Tuple of (TPR, FPR) arrays for ROC curve plotting
 """
-function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
-    test_points = range(start = 0.0f0, stop = -20.0f0, length = points)
-    test_points = vcat(exp.(test_points), 0.0f0, reverse(-1.0f0 .* exp.(test_points)))
+function tpr_fpr(prediction::AbstractArray{<:Real}, labels::AbstractArray{<:Real}, points::Int = 201, epsilon::Real = 0.01f0)::Tuple{Vector{Float32}, Vector{Float32}}
+    # Generate a set of thresholds uniformly spaced between 0 and 1
+    # The number of thresholds matches the requested 'points' length
+    thresholds = range(start = 0.0f0, stop = 1.0f0, length = points)
+
+    # For each threshold compute the summed OvR confusion matrix across all classes
     fn = x -> sum(OvR_matrices(prediction, labels, x))
-    confusion = cat(fn.(test_points)..., dims=3)
+    confusion = cat(fn.(thresholds)..., dims = 3)
 
-    classifications = dropdims(sum(confusion, dims=2), dims=2)
-    cond_true = classifications[1,:]
-    cond_false = classifications[2,:]
+    # Aggregate confusion matrices to obtain per‑threshold true/false condition counts
+    classifications = dropdims(sum(confusion, dims = 2), dims = 2)
+    cond_true = classifications[1, :]    # total positives per threshold
+    cond_false = classifications[2, :]   # total negatives per threshold
 
-    #return cond_true, cond_false
+    # Extract true‑positive and false‑positive counts per threshold
+    true_positives = confusion[1, 1, :]
+    false_positives = confusion[2, 1, :]
 
-    true_positives = confusion[1,1,:]
-    false_positives = confusion[2,1,:]
-
-    #return true_positives, false_positives
-
-    tpr = true_positives ./ cond_true
-    fpr = false_positives ./ cond_false
+    # Compute rates, guarding against division by zero with epsilon
+    tpr = true_positives ./ (cond_true .+ epsilon)
+    fpr = false_positives ./ (cond_false .+ epsilon)
 
     return tpr, fpr
 end

@@ -356,9 +356,13 @@ function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple
         y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
         y_activated = a.activation(y_biased)
     else
+        #passthrough
+        st_updated_bias = state.bias
         y_activated = a.activation(y)
     end
 
+    # New state for PhasorDense layer
+    st_new = (layer = state.layer, bias = st_updated_bias)
     return y_activated, st_new
 end
 
@@ -372,7 +376,7 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
-        y = a.activation(stack(u))
+        y = a.activation.(u)
         return y, state
     elseif a.return_type.type == :potential
         return sol, state
@@ -842,7 +846,7 @@ function (a::PhasorFixed)(x::AbstractArray, params::LuxParams, state::NamedTuple
 
     if a.use_bias
         # Use bias params from state (non-trainable)
-
+        y_biased, st_updated_bias = a.bias(y, state.ps_bias, state.st_bias)
         y_activated = a.activation(y_biased)
         st_new = (ps_layer = state.ps_layer,
                 st_layer = state.st_layer,
@@ -1019,18 +1023,23 @@ function (rb::ResidualBlock)(x, ps, st)
     ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
     y = v_bind(x, ff_out)
     
-    return y, st_ff
+    return y, (ff=st_ff,)
 end
 
 """
 Phasor QKV Attention
 """
+
+
 function score_scale(scores::AbstractArray{<:Real,3}; scale::AbstractVector{<:Real})
+    #this function takes interference scores on [-1,1] and exponentially scales them
     d_k = size(scores,1)
     return exp.(scale .* scores) ./ d_k
 end
 
 function score_scale(potential::AbstractArray{<:Complex,3}, scores::AbstractArray{<:Real,3}; scale::AbstractVector)
+    #this function takes an array of oscillator potentials on the complex domain
+    # and multiplies them by using the real-valued interference scores transformed by the scaled exponential
     @assert size(potential, 3) == size(scores,3) "Batch dimensions of inputs must match"
 
     scores = permutedims(scores, (2,1,3))
@@ -1109,7 +1118,11 @@ function Lux.initialparameters(rng::AbstractRNG, attention::PhasorAttention)
     params = (scale = [attention.init_scale,],)
 end
 
-function (a::PhasorAttention)(q::AbstractArray, k::AbstractArray, v::AbstractArray, ps::LuxParams, st::NamedTuple)
+function Lux.initialstates(rng::AbstractRNG, attention::PhasorAttention)
+    return NamedTuple()
+end
+
+function (a::PhasorAttention)(q::AbstractArray{<:Real,3}, k::AbstractArray{<:Real,3}, v::AbstractArray{<:Real,3}, ps::LuxParams, st::NamedTuple)
     result, scores = attend(q, k, v, scale=ps.scale)
 
     return result, (scores=scores,)
@@ -1181,15 +1194,17 @@ end
 
 struct SingleHeadCABlock <: LuxCore.AbstractLuxContainerLayer{(:attn, :q_norm, :kv_norm, :ff_norm, :ff)}
     attn::SingleHeadAttention
+    attn_mask::AbstractArray
     q_norm
     kv_norm
     ff_norm
     ff
 end
 
-function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; dropout::Real=0.1f0, kwargs...)
+function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; attn_mask=ones(Float32, n_q, n_kv), dropout::Real=0.1f0, kwargs...)
     SingleHeadCABlock(
         SingleHeadAttention(d_input, d_model; kwargs...),
+        attn_mask,
         LayerNorm((d_model, n_q)),
         LayerNorm((d_model, n_kv)),
         LayerNorm((d_model, n_q)),
@@ -1199,15 +1214,16 @@ function SingleHeadCABlock(d_input::Int, d_model::Int, n_q::Int, n_kv::Int; drop
     )
 end
 
-function (tb::SingleHeadCABlock)(q, kv, mask, ps, st)
+function (tb::SingleHeadCABlock)(q, kv, ps, st)
     # Attention path
-    norm_q = tb.q_norm(q, ps.q_norm, st.q_norm)[1]
-    norm_kv = tb.kv_norm(kv, ps.kv_norm, st.kv_norm)[1]
+    #norm_q = tb.q_norm(q, ps.q_norm, st.q_norm)[1]
+    #norm_kv = tb.kv_norm(kv, ps.kv_norm, st.kv_norm)[1]
     attn_out, st_attn = tb.attn(q, kv, ps.attn, st.attn)
-    x = v_bind(q, attn_out)
+    attn_masked = attn_out .* tb.attn_mask
+    x = v_bind(q, attn_masked)
     
     # Feed-forward path
-    norm_x = tb.ff_norm(x, ps.ff_norm, st.ff_norm)[1]
+    #norm_x = tb.ff_norm(x, ps.ff_norm, st.ff_norm)[1]
     ff_out, st_ff = tb.ff(x, ps.ff, st.ff)
     x = v_bind(x, ff_out)
     

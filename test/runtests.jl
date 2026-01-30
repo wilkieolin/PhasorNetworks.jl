@@ -40,7 +40,7 @@ include("data.jl")
 include("domain_tests.jl")
 include("vsa_tests.jl")
 include("network_tests.jl")
-#include("PROPOSED_metrics_tests.jl")
+include("PROPOSED_metrics_tests.jl")
 #include("PROPOSED_network_layers_tests.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
@@ -49,7 +49,7 @@ include("network_tests.jl")
     vsa_tests()
     network_tests()
     #new tests
-    #metrics_tests()
+    metrics_tests()
     #network_layers_tests()
     #spiking_operations_tests()
 

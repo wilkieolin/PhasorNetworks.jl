@@ -36,6 +36,21 @@ function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     return i
 end
 
+"""
+    gaussian_kernel_gpu!(output, times, t, t_sigma)
+
+CUDA kernel that computes Gaussian kernel values for all spike times in parallel.
+Avoids dynamic dispatch overhead from broadcasting on GPU arrays.
+"""
+function gaussian_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= length(times)
+        x = times[i]
+        output[i] = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
+    end
+    return nothing
+end
+
 function scatter_add_kernel!(output, values, indices)
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if i <= length(indices)
@@ -182,9 +197,15 @@ end
 #Spiking
 
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
-    currents = gaussian_kernel_gpu.(stg.times, t, Float32(spk_args.t_window))
+    n = length(stg.times)
+    currents = CUDA.zeros(Float32, n)
+    
+    threads = N_THREADS
+    blocks = cld(n, threads)
+    
+    @cuda threads=threads blocks=blocks gaussian_kernel_gpu!(currents, stg.times, t, Float32(spk_args.t_window))
+    
     output = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
-
     return output
 end
 

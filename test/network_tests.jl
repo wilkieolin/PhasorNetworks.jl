@@ -1,6 +1,9 @@
 # This file is intended to be included and run from runtests.jl
 # Ensure that runtests.jl has already loaded PhasorNetworks and other common dependencies.
 
+using Test
+using PhasorNetworks
+
 function network_tests()
     @testset "Network Tests" begin
         @info "Running network tests..."
