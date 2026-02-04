@@ -310,8 +310,12 @@ end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
     ps_layer = Lux.initialparameters(rng, l.layer)
-    ps_bias = Lux.initialparameters(rng, l.bias)
-    parameters = (layer = ps_layer, bias = ps_bias,)
+    parameters = (layer = ps_layer,)
+    
+    if l.use_bias
+        ps_bias = Lux.initialparameters(rng, l.bias)
+        parameters = merge(parameters, (bias = ps_bias,))
+    end
 
     n_out = l.layer.out_dims
     if l.trainable_leakage
@@ -1310,12 +1314,28 @@ struct MinPool <: LuxCore.AbstractLuxWrapperLayer{:pool}
 end
 
 function MinPool()
+    # Default constructor creates a MaxPool with default parameters
     return MinPool(MaxPool())
 end
 
+# Additional constructors to allow specifying the pooling size directly.
+# Accept a tuple of dimensions (e.g., (2, 2)) and construct the underlying
+# MaxPool layer accordingly.
+function MinPool(pool_size::Tuple{Vararg{Int}})
+    return MinPool(MaxPool(pool_size))
+end
+
+# Allow constructing from an existing MaxPool instance.
+# This is the inner constructor which will be called automatically
+# function MinPool(pool::MaxPool)
+#     # The default struct constructor will be used
+# end
+
 function (mp::MinPool)(x, ps, st)
-    y = -1.0f0 .* mp(-1.0f0 .* x, ps, st)
-    return y
+    # Apply the underlying MaxPool (stored in `mp.pool`) to the negated input,
+    # then negate the result to achieve min‑pooling behavior.
+    y, st_new = mp.pool(-1.0f0 .* x, ps, st)
+    return -1.0f0 .* y, st_new
 end
 
 """
