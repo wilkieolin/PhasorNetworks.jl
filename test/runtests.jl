@@ -41,7 +41,7 @@ include("domain_tests.jl")
 include("vsa_tests.jl")
 include("network_tests.jl")
 include("metrics_tests.jl")
-include("PROPOSED_network_layers_tests.jl")
+include("network_layers_tests.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
