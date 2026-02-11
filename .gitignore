@@ -11,3 +11,4 @@ figures/*
 .vscode/*
 coverage/*
 coverage
+.continue/*
