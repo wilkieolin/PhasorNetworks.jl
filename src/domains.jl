@@ -133,7 +133,7 @@ Family of kernel functions for computing spike-induced currents.
 # Variants
 - `gaussian_kernel`: Standard Gaussian kernel for spike times
 - `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
-- `arc_gaussian_kernel`: Circular/periodic version using sine distance
+- `periodic_gaussian_kernel`: Periodic version using modulo distances
 
 See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
 """
@@ -147,8 +147,10 @@ function gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real)
     return i
 end
 
-function arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
-    i = exp.(-1.0f0 .* (sin.(0.5f0 * pi_f32 .* (t .- x)) / (2.0f0 .* t_sigma)).^2.0f0)
+function periodic_gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real)
+    # Compute the shortest distance on the ring of circumference t_period
+    dt = mod.(t .- x .+ t_period/2.0f0, t_period) .- t_period/2.0f0
+    i = exp.(-1.0f0 .* (dt ./ (2.0f0 .* t_sigma)).^2.0f0)
     return i
 end
 
@@ -418,10 +420,8 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
     
     function inner(t::Real)
         # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
-        t_f32 = Float32(t)
-        p = time_to_phase([t_f32,], spk_args = spk_args, offset = Float32(offset))[1]
-        current_kernel = x -> arc_gaussian_kernel(x, p, spk_args.t_window * period_to_angfreq(spk_args.t_period))
-        impulses = current_kernel(phases)
+        times = phase_to_time(phases, spk_args.t_period, offset)
+        impulses = periodic_gaussian_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
 
         ignore_derivatives() do
             if zeta > 0.0f0

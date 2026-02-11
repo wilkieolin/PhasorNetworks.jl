@@ -17,8 +17,8 @@ repeats = 10
 epsilon = 0.025
 #solver_args = Dict(:adaptive => false, :dt => 0.01)
 solver_args = Dict(:adaptive => false, 
-                    :dt => 0.01,
-                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP()),
+                    :dt => 0.005,
+                    :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP()),
                     :save_start => true)
 
 spk_args = SpikingArgs(t_window = 0.01, 
@@ -48,7 +48,6 @@ include("network_layers_tests.jl")
     domain_tests()
     vsa_tests()
     network_tests()
-    #new tests
     metrics_tests()
     network_layers_tests()
     #spiking_operations_tests()

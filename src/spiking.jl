@@ -10,14 +10,9 @@ function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, s
 end
 
 function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
-    #what times to the bias values correlate to?
-    times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
-    #determine the time within the cycle - ensure Float32 to avoid mixed-precision issues
-    t = mod(Float32(t), spk_args.t_period)
-
-    #add the active currents, scaled by the gaussian kernel & bias magnitude
-    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-    bias = mag .* current_kernel(times)
+    times = phase_to_time(phase, offset=t_offset, spk_args=spk_args)
+    impulses = periodic_gaussian_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
+    bias = mag .* impulses
 
     return bias
 end
@@ -269,9 +264,9 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
 
         #add currents into the active synapses
         if typeof(spk_args.spike_kernel) <: Function
-            current_kernel = x -> spk_args.spike_kernel(x, t)
+            current_kernel = times -> spk_args.spike_kernel(times, t)
         elseif spk_args.spike_kernel == :gaussian
-            current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+            current_kernel = times -> gaussian_kernel(times, t, spk_args.t_window)
         end
         impulses = current_kernel(active_tms)
         
