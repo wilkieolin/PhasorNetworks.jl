@@ -758,7 +758,6 @@ y, st_new = layer(x, ps, st)
 
 See also: [`PhasorDense`](@ref) for trainable version, [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
 """
-
 struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
     layer # the conventional layer used to transform inputs (fixed weights)
     bias # the bias in the complex domain used to shift away from the origin

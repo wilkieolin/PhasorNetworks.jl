@@ -51,6 +51,50 @@ function gaussian_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
     return nothing
 end
 
+"""
+    raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
+
+GPU-optimized version of the raised cosine kernel used in spike current calculations.
+Provides smoother gradients and better numerical stability than Gaussian kernels.
+
+# Arguments
+- `x::Float32`: Time of the spike
+- `t::Float32`: Current time
+- `t_sigma::Float32`: Width parameter (support is ±2*t_sigma)
+
+Returns the spike current value at time t for a spike at time x.
+"""
+function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
+    dt = t - x
+    half_width = 2.0f0 * t_sigma
+    if abs(dt) <= half_width
+        return 0.5f0 * (1.0f0 + CUDA.cos(3.14159265f0 * dt / half_width))
+    else
+        return 0.0f0
+    end
+end
+
+"""
+    raised_cosine_kernel_gpu!(output, times, t, t_sigma)
+
+CUDA kernel that computes raised cosine kernel values for all spike times in parallel.
+Provides better gradient stability for adjoint-based differentiation.
+"""
+function raised_cosine_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= length(times)
+        x = times[i]
+        dt = t - x
+        half_width = 2.0f0 * t_sigma
+        if abs(dt) <= half_width
+            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.14159265f0 * dt / half_width))
+        else
+            output[i] = 0.0f0
+        end
+    end
+    return nothing
+end
+
 function scatter_add_kernel!(output, values, indices)
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if i <= length(indices)
@@ -199,12 +243,12 @@ end
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     n = length(stg.times)
     currents = CUDA.zeros(Float32, n)
-    
+
     threads = N_THREADS
     blocks = cld(n, threads)
-    
-    @cuda threads=threads blocks=blocks gaussian_kernel_gpu!(currents, stg.times, t, Float32(spk_args.t_window))
-    
+
+    @cuda threads=threads blocks=blocks raised_cosine_kernel_gpu!(currents, stg.times, t, Float32(spk_args.t_window))
+
     output = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
     return output
 end
@@ -237,17 +281,17 @@ function spike_current!(output::CuArray{Float32}, train::SpikeTrainGPU, t::Float
                         currents_buffer::CuArray{Float32}, scatter_buffer::CuArray{Float32})
     scale = spk_args.spk_scale
     t_window = Float32(spk_args.t_window)
-    
+
     # Compute kernel values in-place
-    currents_buffer .= gaussian_kernel_gpu.(train.times, t, t_window) .* scale
-    
+    currents_buffer .= raised_cosine_kernel_gpu.(train.times, t, t_window) .* scale
+
     # Zero the scatter buffer and accumulate
     scatter_buffer .= 0.0f0
     parallel_scatter_add!(scatter_buffer, train.linear_indices, currents_buffer)
-    
+
     # Copy reshaped result to output
     output .= reshape(scatter_buffer, train.shape)
-    
+
     return nothing
 end
 
@@ -262,8 +306,8 @@ function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_o
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
     t = Float32(mod(t, spk_args.t_period))
-    #add the active currents, scaled by the gaussian kernel & bias magnitude
-    bias = mag .* gaussian_kernel_gpu.(times, t, Float32(spk_args.t_window))
+    #add the active currents, scaled by the raised cosine kernel & bias magnitude
+    bias = mag .* raised_cosine_kernel_gpu.(times, t, Float32(spk_args.t_window))
 
     return bias
 end

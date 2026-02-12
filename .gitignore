@@ -12,3 +12,4 @@ figures/*
 coverage/*
 coverage
 .continue/*
+.claude/*

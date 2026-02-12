@@ -154,6 +154,70 @@ function periodic_gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_pe
     return i
 end
 
+"""
+    raised_cosine_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
+
+Raised cosine kernel for computing spike-induced currents.
+Provides a smoother, more numerically stable alternative to Gaussian kernels
+with bounded derivatives.
+
+# Arguments
+- `x`: Spike times
+- `t`: Current time
+- `t_sigma`: Width parameter of the kernel (support is ±2*t_sigma)
+
+# Details
+The raised cosine kernel is defined as:
+- k(dt) = 0.5 * (1 + cos(π*dt/w)) for |dt| ≤ w
+- k(dt) = 0 for |dt| > w
+
+where w = 2*t_sigma is the half-width and dt = t - x.
+
+This kernel has:
+- Compact support (zero outside ±2*t_sigma)
+- Continuous first derivative
+- Bounded gradients (no exponential growth/decay)
+- Better numerical stability for adjoint solvers
+"""
+function raised_cosine_kernel(x::AbstractArray, t::Real, t_sigma::Real)
+    dt = t .- x
+    half_width = 2.0f0 .* t_sigma
+    # Compute kernel value conditionally without mutation (Zygote-friendly)
+    abs_dt = abs.(dt)
+    i = ifelse.(abs_dt .<= half_width,
+                0.5f0 .* (1.0f0 .+ cos.(pi_f32 .* dt ./ half_width)),
+                0.0f0)
+    return i
+end
+
+"""
+    periodic_raised_cosine_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real) -> Array{Float32}
+
+Periodic raised cosine kernel for computing spike-induced currents in oscillatory systems.
+Computes the shortest distance on a periodic time domain before applying the raised cosine.
+
+# Arguments
+- `x`: Spike times
+- `t`: Current time
+- `t_sigma`: Width parameter of the kernel (support is ±2*t_sigma)
+- `t_period`: Period of the oscillation
+
+# Details
+Uses modular arithmetic to compute the shortest distance on the ring of circumference
+t_period, then applies the raised cosine kernel to this periodic distance.
+"""
+function periodic_raised_cosine_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real)
+    # Compute the shortest distance on the ring of circumference t_period
+    dt = mod.(t .- x .+ t_period/2.0f0, t_period) .- t_period/2.0f0
+    half_width = 2.0f0 .* t_sigma
+    # Compute kernel value conditionally without mutation (Zygote-friendly)
+    abs_dt = abs.(dt)
+    i = ifelse.(abs_dt .<= half_width,
+                0.5f0 .* (1.0f0 .+ cos.(pi_f32 .* dt ./ half_width)),
+                0.0f0)
+    return i
+end
+
 # Converts membrane potential to current by multiplying a sigmoidal function over
 # absolute magnitude with a gaussian function over the complex angle
 function potential_to_current(potential::AbstractArray{<:Complex}; spk_args::SpikingArgs)
@@ -417,11 +481,11 @@ within the specified time span.
 """
 function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
     shape = size(phases)
-    
+
     function inner(t::Real)
         # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
         times = phase_to_time(phases, spk_args.t_period, offset)
-        impulses = periodic_gaussian_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
+        impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
 
         ignore_derivatives() do
             if zeta > 0.0f0
@@ -524,17 +588,102 @@ function phase_to_potential(phase::Real, t::Real; offset::Real=0.0f0, spk_args::
 end
 
 """
+    kernel_integral(spk_args::SpikingArgs) -> Float32
+
+Compute the integrated area under the raised cosine kernel used for spike currents.
+This represents the total "charge" or magnitude contribution from a single spike event.
+
+# Arguments
+- `spk_args::SpikingArgs`: Spiking neuron parameters containing t_window
+
+# Returns
+- Float32: The integral ∫ k(t) dt over the kernel's support
+
+# Details
+For the raised cosine kernel k(dt) = 0.5 * (1 + cos(π*dt/w)) where w = 2*t_window:
+∫_{-w}^{w} k(dt) dt = w = 2*t_window
+
+This integral is used to scale bias offsets so they match the magnitude of
+kernel-integrated spike contributions in the ODE dynamics.
+"""
+function kernel_integral(spk_args::SpikingArgs)
+    # For raised cosine kernel: ∫ k(t) dt = 2*t_window
+    return 2.0f0 * spk_args.t_window
+end
+
+"""
+    bias_to_complex_offset(bias_params::LuxParams, spk_args::SpikingArgs)
+    bias_to_complex_offset(bias::AbstractArray{<:Complex}, spk_args::SpikingArgs)
+
+Convert bias parameters to a time-invariant complex offset that can be added to neuron potentials.
+
+This creates a constant complex value that shifts the origin in the complex plane, achieving
+the same effect as adding bias in non-spiking networks but for temporal ODE solutions.
+
+# Arguments
+- `bias_params::LuxParams` or `bias::AbstractArray{<:Complex}`: Bias parameters with real/imaginary parts or complex array
+- `spk_args::SpikingArgs`: Spiking neuron parameters
+
+# Returns
+- Complex array representing the constant offset to add to potentials before phase extraction
+
+# Details
+The bias is converted to a complex value at t=0 (canonical time point) to create a
+time-invariant offset. The magnitude is scaled by the integrated area under the spike
+kernel to match the magnitude of actual spike contributions in the ODE dynamics.
+
+When added to neuron potentials u(t), this shifts the origin in the complex plane,
+affecting the extracted phases without introducing temporal dynamics or sharp gradients
+in the adjoint solve.
+"""
+function bias_to_complex_offset(bias_params::NamedTuple, spk_args::SpikingArgs)
+    bias = bias_params.bias_real .+ 1im .* bias_params.bias_imag
+    return bias_to_complex_offset(bias, spk_args)
+end
+
+function bias_to_complex_offset(bias::AbstractArray{<:Complex}, spk_args::SpikingArgs)
+    # Extract phase and magnitude from complex bias
+    phase = complex_to_angle(bias)
+    mag = abs.(bias)
+
+    # Compute the scaling factor from kernel integration
+    # This matches the magnitude contribution of a spike integrated over time
+    kernel_scale = kernel_integral(spk_args) * spk_args.spk_scale
+
+    # Convert to complex offset at canonical time t=0
+    # This creates a time-invariant offset that shifts the origin in complex plane
+    bias_offset = similar(bias, ComplexF32)
+    for i in eachindex(bias)
+        if mag[i] > 0.0f0
+            # Create a complex number with the desired phase and magnitude at t=0
+            # Scale by kernel integral to match spike contribution magnitudes
+            bias_offset[i] = mag[i] * kernel_scale * phase_to_potential(phase[i], 0.0f0, offset=0.0f0, spk_args=spk_args)
+        else
+            bias_offset[i] = ComplexF32(0.0f0)
+        end
+    end
+
+    return bias_offset
+end
+
+"""
 Convert the potential of a neuron at an arbitrary point in time to its phase relative to a reference
 """
-function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0, spk_args::SpikingArgs, threshold::Bool=false)
+function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0, spk_args::SpikingArgs, threshold::Bool=false, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     current_zero = similar(potential, ComplexF32, (1))
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
         current_zero = phase_to_potential(0.0f0, t, offset=offset, spk_args=spk_args)
     end
+
+    # Apply complex bias shift if provided (shifts origin in complex plane)
+    if bias !== nothing
+        potential = potential .+ bias
+    end
+
     #get the arc subtended in the complex plane between that reference and our neuron potentials
-    arc = angle(current_zero) .- angle.(potential) 
+    arc = angle(current_zero) .- angle.(potential)
 
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
@@ -552,12 +701,17 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     return phase
 end
 
-function unrotate_solution(potentials::AbstractVector{<:AbstractArray}, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs)
+function unrotate_solution(potentials::AbstractVector{<:AbstractArray}, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     current_zeros = similar(potentials[1], ComplexF32, (length(ts)))
 
     ignore_derivatives() do
         #find the angle of a neuron representing 0 phase at the current moment in time
         current_zeros = phase_to_potential(0.0f0, ts, offset=offset, spk_args=spk_args)
+    end
+
+    # Apply complex bias shift if provided (shifts origin in complex plane)
+    if bias !== nothing
+        potentials = [p .+ bias for p in potentials]
     end
 
     potentials = current_zeros .* conj.(potentials)
@@ -580,7 +734,7 @@ function potential_to_phase(ut::Tuple{<:AbstractVector{<:AbstractArray}, <:Abstr
     return potential_to_phase(potential, ts; spk_args=spk_args, kwargs...)
 end
 
-function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
+function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     current_zeros = similar(potential, ComplexF32, (length(ts)))
     dims = collect(1:ndims(potential))
@@ -589,10 +743,17 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
         #find the angle of a neuron representing 0 phase at the current moment in time
         current_zeros = phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args)
     end
+
     #get the arc subtended in the complex plane between that reference and our neuron potentials
     potential = permutedims(potential, reverse(dims))
-    arc = angle.(current_zeros) .- angle.(potential) 
-    
+
+    # Apply complex bias shift if provided (shifts origin in complex plane)
+    if bias !== nothing
+        potential = potential .+ bias
+    end
+
+    arc = angle.(current_zeros) .- angle.(potential)
+
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 
@@ -989,20 +1150,20 @@ This function provides a way to discretize a continuous dynamical solution into
 a sequence of spikes, which is useful for analyzing the system's behavior in
 terms of discrete events.
 """
-function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
+function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
 
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
-    train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset)
+    train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset, bias=bias)
     return train
 end
 
 """
 This implementation takes a full solution (represented by a vector of arrays) and finds the spikes from it.
 """
-function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real)
+function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
     inds = [argmin(abs.(t .- t_c)) for t_c in cycles]
@@ -1010,7 +1171,7 @@ function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector
     #sample the potential at the end of each cycle
     u = u[inds] |> stack
     ts = t[inds]
-    train = solution_to_train(u, ts, spk_args=spk_args, offset=offset)
+    train = solution_to_train(u, ts, spk_args=spk_args, offset=offset, bias=bias)
     return train
 end
 
@@ -1018,7 +1179,12 @@ end
 This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
 to spikes.
 """
-function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:Real}; spk_args::SpikingArgs, offset::Real)
+function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
+    # Apply complex bias shift if provided (shifts origin in complex plane)
+    if bias !== nothing
+        u = u .+ bias
+    end
+
     #determine the ending time of each cycle
     spiking = abs.(u) .> spk_args.threshold
     

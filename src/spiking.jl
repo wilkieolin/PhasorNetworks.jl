@@ -11,7 +11,7 @@ end
 
 function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     times = phase_to_time(phase, offset=t_offset, spk_args=spk_args)
-    impulses = periodic_gaussian_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
+    impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
     bias = mag .* impulses
 
     return bias
@@ -266,7 +266,7 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         if typeof(spk_args.spike_kernel) <: Function
             current_kernel = times -> spk_args.spike_kernel(times, t)
         elseif spk_args.spike_kernel == :gaussian
-            current_kernel = times -> gaussian_kernel(times, t, spk_args.t_window)
+            current_kernel = times -> raised_cosine_kernel(times, t, spk_args.t_window)
         end
         impulses = current_kernel(active_tms)
         
@@ -290,11 +290,11 @@ function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
     t = Float32(t)
 
     #add currents into the synapses
-    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+    current_kernel = x -> raised_cosine_kernel(x, t, spk_args.t_window)
     impulses = current_kernel(train.times)
     current = parallel_scatter_add(train.linear_indices, impulses, train.linear_shape)
     current = reshape(current, train.shape)
-    
+
     return current
 end
 
@@ -422,7 +422,7 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
 
      #solve the memory compartment using the base oscillator_bank method
     if use_bias
-        sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
     else
         sol = oscillator_bank(u0, dzdt_nobias, tspan=tspan, spk_args=spk_args, params)
     end
