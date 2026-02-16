@@ -68,7 +68,7 @@ function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     dt = t - x
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        return 0.5f0 * (1.0f0 + CUDA.cos(3.14159265f0 * dt / half_width))
+        return 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
     else
         return 0.0f0
     end
@@ -87,7 +87,45 @@ function raised_cosine_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
         dt = t - x
         half_width = 2.0f0 * t_sigma
         if abs(dt) <= half_width
-            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.14159265f0 * dt / half_width))
+            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
+        else
+            output[i] = 0.0f0
+        end
+    end
+    return nothing
+end
+
+"""
+    periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32) -> Float32
+
+GPU-optimized periodic raised cosine kernel for oscillatory systems.
+Computes the shortest distance on a periodic time domain before applying the raised cosine.
+"""
+function periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32)
+    # Compute shortest distance on ring of circumference t_period
+    dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
+    half_width = 2.0f0 * t_sigma
+    if abs(dt) <= half_width
+        return 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
+    else
+        return 0.0f0
+    end
+end
+
+"""
+    periodic_raised_cosine_kernel_gpu!(output, times, t, t_sigma, t_period)
+
+CUDA kernel for periodic raised cosine kernel values.
+"""
+function periodic_raised_cosine_kernel_gpu!(output, times, t::Float32, t_sigma::Float32, t_period::Float32)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= length(times)
+        x = times[i]
+        # Compute shortest distance on ring of circumference t_period
+        dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
+        half_width = 2.0f0 * t_sigma
+        if abs(dt) <= half_width
+            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
         else
             output[i] = 0.0f0
         end
@@ -214,11 +252,13 @@ function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::Sp
     #normalize by pi and shift to -1, 1
     phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
 
-    #replace silent neurons with NaN
-    silent = abs.(potential) .< spk_args.threshold
-    phase[silent] .= Float32(NaN)
+    #replace silent neurons with NaN (only if threshold=true)
+    if threshold
+        silent = abs.(potential) .< spk_args.threshold
+        phase[silent] .= Float32(NaN)
+    end
     phase = permutedims(phase, reverse(dims))
-    
+
     return phase
 end
 
@@ -282,8 +322,11 @@ function spike_current!(output::CuArray{Float32}, train::SpikeTrainGPU, t::Float
     scale = spk_args.spk_scale
     t_window = Float32(spk_args.t_window)
 
-    # Compute kernel values in-place
-    currents_buffer .= raised_cosine_kernel_gpu.(train.times, t, t_window) .* scale
+    # Compute kernel values in-place using CUDA kernel
+    threads = N_THREADS
+    blocks = cld(length(train.times), threads)
+    @cuda threads=threads blocks=blocks raised_cosine_kernel_gpu!(currents_buffer, train.times, t, t_window)
+    currents_buffer .*= scale
 
     # Zero the scatter buffer and accumulate
     scatter_buffer .= 0.0f0
@@ -305,9 +348,15 @@ function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_o
     #what times to the bias values correlate to?
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
     #determine the time within the cycle
-    t = Float32(mod(t, spk_args.t_period))
-    #add the active currents, scaled by the raised cosine kernel & bias magnitude
-    bias = mag .* raised_cosine_kernel_gpu.(times, t, Float32(spk_args.t_window))
+    t_mod = Float32(mod(t, spk_args.t_period))
+    #compute kernel values using CUDA kernel (periodic version for bias)
+    n = length(times)
+    kernel_vals = CUDA.zeros(Float32, n)
+    threads = N_THREADS
+    blocks = cld(n, threads)
+    @cuda threads=threads blocks=blocks periodic_raised_cosine_kernel_gpu!(kernel_vals, times, t_mod, Float32(spk_args.t_window), Float32(spk_args.t_period))
+    #scale by bias magnitude and reshape to match phase shape
+    bias = reshape(mag .* kernel_vals, size(phase))
 
     return bias
 end
