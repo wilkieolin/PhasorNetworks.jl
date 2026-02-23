@@ -75,6 +75,102 @@ end
 
 
 """
+    normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
+
+Hard normalization: project complex numbers to the unit circle, then rotate by −π/2 to
+convert from potential representation to current representation.
+
+# Arguments
+- `z::AbstractArray{<:Complex}`: Array of complex numbers
+- `threshold::Real`: Minimum magnitude to avoid division by zero (default: 1.0f-10)
+
+# Returns
+- Complex array with unit magnitude, rotated by −π/2 relative to the input phase
+
+# Details
+For each complex number z = r*exp(iθ), returns exp(i(θ − π/2)) = −i·z/|z|.
+Values with magnitude below threshold are mapped to −i (the rotation of the 1+0im fallback).
+
+The −π/2 rotation aligns the normalization output with the current convention used in
+Resonate-and-Fire spiking networks: a neuron fires at maximum imaginary value (potential
+angle π/2), and its spike is received as a positive real current (angle 0) at postsynaptic
+neurons. This rotation ensures that a "firing" neuron (potential at +i) outputs a maximum
+excitatory current (+1), making this function a faithful continuous-time analog of sparse
+spiking activation.
+"""
+function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
+    r = abs.(z)
+    # Use ifelse for Zygote compatibility
+    # For very small magnitudes, map to 1+0im before rotation to avoid numerical issues
+    scale_factor = ifelse.(r .> Float32(threshold), 1.0f0 ./ r, 0.0f0)
+    default_value = ComplexF32(1.0f0 + 0.0f0im)
+
+    normalized = ifelse.(r .> Float32(threshold), z .* scale_factor, default_value)
+    return normalized
+end
+
+"""
+    soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+
+Soft normalization: gradually project complex numbers toward the unit circle, then rotate by −π/2
+to convert from potential representation to current representation.
+
+# Arguments
+- `z::AbstractArray{<:Complex}`: Array of complex numbers
+- `r_lo::Real`: Lower magnitude threshold - below this, minimal normalization applied (default: 0.1)
+- `r_hi::Real`: Upper magnitude threshold - above this, full normalization applied (default: 0.2)
+
+# Returns
+- Complex array with magnitudes smoothly pushed toward 1, rotated by −π/2
+
+# Details
+The normalization strength is controlled by a sigmoid function of the magnitude:
+- For |z| < r_lo: weak normalization, keeps values near their original magnitude (preserves "uncertainty")
+- For |z| > r_hi: strong normalization, pushes toward unit circle (normalizes "confident" values)
+- For r_lo ≤ |z| ≤ r_hi: smooth transition using sigmoid
+
+After magnitude normalization, applies a −π/2 rotation (multiply by −i) so that the output
+represents a current rather than a potential. This matches the Resonate-and-Fire spiking
+convention where a neuron firing (potential at angle π/2) injects a positive real current
+(angle 0) into postsynaptic neurons.
+
+The soft normalization additionally models sub-threshold silence: neurons with small-magnitude
+potentials (below r_lo) contribute weak currents, analogous to silent spiking neurons.
+
+# Example
+```julia
+# Small magnitude values stay small (uncertain/silent)
+z_small = 0.05f0 * exp(1im * π/4)
+z_norm = soft_normalize_to_unit_circle(z_small)  # magnitude ≈ 0.05-0.1
+
+# Large magnitude values project to unit circle (active/firing)
+z_large = 5.0f0 * exp(1im * π/4)
+z_norm = soft_normalize_to_unit_circle(z_large)  # magnitude ≈ 1.0
+```
+"""
+function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+    r = abs.(z)
+
+    # Compute normalization strength using sigmoid
+    # Maps magnitude to [0, 1] with smooth transition between r_lo and r_hi
+    midpoint = (r_lo + r_hi) / 2.0f0
+    steepness = 6.0f0 / (r_hi - r_lo)  # Controls transition sharpness
+    normalization_strength = sigmoid_fast(steepness .* (r .- midpoint))
+
+    # Target magnitude interpolates between current magnitude (0 strength) and 1.0 (full strength)
+    # normalization_strength = 0: target_magnitude = r (no change)
+    # normalization_strength = 1: target_magnitude = 1.0 (unit circle)
+    target_magnitude = normalization_strength .+ r .* (1.0f0 .- normalization_strength)
+
+    # Avoid division by zero
+    safe_r = max.(r, 1.0f-10)
+
+    # Scale z to have target magnitude while preserving phase
+    normalized = z .* (target_magnitude ./ safe_r)
+    return normalized
+end
+
+"""
     cmpx_to_realvec(u::Array{<:Complex})
 
 Convert an array of complex numbers to a real-valued array by stacking real and imaginary parts.
@@ -479,7 +575,8 @@ determined by spk_args.t_window. Optional Gaussian noise can be added with ampli
 The returned function preserves the input array's shape and can be evaluated at any time
 within the specified time span.
 """
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::Bool=false, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
+    @assert zeta <= 0.0f0 || rng !== nothing "Must provide RNG if noise is being applied."
     shape = size(phases)
 
     function inner(t::Real)
@@ -492,6 +589,10 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, offset::
                 noise = zeta .* randn(rng, Float32, size(impulses))
                 impulses .+= noise
             end
+        end
+
+        if rotate
+            impulses = impulses .* phase_to_potential(0.0f0, t, spk_args=spk_args, offset=0.0f0)
         end
 
         return impulses

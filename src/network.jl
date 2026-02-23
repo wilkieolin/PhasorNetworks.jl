@@ -286,7 +286,7 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer}, 
-                    activation = identity;
+                    activation = normalize_to_unit_circle;
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
@@ -349,25 +349,53 @@ function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
 end
 
 # Calls
-function (a::PhasorDense)(x::AbstractArray, params::LuxParams, state::NamedTuple)
-    xz = angle_to_complex(x)
-    #stateless calls to dense
-    y_real, _ = a.layer(real.(xz), params.layer, state.layer)
-    y_imag, _ = a.layer(imag.(xz), params.layer, state.layer)
+"""
+    (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+
+Core complex-valued forward pass. This is the primary implementation that all other input types route to.
+
+# Process
+1. Apply linear transformation to real and imaginary parts separately
+2. Add complex bias (if enabled)
+3. Apply normalization function (projects toward/onto unit circle)
+4. Convert to phases if output_type=:phase, otherwise keep complex
+"""
+function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+    # Linear transformation on real and imaginary components
+    y_real, _ = a.layer(real.(x), params.layer, state.layer)
+    y_imag, _ = a.layer(imag.(x), params.layer, state.layer)
     y = y_real .+ 1.0f0im .* y_imag
 
+    # Apply complex bias
     if a.use_bias
         y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
-        y_activated = a.activation(y_biased)
     else
-        #passthrough
         st_updated_bias = state.bias
-        y_activated = a.activation(y)
+        y_biased = y
     end
 
-    # New state for PhasorDense layer
+    # Apply normalization (this is the "activation" that shapes the complex values)
+    # Rotate by -π/2 (multiply by -i = e^(-iπ/2))
+    # Firing potential (angle π/2) → positive real current (angle 0)
+    y_normalized = a.activation(y_biased) .* ComplexF32(0.0f0 - 1.0f0im) 
     st_new = (layer = state.layer, bias = st_updated_bias)
-    return y_activated, st_new
+    return y_normalized, st_new
+end
+
+"""
+    (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+
+Phase-based interface. Converts real-valued phases to complex and dispatches to complex method.
+"""
+function (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+    # Convert phases to complex representation on unit circle
+    xz = angle_to_complex(x)
+
+    # Dispatch to complex-valued core implementation
+    y_normalized, st_new = a(xz, params, state)
+    # If we're returning phases, unrotate by 90*
+    y_phase = complex_to_angle(y_normalized .* ComplexF32(0.0f0 + 1.0f0im))
+    return y_phase, st_new
 end
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
@@ -381,7 +409,8 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
-        return y, state
+        phase = complex_to_angle.(y)
+        return phase, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current

@@ -41,6 +41,8 @@ cmpx_to_realvec,
 realvec_to_cmpx,
 period_to_angfreq,
 angfreq_to_period,
+normalize_to_unit_circle,
+soft_normalize_to_unit_circle,
 
 #spiking
 default_spk_args,

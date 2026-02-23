@@ -2,7 +2,7 @@
 
 julia_version = "1.11.7"
 manifest_format = "2.0"
-project_hash = "56e914d67e84080f9c5c8d8f6ecc513f9738e296"
+project_hash = "c62602c7e29368037a376a778af745d59d8b5d90"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "8b2b045b22740e4be20654175cc38291d48539db"
@@ -239,6 +239,39 @@ deps = ["Static"]
 git-tree-sha1 = "f21cfd4950cb9f0587d5067e69405ad2acd27b87"
 uuid = "62783981-4cbd-42fc-bca8-16325de8dc4b"
 version = "0.1.6"
+
+[[deps.Boltz]]
+deps = ["ADTypes", "ArgCheck", "Artifacts", "ChainRulesCore", "Compat", "ConcreteStructs", "Downloads", "ForwardDiff", "Functors", "LazyArtifacts", "Lux", "LuxCore", "LuxLib", "MLDataDevices", "Markdown", "NNlib", "Random", "Reexport", "Scratch", "Setfield", "Static", "Statistics", "WeightInitializers"]
+git-tree-sha1 = "5d2ce92a02cdd73e15ccd87a9759fd57e33b6862"
+uuid = "4544d5e4-abc5-4dea-817f-29e4c205d9c8"
+version = "1.7.1"
+
+    [deps.Boltz.extensions]
+    BoltzDataInterpolationsExt = "DataInterpolations"
+    BoltzDynamicExpressionsExt = "DynamicExpressions"
+    BoltzEnzymeExt = "Enzyme"
+    BoltzJLD2Ext = "JLD2"
+    BoltzMetalheadExt = "Metalhead"
+    BoltzPickleExt = "Pickle"
+    BoltzReactantExt = ["Reactant", "ReactantCore"]
+    BoltzReverseDiffExt = "ReverseDiff"
+    BoltzSafeTensorsExt = "SafeTensors"
+    BoltzTrackerExt = "Tracker"
+    BoltzZygoteExt = "Zygote"
+
+    [deps.Boltz.weakdeps]
+    DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
+    DynamicExpressions = "a40a106e-89c9-4ca8-8020-a735e8728b6b"
+    Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+    JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+    Metalhead = "dbeba491-748d-5e0e-a39e-b530a07fa0cc"
+    Pickle = "fbb45041-c46e-462f-888f-7c521cafbc2c"
+    Reactant = "3c362404-f566-11ee-1572-e11a4b42c853"
+    ReactantCore = "a3311ec8-5e00-46d5-b541-4f83e724a433"
+    ReverseDiff = "37e2e3b7-166d-5795-8a7a-e32c996b4267"
+    SafeTensors = "eeda0dda-7046-4914-a807-2495fc7abb89"
+    Tracker = "9f7883ad-71c0-57eb-9f7f-b5c9e6d3789c"
+    Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [[deps.BoundaryValueDiffEq]]
 deps = ["ADTypes", "BoundaryValueDiffEqAscher", "BoundaryValueDiffEqCore", "BoundaryValueDiffEqFIRK", "BoundaryValueDiffEqMIRK", "BoundaryValueDiffEqMIRKN", "BoundaryValueDiffEqShooting", "DiffEqBase", "FastClosures", "ForwardDiff", "LinearAlgebra", "Reexport", "SciMLBase"]
@@ -679,6 +712,18 @@ weakdeps = ["Functors"]
 
     [deps.DiffEqCallbacks.extensions]
     DiffEqCallbacksFunctorsExt = "Functors"
+
+[[deps.DiffEqFlux]]
+deps = ["ADTypes", "Boltz", "ChainRulesCore", "ConcreteStructs", "Distributions", "LinearAlgebra", "Lux", "LuxCore", "LuxLib", "PrecompileTools", "Random", "Reexport", "SciMLBase", "SciMLSensitivity", "Setfield", "Static"]
+git-tree-sha1 = "fbc85e603da0e14d86310ee668bb218ffca7c547"
+uuid = "aae7a2af-3d4f-5e19-a356-7da93b79d9d0"
+version = "4.6.0"
+
+    [deps.DiffEqFlux.extensions]
+    DiffEqFluxDataInterpolationsExt = "DataInterpolations"
+
+    [deps.DiffEqFlux.weakdeps]
+    DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
 
 [[deps.DiffEqNoiseProcess]]
 deps = ["DiffEqBase", "Distributions", "GPUArraysCore", "LinearAlgebra", "Markdown", "Optim", "PoissonRandom", "QuadGK", "Random", "Random123", "RandomNumbers", "RecipesBase", "RecursiveArrayTools", "ResettableStacks", "SciMLBase", "StaticArraysCore", "Statistics"]
@@ -1760,19 +1805,20 @@ version = "0.3.4"
 
 [[deps.LuxCore]]
 deps = ["DispatchDoctor", "Random", "SciMLPublic"]
-git-tree-sha1 = "ee3794a2ca3022bc066b5fb87b135c1d5f3b1cb7"
+git-tree-sha1 = "c5d3f799e85287cee5ff569595d107edb293ec32"
 uuid = "bb33d45b-7691-41d6-9220-0943567d0623"
-version = "1.4.2"
+version = "1.5.0"
 
     [deps.LuxCore.extensions]
-    LuxCoreArrayInterfaceReverseDiffExt = ["ArrayInterface", "ReverseDiff"]
-    LuxCoreArrayInterfaceTrackerExt = ["ArrayInterface", "Tracker"]
-    LuxCoreChainRulesCoreExt = "ChainRulesCore"
-    LuxCoreEnzymeCoreExt = "EnzymeCore"
-    LuxCoreFunctorsExt = "Functors"
-    LuxCoreMLDataDevicesExt = ["Adapt", "MLDataDevices"]
-    LuxCoreReactantExt = "Reactant"
-    LuxCoreSetfieldExt = "Setfield"
+    ArrayInterfaceReverseDiffExt = ["ArrayInterface", "ReverseDiff"]
+    ArrayInterfaceTrackerExt = ["ArrayInterface", "Tracker"]
+    ChainRulesCoreExt = "ChainRulesCore"
+    EnzymeCoreExt = "EnzymeCore"
+    FluxExt = "Flux"
+    FunctorsExt = "Functors"
+    MLDataDevicesExt = ["Adapt", "MLDataDevices"]
+    ReactantExt = "Reactant"
+    SetfieldExt = "Setfield"
 
     [deps.LuxCore.weakdeps]
     Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"

@@ -339,7 +339,7 @@ Returns a loss that:
 - Is properly scaled for gradient-based optimization
 """
 function similarity_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1)
-    distance = abs.(1.0 .- similarities) .* truth
+    distance = abs.(1.0f0 .- similarities) .* truth
     distance = sum(distance .* truth, dims = dim)
     loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
     return loss
