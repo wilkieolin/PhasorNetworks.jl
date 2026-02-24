@@ -575,19 +575,23 @@ determined by spk_args.t_window. Optional Gaussian noise can be added with ampli
 The returned function preserves the input array's shape and can be evaluated at any time
 within the specified time span.
 """
-function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::Bool=false, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=Float32(0.0))
+function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::Bool=false, offset::Real = 0.0f0, tspan::Tuple{<:Real, <:Real}, rng::Union{AbstractRNG, Nothing} = nothing, zeta::Real=0.0f0, bias::Real=0.0f0)
     @assert zeta <= 0.0f0 || rng !== nothing "Must provide RNG if noise is being applied."
     shape = size(phases)
 
     function inner(t::Real)
         # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
         times = phase_to_time(phases, spk_args.t_period, offset)
-        impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
+        impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period) .* z_0
 
         ignore_derivatives() do
             if zeta > 0.0f0
                 noise = zeta .* randn(rng, Float32, size(impulses))
-                impulses .+= noise
+                impulses .+= ComplexF32.(noise .+ 0.0im)
+            end
+
+            if bias > 0.0f0
+                impulses .+= ComplexF32.(bias .+ 0.0im)
             end
         end
 
