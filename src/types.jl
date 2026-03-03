@@ -261,7 +261,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                     solver = Heun(),
                     solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
-                                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
+                                    :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                                     :save_start => true))
                     
     return SpikingArgs(Float32(leakage),
@@ -314,7 +314,7 @@ function SpikingArgs_NN(; leakage::Real = -0.2f0,
     solver_args = Dict(:dt => 0.01f0,
                     :adaptive => false,
                     :dense => false,
-                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
+                    :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
                     :save_start => true),
     update_fn::Function)
 

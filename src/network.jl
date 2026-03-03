@@ -277,8 +277,9 @@ struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer # the conventional layer used to transform inputs
     bias # the bias in the complex domain used to shift away from the origin
     activation # the activation function which converts complex values to real phases
-    spk_args::SpikingArgs # used to set leakage, period, etc.
     use_bias::Bool # apply the layer with the bias if true
+    init_leakage::Function # initializer for the values to scale the leakge in spk_args
+    init_period::Function # initializer for the values to scale the t_period in spk_args
     trainable_leakage::Bool # can the ODE optimizer access leakage in params
     trainable_period::Bool # can the ODE optimizer access period in params
     return_type::SolutionType # return the full ODE solution from a spiking input
@@ -286,10 +287,11 @@ end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer}, 
                     activation = normalize_to_unit_circle;
-                    spk_args::SpikingArgs,
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
+                    init_leakage = ones32,
+                    init_period = ones32,
                     trainable_leakage::Bool = false,
                     trainable_period::Bool = false,
                     kwargs...)
@@ -298,15 +300,15 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
     return PhasorDense(layer, 
                         bias, 
                         activation,
-                        spk_args,
                         use_bias,
+                        init_leakage,
+                        init_period,
                         trainable_leakage,
                         trainable_period,
                         return_type)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
-    spk_args = l.spk_args
     ps_layer = Lux.initialparameters(rng, l.layer)
     parameters = (layer = ps_layer,)
     
@@ -317,12 +319,12 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
 
     n_out = l.layer.out_dims
     if l.trainable_leakage
-        ps_leakage = ones(Float32, (n_out,)) .* spk_args.leakage
+        ps_leakage = l.init_leakage(rng, n_out,)
         parameters = merge(parameters, (leakage = ps_leakage,))
     end
 
     if l.trainable_period
-        ps_period = ones(Float32, (n_out,)) .* spk_args.t_period
+        ps_period = l.init_period(rng, n_out,)
         parameters = merge(parameters, (period = ps_period,))
     end
     return parameters
@@ -331,20 +333,16 @@ end
 function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
     st_layer = Lux.initialstates(rng, l.layer)
     st_bias = Lux.initialstates(rng, l.bias)
+    state = (layer = st_layer, bias = st_bias,)
 
     n_out = l.layer.out_dims
-    z = zeros(ComplexF32, (n_out,))
-    state = (layer = st_layer,
-            bias = st_bias,
-            z = z,)
-    
     if !l.trainable_leakage
-        st_leakage = ones(Float32, (n_out,)) .* spk_args.leakage
+        st_leakage = l.init_leakage(rng, n_out,)
         state = merge(state, (leakage = st_leakage,))
     end
 
     if !l.trainable_period
-        st_period = ones(Float32, (n_out,)) .* spk_args.t_period
+        st_period = l.init_period(rng, n_out,)
         state = merge(state, (period = st_period,))
     end
     return state
@@ -363,13 +361,10 @@ Core complex-valued forward pass. This is the primary implementation that all ot
 4. Convert to phases if output_type=:phase, otherwise keep complex
 """
 function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
-    z = state.z
-    k = neuron_constant(a.spk_args)
     # Linear transformation on real and imaginary components
     y_real, _ = a.layer(real.(x), params.layer, state.layer)
     y_imag, _ = a.layer(imag.(x), params.layer, state.layer)
-
-    y = k .* z .+ y_real .+ 1.0f0im .* y_imag 
+    y = y_real .+ 1.0f0im .* y_imag 
 
     # Apply complex bias
     if a.use_bias
@@ -379,12 +374,8 @@ function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state:
         y_biased = y
     end
 
-    # Apply normalization (this is the "activation" that shapes the complex values)
-    # Rotate by -π/2 (multiply by -i = e^(-iπ/2))
-    # Firing potential (angle π/2) → positive real current (angle 0)
-    y_normalized = a.activation(y_biased) .* ComplexF32(0.0f0 - 1.0f0im) 
-    st_new = (layer = state.layer, bias = st_updated_bias, z = y_biased)
-    return y_normalized, st_new
+    st_new = merge(state, (layer = state.layer, bias = st_updated_bias))
+    return y_biased, st_new
 end
 
 """
@@ -393,16 +384,13 @@ end
 Phase-based interface. Converts real-valued phases to complex and dispatches to complex method.
 """
 function (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
-    z = state.z
     # Convert phases to complex representation on unit circle
     xz = angle_to_complex(x)
 
     # Dispatch to complex-valued core implementation
-    y_normalized, st_new = a(xz, params, state)
-    # Ignore the rotation of z in the atemporal interface
-    st_new = merge(st_new, (z = z,))
-    # If we're returning phases, unrotate by 90*
-    y_phase = complex_to_angle(y_normalized .* ComplexF32(0.0f0 + 1.0f0im))
+    y_biased, st_new = a(xz, params, state)
+    y_normalized = a.activation(y_biased)
+    y_phase = complex_to_angle(y_normalized)
     return y_phase, st_new
 end
 
@@ -1330,13 +1318,19 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
            end
            
            opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
+
+           # Prompt Julia's GC to reclaim Zygote tape and ODE solution objects from
+           # this step before the next forward/backward solve begins.  Without this,
+           # large sol.u arrays (one per saveat point) accumulate on the host and GPU.
+           GC.gc(false)
+           CUDA.functional() && CUDA.reclaim()
        end
    end
    
    if sample_gradients > 0
-    return losses, ps, st, gradients
+       return losses, ps, st, gradients
    else
-    return losses, ps, st
+       return losses, ps, st
    end
 end
 

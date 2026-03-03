@@ -579,9 +579,13 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::
     @assert zeta <= 0.0f0 || rng !== nothing "Must provide RNG if noise is being applied."
     shape = size(phases)
 
+    # Precompute spike times once — they depend only on the fixed input phases,
+    # not on the ODE integration time t.  Avoids re-allocating a full-batch GPU
+    # array at every ODE timestep (and again during every adjoint VJP step).
+    times = phase_to_time(phases, spk_args.t_period, offset)
+
     function inner(t::Real)
         # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
-        times = phase_to_time(phases, spk_args.t_period, offset)
         impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period) .* z_0
 
         ignore_derivatives() do
