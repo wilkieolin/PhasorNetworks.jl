@@ -27,7 +27,7 @@ Convert an array of complex numbers to their angles in units of π radians.
 - Array of angles in units of π radians, in range [-1, 1]
 """
 function complex_to_angle(x::AbstractArray)
-    return angle.(x) ./ pi_f32
+    return Phase.(angle.(x) ./ pi_f32)
 end
 
 """
@@ -43,7 +43,7 @@ Convert real and imaginary components to an angle in units of π radians.
 - Angle in units of π radians, in range [-1, 1]
 """
 function complex_to_angle(x_real::Real, x_imag::Real)
-    return atan(x_imag, x_real) / pi_f32
+    return Phase(atan(x_imag, x_real) / pi_f32)
 end
 
 """
@@ -70,7 +70,7 @@ function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real 
         s .= sigmoid_fast(3.0f0 .* m .- (r_hi - r_lo))
     end
 
-    return s .* angle.(x) / pi_f32
+    return Phase.(s .* angle.(x) / pi_f32)
 end
 
 
@@ -471,7 +471,7 @@ The conversion maps time t to phase φ as:
 """
 function time_to_phase(times::AbstractArray, period::Real, offset::Real)
     times = mod.((times .- offset), period) ./ period
-    phase = (times .- 0.5f0) .* 2.0f0
+    phase = Phase.((times .- 0.5f0) .* 2.0f0)
     return phase
 end
 
@@ -847,14 +847,14 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     arc = angle(current_zero) .- angle.(potential)
 
     #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
+    phase = Phase.(mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0)
 
     #replace silent neurons with NaN values
     ignore_derivatives() do
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                phase[i] = Float32(NaN)
+                phase[i] = Phase(NaN)
             end
         end
     end
@@ -916,14 +916,14 @@ function potential_to_phase(potential::AbstractArray, ts::AbstractVector; spk_ar
     arc = angle.(current_zeros) .- angle.(potential)
 
     #normalize by pi and shift to -1, 1
-    phase = mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0
+    phase = Phase.(mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0)
 
     #replace silent neurons with random values
     ignore_derivatives() do
         if threshold
             silent = findall(abs.(potential) .<= spk_args.threshold)
             for i in silent
-                phase[i] = Float32(NaN)
+                phase[i] = Phase(NaN)
             end
         end
     end

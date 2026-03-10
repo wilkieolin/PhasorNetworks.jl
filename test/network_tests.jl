@@ -47,9 +47,9 @@ function getdata(args)
 end
 
 function build_mlp(args, bias::Bool=true)
-    phasor_model = Chain(x -> tanh_fast.(x),
-                x -> x, 
-                PhasorDense(2 => 128, normalize_to_unit_circle, use_bias=bias), 
+    phasor_model = Chain(x -> Phase.(tanh_fast.(x)),
+                x -> x,
+                PhasorDense(2 => 128, normalize_to_unit_circle, use_bias=bias),
                 x -> x,
                 PhasorDense(128 => 2, normalize_to_unit_circle, use_bias=bias))
     ps, st = Lux.setup(args.rng, phasor_model)
@@ -57,9 +57,9 @@ function build_mlp(args, bias::Bool=true)
 end
 
 function build_spiking_mlp(args, spk_args, bias::Bool=true)
-    phasor_model = Chain(x -> tanh_fast.(x), 
-                MakeSpiking(spk_args, repeats), 
-                PhasorDense(2 => 128, soft_normalize_to_unit_circle, use_bias=bias), 
+    phasor_model = Chain(x -> Phase.(tanh_fast.(x)),
+                MakeSpiking(spk_args, repeats),
+                PhasorDense(2 => 128, soft_normalize_to_unit_circle, use_bias=bias),
                 x -> x,
                 PhasorDense(128 => 2, soft_normalize_to_unit_circle, use_bias=bias))
     ps, st = Lux.setup(args.rng, phasor_model)
@@ -68,7 +68,7 @@ end
 
 function build_ode_mlp(args, spk_args, bias::Bool=true)
     ode_model = Chain(
-                x -> tanh_fast.(x),
+                x -> Phase.(tanh_fast.(x)),
                 x -> phase_to_current(x, spk_args=spk_args, tspan=(0.0f0, 10.0f0)),
                 PhasorDense(2 => 128,
                         normalize_to_unit_circle,

@@ -55,7 +55,7 @@ Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| **Types** | `src/types.jl` | Core data structures: `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `PhaseArray`, `Args` |
+| **Types** | `src/types.jl` | Core data structures: `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
 | **Domains** | `src/domains.jl` | Conversions between phase, complex, time, potential, spike train, and real-vector representations |
 | **VSA** | `src/vsa.jl` | Vector Symbolic Architecture ops: `v_bind`, `v_unbind`, `v_bundle`, `v_bundle_project`, `similarity`, `random_symbols` |
 | **Network** | `src/network.jl` | Lux layer definitions: `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `ResidualBlock`, `PhasorAttention`, `SingleHeadAttention`, `MinPool`, `MakeSpiking`, `train()` |

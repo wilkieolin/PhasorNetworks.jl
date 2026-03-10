@@ -18,7 +18,7 @@ PhaseSolution,
 PotentialSolution,
 SpikingSolution,
 CurrentSolution,
-PhaseArray,
+Phase,
 Args,
 
 #domain conversions

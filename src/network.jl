@@ -389,12 +389,12 @@ function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state:
 end
 
 """
-    (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+    (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
 
 Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
 then normalizes and converts back to phases via `complex_to_angle`.
 """
-function (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+function (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     # Convert phases to complex representation on unit circle
     xz = angle_to_complex(x)
 
@@ -621,12 +621,12 @@ function (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedT
 end
 
 """
-    (pc::PhasorConv)(x::AbstractArray{<:Real}, ps::LuxParams, st::NamedTuple)
+    (pc::PhasorConv)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTuple)
 
 Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
 then normalizes and converts back to phases via `complex_to_angle`.
 """
-function (pc::PhasorConv)(x::AbstractArray{<:Real}, ps::LuxParams, st::NamedTuple)
+function (pc::PhasorConv)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTuple)
     xz = angle_to_complex(x)
     y_biased, st_new = pc(xz, ps, st)
     y_normalized = pc.activation(y_biased)
@@ -708,7 +708,7 @@ function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
     return state
 end
 
-function (cb::Codebook)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+function (cb::Codebook)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     return similarity_outer(x, state.codes), state
 end
 
@@ -940,12 +940,12 @@ function (a::PhasorFixed)(x::AbstractArray{<:Complex}, params::LuxParams, state:
 end
 
 """
-    (a::PhasorFixed)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+    (a::PhasorFixed)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
 
 Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
 then normalizes and converts back to phases via `complex_to_angle`.
 """
-function (a::PhasorFixed)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+function (a::PhasorFixed)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     xz = angle_to_complex(x)
     y_biased, st_new = a(xz, params, state)
     y_normalized = a.activation(y_biased)
@@ -1143,7 +1143,7 @@ function score_scale(potential::AbstractArray{<:Complex,3}, scores::AbstractArra
     return scaled
 end
 
-function attend(q::AbstractArray{<:Real, 3}, k::AbstractArray{<:Real, 3}, v::AbstractArray{<:Real, 3}; scale::AbstractArray=[1.0f0,])
+function attend(q::AbstractArray{<:Phase, 3}, k::AbstractArray{<:Phase, 3}, v::AbstractArray{<:Phase, 3}; scale::AbstractArray=[1.0f0,])
     #compute qk scores
     #produces (qt kt b)
     scores = score_scale(similarity_outer(q, k, dims=2), scale=scale)
@@ -1216,7 +1216,7 @@ function Lux.initialstates(rng::AbstractRNG, attention::PhasorAttention)
     return NamedTuple()
 end
 
-function (a::PhasorAttention)(q::AbstractArray{<:Real,3}, k::AbstractArray{<:Real,3}, v::AbstractArray{<:Real,3}, ps::LuxParams, st::NamedTuple)
+function (a::PhasorAttention)(q::AbstractArray{<:Phase,3}, k::AbstractArray{<:Phase,3}, v::AbstractArray{<:Phase,3}, ps::LuxParams, st::NamedTuple)
     result, scores = attend(q, k, v, scale=ps.scale)
 
     return result, (scores=scores,)

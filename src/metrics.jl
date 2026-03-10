@@ -43,7 +43,7 @@ Phase values representing the circular mean along specified dimensions.
 function angular_mean(phases::AbstractArray; dims)
     u = exp.(pi_f32 * 1.0f0im .* phases)
     u_mean = mean(u, dims=dims)
-    phase = angle.(u_mean) ./ pi_f32
+    phase = Phase.(angle.(u_mean) ./ pi_f32)
     return phase
 end
 

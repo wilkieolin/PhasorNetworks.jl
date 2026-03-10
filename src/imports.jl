@@ -5,7 +5,9 @@ using SciMLSensitivity, DifferentialEquations, Optimisers
 using Lux: glorot_uniform, truncated_normal
 using LinearAlgebra: diagind, I
 using DifferentialEquations: ODESolution
-using ChainRulesCore: ignore_derivatives
+using ChainRulesCore: ignore_derivatives, NoTangent
+import ChainRulesCore
+import Random
 using Random: GLOBAL_RNG, AbstractRNG
 using Interpolations: linear_interpolation
 using Statistics: cor, mean

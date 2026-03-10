@@ -58,7 +58,7 @@ Input → Phase Encoding (angle_to_complex / phase_to_train)
 
 | File | Role |
 |------|------|
-| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `PhaseArray` |
+| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase` |
 | `domains.jl` | Phase↔complex↔potential↔spike conversions, kernels, normalization, `bias_to_complex_offset` |
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
 | `network.jl` | `PhasorDense`, `PhasorConv`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
@@ -69,6 +69,7 @@ Input → Phase Encoding (angle_to_complex / phase_to_train)
 
 ### Key Type Aliases
 
+- `Phase <: Real` — scalar type wrapping `Float32`, representing a phase angle in [-1, 1] (units of pi). `isbits`, 4 bytes. Arithmetic with other `Real` types promotes to `Float32`. Network layers dispatch on `AbstractArray{<:Phase}` for type safety.
 - `LuxParams = Union{NamedTuple, AbstractArray}` — used for layer parameter type annotations
 - `SolutionType` enum: `:phase`, `:potential`, `:current`, `:spiking`
 
@@ -80,7 +81,7 @@ Use `Float32` for all neural data. Write `1.0f0` not `1.0`. GPU kernels require 
 
 ### Phase Range [-1, 1]
 
-Phases are always in [-1, 1] (units of pi). Use `remap_phase(x)` after arithmetic that may exceed bounds. Use `angle_to_complex`/`complex_to_angle` for conversions. Use circular distance metrics (`arc_error`) not naive subtraction for phase comparisons.
+Phases are represented as `Phase` values in [-1, 1] (units of pi). Producer functions (`complex_to_angle`, `soft_angle`, `remap_phase`, `random_symbols`, `time_to_phase`, `potential_to_phase`, `angular_mean`) return `Phase` arrays. Network layers (`PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, `attend`, `PhasorAttention`) dispatch on `AbstractArray{<:Phase}` for their phase-mode forward pass. Use `Phase.()` to wrap raw `Float32` data at network input boundaries. Arithmetic on `Phase` promotes to `Float32` — use `remap_phase(x)` after arithmetic that may exceed bounds. Use circular distance metrics (`arc_error`) not naive subtraction for phase comparisons.
 
 ### Bias Application: Post-ODE Only
 

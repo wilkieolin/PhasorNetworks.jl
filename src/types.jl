@@ -454,20 +454,76 @@ function Base.size(x::CurrentCall)
     return x.current.shape
 end
 
-struct PhaseArray{N} <: AbstractArray{Float32, N}
-    data::Array{Float32, N}
+"""
+    Phase <: Real
 
-    function PhaseArray(data::AbstractArray{<:Real, N}) where N
-        converted = Float32.(data)
-        if any(x -> x < -1 || x > 1, converted)
-            throw(DomainError(converted, "All values must be in [-1, 1]"))
-        end
-        new{N}(converted)
-    end
+Scalar type wrapping a `Float32` value representing a phase angle in units of π.
+Valid phase values are in [-1, 1], but no bounds checking is performed (NaN sentinels
+are valid for sub-threshold neurons). Use `remap_phase` for wrapping after arithmetic.
+
+Arithmetic with any `Real` type promotes to `Float32` — `Phase` only exists at semantic
+boundaries (layer inputs/outputs, producer function returns).
+
+# Examples
+```julia
+p = Phase(0.5f0)       # half-pi phase
+Float32(p)             # 0.5f0
+p + Phase(0.3f0)       # Float32(0.8) — arithmetic promotes to Float32
+Phase.(rand(Float32, 10) .* 2f0 .- 1f0)  # array of Phase values
+```
+"""
+struct Phase <: Real
+    value::Float32
+    Phase(x::Real) = new(Float32(x))
 end
 
-Base.size(p::PhaseArray) = size(p.data)
-Base.getindex(p::PhaseArray, i::Int) = p.data[i]
-Base.getindex(p::PhaseArray{N}, I::Vararg{Int, N}) where N = p.data[I...]
+# --- Conversion & promotion ---
+Base.Float32(p::Phase) = p.value
+Base.Float64(p::Phase) = Float64(p.value)
+Base.float(p::Phase) = p.value
+Base.convert(::Type{Phase}, x::Real) = Phase(x)
+Base.convert(::Type{Phase}, p::Phase) = p
+Base.convert(::Type{T}, p::Phase) where {T<:Number} = convert(T, p.value)
+Base.promote_rule(::Type{Phase}, ::Type{T}) where {T<:Real} = promote_type(Float32, T)
 
-PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, PhaseArray, ODESolution}
+# --- Value semantics ---
+Base.zero(::Type{Phase}) = Phase(0.0f0)
+Base.zero(::Phase) = Phase(0.0f0)
+Base.one(::Type{Phase}) = Phase(1.0f0)
+Base.one(::Phase) = Phase(1.0f0)
+Base.typemin(::Type{Phase}) = Phase(-1.0f0)
+Base.typemax(::Type{Phase}) = Phase(1.0f0)
+
+# --- Predicates ---
+Base.isfinite(p::Phase) = isfinite(p.value)
+Base.isnan(p::Phase) = isnan(p.value)
+Base.isinf(p::Phase) = isinf(p.value)
+
+# --- Comparison & hashing ---
+Base.isless(a::Phase, b::Phase) = isless(a.value, b.value)
+Base.:<(a::Phase, b::Phase) = a.value < b.value
+Base.:<=(a::Phase, b::Phase) = a.value <= b.value
+Base.:(==)(a::Phase, b::Phase) = a.value == b.value
+Base.hash(p::Phase, h::UInt) = hash(p.value, h)
+
+# --- Arithmetic (unwrap to Float32, never returns Phase) ---
+Base.:+(a::Phase, b::Phase) = a.value + b.value
+Base.:-(a::Phase, b::Phase) = a.value - b.value
+Base.:*(a::Phase, b::Phase) = a.value * b.value
+Base.:/(a::Phase, b::Phase) = a.value / b.value
+Base.:-(a::Phase) = -a.value
+Base.abs(a::Phase) = abs(a.value)
+Base.abs2(a::Phase) = abs2(a.value)
+
+# --- Display ---
+Base.show(io::IO, p::Phase) = print(io, "Phase(", p.value, ")")
+
+# --- Random generation ---
+Base.rand(rng::AbstractRNG, ::Random.SamplerType{Phase}) = Phase(2.0f0 * rand(rng, Float32) - 1.0f0)
+
+# --- AD rule: Phase(x) pullback is identity ---
+function ChainRulesCore.rrule(::Type{Phase}, x::Real)
+    Phase(x), dz -> (NoTangent(), Float32(dz))
+end
+
+PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray{Phase}, ODESolution}

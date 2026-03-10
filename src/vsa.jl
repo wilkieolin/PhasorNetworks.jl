@@ -216,12 +216,12 @@ These symbols serve as base vectors for VSA operations.
 Returns an array of random phases suitable for VSA operations.
 """
 function random_symbols(size::Tuple{Vararg{Int}})
-    y = 2.0f0 .* rand(Float32, size) .- 1.0f0
+    y = Phase.(2.0f0 .* rand(Float32, size) .- 1.0f0)
     return y
 end
 
 function random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}})
-    y = 2.0f0 .* rand(rng, Float32, size) .- 1.0f0
+    y = Phase.(2.0f0 .* rand(rng, Float32, size) .- 1.0f0)
     return y
 end
 
@@ -246,7 +246,7 @@ function remap_phase(x::Real)
         x = mod(x, 2.0f0)
         x = x - 1.0f0
     end
-    return x
+    return Phase(x)
 end
 
 function remap_phase(x::AbstractArray)
@@ -255,7 +255,7 @@ function remap_phase(x::AbstractArray)
         x = mod.(x, 2.0f0)
         x = x .- 1.0f0
     end
-    return x
+    return Phase.(x)
 end
 
 """

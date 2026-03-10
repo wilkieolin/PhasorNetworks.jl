@@ -37,28 +37,28 @@ function phasor_dense_tests()
         rng = Xoshiro(42)
         in_dim, out_dim = 10, 5
         batch_size = 32
-        
+
         # Create layer
         layer = PhasorDense(in_dim => out_dim, complex_to_angle)
         ps, st = Lux.setup(rng, layer)
-        
+
         # Random phase input
-        x = (rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
-        
+        x = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
+
         # Forward pass
         y, st_new = layer(x, ps, st)
-        
+
         # Output shape should be correct
         @test size(y) == (out_dim, batch_size)
-        
+
         # Output should be phases (in [-1, 1])
-        @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
-        
+        @test all(Float32.(y) .>= -1.0f0) && all(Float32.(y) .<= 1.0f0)
+
         # State should be returned
         @test st_new == st
-        
+
         # Different inputs should give different outputs
-        x2 = (rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
+        x2 = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
         y2, _ = layer(x2, ps, st)
         @test !all(y .≈ y2)
     end
@@ -105,16 +105,16 @@ function phasor_dense_no_bias_tests()
         rng = Xoshiro(42)
         in_dim, out_dim = 8, 4
         batch_size = 16
-        
+
         layer = PhasorDense(in_dim => out_dim, soft_angle, use_bias=false)
         ps, st = Lux.setup(rng, layer)
-        
+
         # Should not have bias in parameters
         @test !haskey(ps, :bias)
-        
-        x = rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0
+
+        x = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
         y, _ = layer(x, ps, st)
-        
+
         # Output should still be valid phases
         @test size(y) == (out_dim, batch_size)
         @test all(isfinite.(y))
@@ -126,22 +126,22 @@ function phasor_dense_activation_tests()
         rng = Xoshiro(42)
         in_dim, out_dim = 6, 3
         batch_size = 20
-        
+
         # Test with different activations
         for activation in [complex_to_angle, soft_angle]
             layer = PhasorDense(in_dim => out_dim, activation)
             ps, st = Lux.setup(rng, layer)
-            
-            x = rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0
+
+            x = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)
-            
+
             # Output should be valid
             @test size(y) == (out_dim, batch_size)
             @test all(isfinite.(y))
-            
+
             # complex_to_angle should produce phases in [-1, 1]
             if activation == complex_to_angle
-                @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
+                @test all(Float32.(y) .>= -1.0f0) && all(Float32.(y) .<= 1.0f0)
             end
         end
     end
@@ -156,12 +156,12 @@ function phasor_conv_tests()
             layer = PhasorConv((3, 3), c_in => c_out; pad=1)
             ps, st = Lux.setup(rng, layer)
 
-            x = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            x = Phase.(rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0)
             y, st_new = layer(x, ps, st)
 
             @test size(y) == (height, width, c_out, batch)
             @test eltype(y) <: Real
-            @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
+            @test all(Float32.(y) .>= -1.0f0) && all(Float32.(y) .<= 1.0f0)
             @test all(isfinite.(y))
         end
 
@@ -185,7 +185,7 @@ function phasor_conv_tests()
             @test !haskey(ps, :bias)
             @test haskey(ps, :layer)
 
-            x = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            x = Phase.(rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)
             @test all(isfinite.(y))
         end
@@ -203,8 +203,8 @@ function phasor_conv_tests()
             layer = PhasorConv((3, 3), c_in => c_out; pad=1)
             ps, st = Lux.setup(rng, layer)
 
-            x1 = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
-            x2 = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            x1 = Phase.(rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0)
+            x2 = Phase.(rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
             @test !all(y1 .≈ y2)
@@ -231,12 +231,12 @@ function phasor_fixed_tests()
             layer = PhasorFixed(in_dim => out_dim)
             ps, st = Lux.setup(rng, layer)
 
-            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            x = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)
 
             @test size(y) == (out_dim, batch)
             @test eltype(y) <: Real
-            @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
+            @test all(Float32.(y) .>= -1.0f0) && all(Float32.(y) .<= 1.0f0)
             @test all(isfinite.(y))
         end
 
@@ -259,7 +259,7 @@ function phasor_fixed_tests()
             @test isempty(ps) || !haskey(ps, :weight)
             @test haskey(st, :ps_layer)
 
-            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            x = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)
             @test all(isfinite.(y))
         end
@@ -268,7 +268,7 @@ function phasor_fixed_tests()
             layer = PhasorFixed(in_dim => out_dim)
             ps, st = Lux.setup(rng, layer)
 
-            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            x = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
             y1, st1 = layer(x, ps, st)
             y2, _   = layer(x, ps, st1)
 
@@ -280,8 +280,8 @@ function phasor_fixed_tests()
             layer = PhasorFixed(in_dim => out_dim)
             ps, st = Lux.setup(rng, layer)
 
-            x1 = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
-            x2 = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            x1 = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
+            x2 = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
             @test !all(y1 .≈ y2)
@@ -321,24 +321,24 @@ function residual_block_tests()
     @testset "Residual Block Tests" begin
         rng = Xoshiro(42)
         in_dim, out_dim = 32, 32
-        
+
         # Create residual block with dimension progression
         layer = ResidualBlock((in_dim, 64, out_dim), complex_to_angle)
         ps, st = Lux.setup(rng, layer)
-        
+
         # Create input
         batch_size = 16
-        x = randn(Float32, in_dim, batch_size)
-        
+        x = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
+
         # Forward pass
         y, st_new = layer(x, ps, st)
-        
+
         # Output shape should match input
         @test size(y) == (out_dim, batch_size)
-        
+
         # Output should be finite
         @test all(isfinite.(y))
-        
+
         # Gradient flow should work
         @test all(isfinite.(y))
     end
@@ -363,8 +363,8 @@ function codebook_tests()
         # Embeddings should be correct shape
         @test size(embeddings) == (embedding_dim, 16)
         
-        # Embeddings should be numeric
-        @test eltype(embeddings) <: Union{Float32, Complex}
+        # Embeddings should be numeric (Phase is a Real subtype)
+        @test eltype(embeddings) <: Real
     end
 end
 
@@ -469,22 +469,22 @@ function attend_tests()
         d_model = 32
         batch_size = 8
         seq_len = 10
-        
-        keys = randn(Float32, d_model, seq_len, batch_size)
-        values = randn(Float32, d_model, seq_len, batch_size)
-        queries = randn(Float32, d_model, seq_len, batch_size)
-        
+
+        keys = Phase.(rand(Float32, d_model, seq_len, batch_size) .* 2.0f0 .- 1.0f0)
+        values = Phase.(rand(Float32, d_model, seq_len, batch_size) .* 2.0f0 .- 1.0f0)
+        queries = Phase.(rand(Float32, d_model, seq_len, batch_size) .* 2.0f0 .- 1.0f0)
+
         # Compute attention
         attended, scores = attend(queries, keys, values)
-        
+
         # Output shape should match values shape
         @test size(attended) == size(values)
-        
+
         # Output should be finite
         @test all(isfinite.(attended))
-        
+
         # Attention weights should sum to something reasonable
         # (exact check depends on normalization)
-        @test all(abs.(attended) .< 100.0f0)  # Not exploding
+        @test all(abs.(Float32.(attended)) .< 100.0f0)  # Not exploding
     end
 end
