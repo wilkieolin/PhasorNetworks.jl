@@ -110,64 +110,57 @@ function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real =
 end
 
 """
-    soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+    soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.6f0, steepness::Float32 = 10.0f0)
 
-Soft normalization: gradually project complex numbers toward the unit circle, then rotate by −π/2
-to convert from potential representation to current representation.
+Soft normalization: smoothly map complex numbers onto the unit circle via phase interpolation
+(SLERP), with sub-threshold values collapsed to `1+0im`.
 
 # Arguments
 - `z::AbstractArray{<:Complex}`: Array of complex numbers
-- `r_lo::Real`: Lower magnitude threshold - below this, minimal normalization applied (default: 0.1)
-- `r_hi::Real`: Upper magnitude threshold - above this, full normalization applied (default: 0.2)
+- `r_lo::Real`: Lower magnitude threshold — below this, output is approximately `1+0im` (default: 0.1)
+- `r_hi::Real`: Upper magnitude threshold — above this, output is approximately `z/|z|` (default: 0.6)
 
 # Returns
-- Complex array with magnitudes smoothly pushed toward 1, rotated by −π/2
+- Complex array with magnitude exactly 1, with phase smoothly interpolated from 0 toward `angle(z)`
 
 # Details
-The normalization strength is controlled by a sigmoid function of the magnitude:
-- For |z| < r_lo: weak normalization, keeps values near their original magnitude (preserves "uncertainty")
-- For |z| > r_hi: strong normalization, pushes toward unit circle (normalizes "confident" values)
-- For r_lo ≤ |z| ≤ r_hi: smooth transition using sigmoid
+Uses spherical linear interpolation (SLERP) on the unit circle rather than linear complex mixing,
+which avoids cancellation artifacts when `z` and the reference `1+0im` point in opposite directions.
 
-After magnitude normalization, applies a −π/2 rotation (multiply by −i) so that the output
-represents a current rather than a potential. This matches the Resonate-and-Fire spiking
-convention where a neuron firing (potential at angle π/2) injects a positive real current
-(angle 0) into postsynaptic neurons.
+A blend factor in [0, 1] is computed via sigmoid of the input magnitude, centered between `r_lo`
+and `r_hi`. The output phase is then `blend × angle(z)`:
+- For |z| ≪ r_lo: blend ≈ 0 → output ≈ `1+0im` (sub-threshold / silent)
+- For |z| ≫ r_hi: blend ≈ 1 → output ≈ `z/|z|` (suprathreshold / active)
+- For r_lo ≤ |z| ≤ r_hi: smooth phase rotation between the two extremes
 
-The soft normalization additionally models sub-threshold silence: neurons with small-magnitude
-potentials (below r_lo) contribute weak currents, analogous to silent spiking neurons.
+The output magnitude is always exactly 1, making this suitable as a differentiable gate that
+preserves phase information for active neurons while anchoring silent neurons at a fixed reference.
 
 # Example
 ```julia
-# Small magnitude values stay small (uncertain/silent)
+# Sub-threshold: output collapses to 1+0im regardless of phase
 z_small = 0.05f0 * exp(1im * π/4)
-z_norm = soft_normalize_to_unit_circle(z_small)  # magnitude ≈ 0.05-0.1
+z_norm = soft_normalize_to_unit_circle([z_small])  # ≈ 1+0im, |z_norm| = 1
 
-# Large magnitude values project to unit circle (active/firing)
+# Suprathreshold: output preserves phase on unit circle
 z_large = 5.0f0 * exp(1im * π/4)
-z_norm = soft_normalize_to_unit_circle(z_large)  # magnitude ≈ 1.0
+z_norm = soft_normalize_to_unit_circle([z_large])  # ≈ exp(iπ/4), |z_norm| = 1
 ```
 """
-function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
+function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.6f0)
     r = abs.(z)
+    midpoint = (r_lo + r_hi) / 2
+    k = 6.0f0 / (r_hi - r_lo)
+    # blend: 0 when r << r_lo (→ output 1+0im), 1 when r >> r_hi (→ output z/|z|)
+    blend = sigmoid_fast.(k .* (r .- midpoint))
 
-    # Compute normalization strength using sigmoid
-    # Maps magnitude to [0, 1] with smooth transition between r_lo and r_hi
-    midpoint = (r_lo + r_hi) / 2.0f0
-    steepness = 6.0f0 / (r_hi - r_lo)  # Controls transition sharpness
-    normalization_strength = sigmoid_fast(steepness .* (r .- midpoint))
-
-    # Target magnitude interpolates between current magnitude (0 strength) and 1.0 (full strength)
-    # normalization_strength = 0: target_magnitude = r (no change)
-    # normalization_strength = 1: target_magnitude = 1.0 (unit circle)
-    target_magnitude = normalization_strength .+ r .* (1.0f0 .- normalization_strength)
-
-    # Avoid division by zero
+    # Unit vector in direction of z
     safe_r = max.(r, 1.0f-10)
+    unit_z = z ./ safe_r
 
-    # Scale z to have target magnitude while preserving phase
-    normalized = z .* (target_magnitude ./ safe_r)
-    return normalized
+    # Interpolate phase from 0 toward angle(z) — no complex addition, no cancellation
+    θ = atan.(imag.(unit_z), real.(unit_z))
+    return cos.(blend .* θ) .+ im .* sin.(blend .* θ)
 end
 
 """
@@ -312,6 +305,65 @@ function periodic_raised_cosine_kernel(x::AbstractArray, t::Real, t_sigma::Real,
                 0.5f0 .* (1.0f0 .+ cos.(pi_f32 .* dt ./ half_width)),
                 0.0f0)
     return i
+end
+
+"""
+    periodic_von_mises_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real) -> Array{Float32}
+
+Von Mises kernel for spike times on a periodic domain.
+Peaks when the spike time `x` coincides with evaluation time `t`.
+
+# Arguments
+- `x`: Spike times
+- `t`: Current evaluation time
+- `t_sigma`: Half-width of the kernel in time units
+- `t_period`: Oscillation period (defines the circular domain)
+
+# Details
+    κ = 1 / (1 - cos(2π * t_sigma / t_period))
+    output = exp(κ * (cos(2π * dt / t_period) - 1))
+
+At dt=0: output = 1. At dt=±t_sigma: output = exp(-1) ≈ 0.37.
+
+See also: [`complex_von_mises_kernel`](@ref) for the complex-valued analogue.
+"""
+function periodic_von_mises_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real)
+    dt = t .- x
+    kappa = 1.0f0 / (1.0f0 - cos(2.0f0 * pi_f32 * t_sigma / t_period))
+    return exp.(kappa .* (cos.(2.0f0 * pi_f32 .* dt ./ t_period) .- 1.0f0))
+end
+
+"""
+    complex_von_mises_kernel(z::AbstractArray{<:Complex}, phase_sigma::Real) -> Array{Float32}
+
+Apply a Von Mises kernel to complex numbers based on their phase angle.
+Peaks when the phase is 0 (positive real axis) and decays toward π (negative real axis).
+
+# Arguments
+- `z`: Array of complex numbers (arbitrary magnitude)
+- `phase_sigma`: Half-width of the kernel in units of π radians.
+  e.g. `phase_sigma=0.5` → kernel falls to exp(-1) ≈ 0.37 at 90°
+
+# Returns
+Real array: `|z| * exp(κ * (cos(∠z) - 1))`
+
+# Details
+    κ = 1 / (1 - cos(π * phase_sigma))
+
+| Phase  | Output        |
+|--------|---------------|
+| 0°     | `\\|z\\|`         |
+| 90°    | `\\|z\\| * e^{-κ}` |
+| 180°   | `\\|z\\| * e^{-2κ}`|
+
+This mirrors [`periodic_von_mises_kernel`](@ref) but operates on complex phase angles
+rather than temporal spike offsets. The phase-zero direction (positive real axis)
+acts as the reference, so the output is maximised when a phasor is "in phase" with
+the reference oscillator.
+"""
+function complex_von_mises_kernel(z::AbstractArray{<:Complex}, phase_sigma::Real)
+    kappa = 1.0f0 / (1.0f0 - cos(pi_f32 * Float32(phase_sigma)))
+    return abs.(z) .* exp.(kappa .* (cos.(angle.(z)) .- 1.0f0))
 end
 
 # Converts membrane potential to current by multiplying a sigmoidal function over
@@ -586,7 +638,7 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::
 
     function inner(t::Real)
         # Ensure t is Float32 to avoid mixed-precision issues with Float32 weights
-        impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period) .* z_0
+        impulses = periodic_von_mises_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period) .* z_0
 
         ignore_derivatives() do
             if zeta > 0.0f0

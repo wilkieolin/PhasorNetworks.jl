@@ -210,13 +210,20 @@ end
     PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 
 A dense (fully-connected) layer for phase-valued and spiking neural networks.
-Implements complex-valued linear transformations with phase-based activation,
+Implements complex-valued linear transformations with configurable normalization,
 supporting both direct phase inputs and spike train inputs through ODE integration.
+
+Output type is controlled via multiple dispatch on input type:
+- Complex input → complex output (linear transform + bias, no normalization)
+- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
+- Spiking input → output determined by `return_type` field
 
 # Fields
 - `layer`: Underlying `Dense` layer for linear transformation (no internal bias)
 - `bias`: [`ComplexBias`](@ref) layer for phase shifts in the complex plane
-- `activation`: Activation function applied after bias (e.g., `identity`, `complex_to_angle`)
+- `activation`: Normalization function that projects complex values toward the unit circle
+    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
+    and spiking forward paths; complex inputs pass through without normalization.
 - `use_bias::Bool`: Whether to apply the complex bias term
 - `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
 - `init_period::Function`: Initializer for per-neuron period scaling factors
@@ -226,7 +233,7 @@ supporting both direct phase inputs and spike train inputs through ODE integrati
 
 # Constructor
 ```julia
-PhasorDense(shape::Pair{<:Integer,<:Integer}, activation=identity;
+PhasorDense(shape::Pair{<:Integer,<:Integer}, activation=normalize_to_unit_circle;
     return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
     init_bias=default_bias,               # Bias initialization function
     use_bias=true,                         # Apply complex bias
@@ -238,17 +245,22 @@ PhasorDense(shape::Pair{<:Integer,<:Integer}, activation=identity;
 ```
 
 # Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:phase`: Extract phases from ODE solution, apply normalization, return array
 - `:potential`: Return raw ODE solution object
 - `:current`: Convert solution to current, return `CurrentCall` for next layer
 - `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
 
 # Forward Pass
-For phase array inputs:
+For complex inputs:
+1. Applies linear transformation separately to real and imaginary parts
+2. Optionally adds complex bias
+3. Returns complex values (no normalization applied)
+
+For real/phase inputs:
 1. Converts input phases to complex numbers via `angle_to_complex`
-2. Applies linear transformation separately to real and imaginary parts
-3. Optionally adds complex bias
-4. Applies activation function
+2. Dispatches to complex forward pass (steps above)
+3. Applies normalization function (projects toward unit circle)
+4. Converts back to phases via `complex_to_angle`
 
 For spiking inputs (`SpikingCall` or `CurrentCall`):
 1. Converts to `CurrentCall` if needed
@@ -257,11 +269,11 @@ For spiking inputs (`SpikingCall` or `CurrentCall`):
 
 # Example
 ```julia
-# Basic dense layer
-layer = PhasorDense(64 => 32, complex_to_angle)
+# Basic dense layer with unit circle normalization (default)
+layer = PhasorDense(64 => 32)
 
 # With trainable dynamics
-layer = PhasorDense(64 => 32, complex_to_angle;
+layer = PhasorDense(64 => 32, normalize_to_unit_circle;
     trainable_leakage=true,
     return_type=SolutionType(:current))
 
@@ -276,9 +288,9 @@ See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref), [`
 struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     layer # the conventional layer used to transform inputs
     bias # the bias in the complex domain used to shift away from the origin
-    activation # the activation function which converts complex values to real phases
+    activation # normalization function: projects complex values toward the unit circle (Complex → Complex)
     use_bias::Bool # apply the layer with the bias if true
-    init_leakage::Function # initializer for the values to scale the leakge in spk_args
+    init_leakage::Function # initializer for the values to scale the leakage in spk_args
     init_period::Function # initializer for the values to scale the t_period in spk_args
     trainable_leakage::Bool # can the ODE optimizer access leakage in params
     trainable_period::Bool # can the ODE optimizer access period in params
@@ -352,13 +364,11 @@ end
 """
     (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
 
-Core complex-valued forward pass. This is the primary implementation that all other input types route to.
+Complex-valued forward pass. Returns complex values without normalization.
 
 # Process
 1. Apply linear transformation to real and imaginary parts separately
 2. Add complex bias (if enabled)
-3. Apply normalization function (projects toward/onto unit circle)
-4. Convert to phases if output_type=:phase, otherwise keep complex
 """
 function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
     # Linear transformation on real and imaginary components
@@ -381,7 +391,8 @@ end
 """
     (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
 
-Phase-based interface. Converts real-valued phases to complex and dispatches to complex method.
+Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
+then normalizes and converts back to phases via `complex_to_angle`.
 """
 function (a::PhasorDense)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
     # Convert phases to complex representation on unit circle
@@ -430,13 +441,20 @@ end
     PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
 
 A convolutional layer for phase-valued and spiking neural networks.
-Implements complex-valued convolution with phase-based activation,
+Implements complex-valued convolution with configurable normalization,
 supporting both direct phase inputs and spike train inputs through ODE integration.
+
+Output type is controlled via multiple dispatch on input type:
+- Complex input → complex output (convolution + bias, no normalization)
+- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
+- Spiking input → output determined by `return_type` field
 
 # Fields
 - `layer`: Underlying `Conv` layer for spatial convolution (no internal bias)
 - `bias`: [`ComplexBias`](@ref) layer for phase shifts, shaped for broadcasting over spatial dims
-- `activation`: Activation function applied after bias (e.g., `identity`, `complex_to_angle`)
+- `activation`: Normalization function that projects complex values toward the unit circle
+    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
+    and spiking forward paths; complex inputs pass through without normalization.
 - `use_bias::Bool`: Whether to apply the complex bias term
 - `init_leakage::Function`: Initializer for per-channel leakage scaling factors
 - `init_period::Function`: Initializer for per-channel period scaling factors
@@ -446,8 +464,8 @@ supporting both direct phase inputs and spike train inputs through ODE integrati
 
 # Constructor
 ```julia
-PhasorConv(kernel::Tuple{Vararg{Integer}}, channels::Pair{<:Integer,<:Integer}, 
-           activation=identity;
+PhasorConv(kernel::Tuple{Vararg{Integer}}, channels::Pair{<:Integer,<:Integer},
+           activation=normalize_to_unit_circle;
     return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
     init_bias=default_bias,               # Bias initialization function
     use_bias=true,                         # Apply complex bias
@@ -463,17 +481,22 @@ PhasorConv(kernel::Tuple{Vararg{Integer}}, channels::Pair{<:Integer,<:Integer},
 - `channels`: Input channels => Output channels, e.g., `3 => 16`
 
 # Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:phase`: Extract phases from ODE solution, apply normalization, return array
 - `:potential`: Return raw ODE solution object
 - `:current`: Convert solution to current, return `CurrentCall` for next layer
 - `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
 
 # Forward Pass
-For phase array inputs (H, W, C, B):
+For complex inputs (H, W, C, B):
+1. Applies convolution separately to real and imaginary parts
+2. Optionally adds complex bias (broadcast over spatial dimensions)
+3. Returns complex values (no normalization applied)
+
+For real/phase inputs (H, W, C, B):
 1. Converts input phases to complex numbers via `angle_to_complex`
-2. Applies convolution separately to real and imaginary parts
-3. Optionally adds complex bias (broadcast over spatial dimensions)
-4. Applies activation function
+2. Dispatches to complex forward pass (steps above)
+3. Applies normalization function (projects toward unit circle)
+4. Converts back to phases via `complex_to_angle`
 
 For spiking inputs (`SpikingCall` or `CurrentCall`):
 1. Converts to `CurrentCall` if needed
@@ -482,11 +505,11 @@ For spiking inputs (`SpikingCall` or `CurrentCall`):
 
 # Example
 ```julia
-# Basic conv layer: 3x3 kernel, 3 input channels, 16 output channels
-layer = PhasorConv((3, 3), 3 => 16, complex_to_angle; pad=1)
+# Basic conv layer with unit circle normalization (default)
+layer = PhasorConv((3, 3), 3 => 16; pad=1)
 
 # With trainable dynamics and strided convolution
-layer = PhasorConv((5, 5), 16 => 32, complex_to_angle;
+layer = PhasorConv((5, 5), 16 => 32, normalize_to_unit_circle;
     stride=2,
     trainable_leakage=true,
     return_type=SolutionType(:current))
@@ -511,7 +534,7 @@ struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
     return_type::SolutionType
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = identity;
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
@@ -536,8 +559,12 @@ end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorConv)
     ps_layer = Lux.initialparameters(rng, l.layer)
-    ps_bias = Lux.initialparameters(rng, l.bias)
-    parameters = (layer = ps_layer, bias = ps_bias,)
+    parameters = (layer = ps_layer,)
+
+    if l.use_bias
+        ps_bias = Lux.initialparameters(rng, l.bias)
+        parameters = merge(parameters, (bias = ps_bias,))
+    end
 
     # Get output channels for leakage/period initialization
     n_out = l.layer.out_chs
@@ -571,27 +598,40 @@ function Lux.initialstates(rng::AbstractRNG, l::PhasorConv)
     return state
 end
 
-function (pc::PhasorConv)(x::AbstractArray, ps::LuxParams, st::NamedTuple)
-    x = angle_to_complex(x)
-    x_real = real.(x)
-    x_imag = imag.(x)
+"""
+    (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedTuple)
 
-    y_real_conv, _ = pc.layer(x_real, ps.layer, st.layer)
-    y_imag_conv, _ = pc.layer(x_imag, ps.layer, st.layer)
+Complex-valued forward pass. Applies convolution to real and imaginary parts
+separately, then adds complex bias. Returns complex values without normalization.
+"""
+function (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedTuple)
+    y_real_conv, _ = pc.layer(real.(x), ps.layer, st.layer)
+    y_imag_conv, _ = pc.layer(imag.(x), ps.layer, st.layer)
     y = y_real_conv .+ 1.0f0im .* y_imag_conv
 
-    # Apply bias
     if pc.use_bias
         y_biased, st_updated_bias = pc.bias(y, ps.bias, st.bias)
-        y_activated = pc.activation(y_biased)
     else
-        #passthrough
         st_updated_bias = st.bias
-        y_activated = a.activation(y)
+        y_biased = y
     end
 
-    st_new = (layer = st.layer, bias = st_updated_bias)
-    return y_activated, st_new
+    st_new = merge(st, (layer = st.layer, bias = st_updated_bias))
+    return y_biased, st_new
+end
+
+"""
+    (pc::PhasorConv)(x::AbstractArray{<:Real}, ps::LuxParams, st::NamedTuple)
+
+Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
+then normalizes and converts back to phases via `complex_to_angle`.
+"""
+function (pc::PhasorConv)(x::AbstractArray{<:Real}, ps::LuxParams, st::NamedTuple)
+    xz = angle_to_complex(x)
+    y_biased, st_new = pc(xz, ps, st)
+    y_normalized = pc.activation(y_biased)
+    y_phase = complex_to_angle(y_normalized)
+    return y_phase, st_new
 end
 
 function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
@@ -605,7 +645,8 @@ function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
-        return y, state
+        phase = complex_to_angle.(y)
+        return phase, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
@@ -691,10 +732,17 @@ A dense layer with non-trainable (fixed) weights for phase-valued and spiking ne
 Weights are stored in layer state rather than parameters, making them immune to
 gradient updates while still supporting the full range of input types.
 
+Output type is controlled via multiple dispatch on input type:
+- Complex input → complex output (linear transform + bias, no normalization)
+- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
+- Spiking input → output determined by `return_type` field
+
 # Fields
 - `layer`: Template `Dense` layer (weights stored in state, not used directly)
 - `bias`: [`ComplexBias`](@ref) layer for phase shifts (parameters also stored in state)
-- `activation`: Activation function applied after bias
+- `activation`: Normalization function that projects complex values toward the unit circle
+    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
+    and spiking forward paths; complex inputs pass through without normalization.
 - `use_bias::Bool`: Whether to apply the complex bias term
 - `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
 - `init_period::Function`: Initializer for per-neuron period scaling factors
@@ -705,7 +753,7 @@ gradient updates while still supporting the full range of input types.
 
 # Constructor
 ```julia
-PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=identity;
+PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=normalize_to_unit_circle;
     return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
     init_weight=nothing,                   # Custom weight init: (rng, in, out) -> matrix
     init_bias=default_bias,                # Bias initialization function
@@ -732,17 +780,22 @@ The layer state contains:
 - `period`: Per-neuron period factors (if not trainable)
 
 # Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply activation, return array
+- `:phase`: Extract phases from ODE solution, apply normalization, return array
 - `:potential`: Return raw ODE solution object
 - `:current`: Convert solution to current, return `CurrentCall` for next layer
 - `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
 
 # Forward Pass
-For phase array inputs:
+For complex inputs:
+1. Applies fixed weight matrix separately to real and imaginary parts
+2. Optionally adds complex bias
+3. Returns complex values (no normalization applied)
+
+For real/phase inputs:
 1. Converts input phases to complex numbers via `angle_to_complex`
-2. Applies fixed weight matrix separately to real and imaginary parts
-3. Optionally adds complex bias
-4. Applies activation function
+2. Dispatches to complex forward pass (steps above)
+3. Applies normalization function (projects toward unit circle)
+4. Converts back to phases via `complex_to_angle`
 
 For spiking inputs (`SpikingCall` or `CurrentCall`):
 1. Converts to `CurrentCall` if needed
@@ -752,15 +805,15 @@ For spiking inputs (`SpikingCall` or `CurrentCall`):
 
 # Example
 ```julia
-# Fixed random projection
-layer = PhasorFixed(64 => 64, complex_to_angle)
+# Fixed random projection with unit circle normalization (default)
+layer = PhasorFixed(64 => 64)
 
 # Identity layer (no transformation)
 identity_init(rng, in_dim, out_dim) = Matrix{Float32}(I, out_dim, in_dim)
 layer = PhasorFixed(64 => 64, identity; init_weight=identity_init)
 
 # Fixed layer with trainable dynamics
-layer = PhasorFixed(128 => 64, complex_to_angle;
+layer = PhasorFixed(128 => 64, normalize_to_unit_circle;
     trainable_leakage=true,
     return_type=SolutionType(:current))
 
@@ -786,7 +839,7 @@ See also: [`PhasorDense`](@ref) for trainable version, [`ComplexBias`](@ref), [`
 struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
     layer # the conventional layer used to transform inputs (fixed weights)
     bias # the bias in the complex domain used to shift away from the origin
-    activation # the activation function which converts complex values to real phases
+    activation # normalization function: projects complex values toward the unit circle (Complex → Complex)
     use_bias::Bool # apply the layer with the bias if true
     init_leakage::Function # initializer for the values to scale the leakage in spk_args
     init_period::Function # initializer for the values to scale the t_period in spk_args
@@ -796,7 +849,7 @@ struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
     init_weight # function to initialize fixed weights, or nothing for default
 end
 
-function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = identity; 
+function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
                      return_type::SolutionType = SolutionType(:spiking), 
                      init_bias = default_bias, 
                      use_bias::Bool = false,
@@ -864,28 +917,40 @@ function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
     return state
 end
 
-function (a::PhasorFixed)(x::AbstractArray, params::LuxParams, state::NamedTuple)
-    xz = angle_to_complex(x)
+"""
+    (a::PhasorFixed)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
 
-    #stateless calls to dense
-    y_real, _ = a.layer(real.(xz), state.ps_layer, state.st_layer)
-    y_imag, _ = a.layer(imag.(xz), state.ps_layer, state.st_layer)
+Complex-valued forward pass. Weights are read from state (non-trainable).
+Returns complex values without normalization.
+"""
+function (a::PhasorFixed)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+    y_real, _ = a.layer(real.(x), state.ps_layer, state.st_layer)
+    y_imag, _ = a.layer(imag.(x), state.ps_layer, state.st_layer)
     y = y_real .+ 1.0f0im .* y_imag
 
     if a.use_bias
-        # Use bias params from state (non-trainable)
         y_biased, st_updated_bias = a.bias(y, state.ps_bias, state.st_bias)
-        y_activated = a.activation(y_biased)
-        st_new = (ps_layer = state.ps_layer,
-                st_layer = state.st_layer,
-                ps_bias = state.ps_bias,
-                st_bias = st_updated_bias)
+        st_new = merge(state, (st_bias = st_updated_bias,))
     else
-        y_activated = a.activation(y)
+        y_biased = y
         st_new = state
     end
 
-    return y_activated, st_new
+    return y_biased, st_new
+end
+
+"""
+    (a::PhasorFixed)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+
+Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
+then normalizes and converts back to phases via `complex_to_angle`.
+"""
+function (a::PhasorFixed)(x::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
+    xz = angle_to_complex(x)
+    y_biased, st_new = a(xz, params, state)
+    y_normalized = a.activation(y_biased)
+    y_phase = complex_to_angle(y_normalized)
+    return y_phase, st_new
 end
 
 function (a::PhasorFixed)(x::SpikingCall, params::LuxParams, state::NamedTuple)
@@ -925,7 +990,8 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
         y = a.activation.(u)
-        return y, state
+        phase = complex_to_angle.(y)
+        return phase, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
@@ -1259,7 +1325,7 @@ function (tb::SingleHeadCABlock)(q, kv, ps, st)
 end
 
 """
-    train(model, ps, st, train_loader, loss, args; optimiser=Optimisers.Adam, verbose=false, sample_gradients=0)
+    train(model, ps, st, train_loader, loss, args; optimiser=Optimisers.Adam, verbose=false, sample_gradients=0, early_stop=false, early_stop_window=5)
 
 Train a phase-based neural network using gradient descent.
 
@@ -1273,16 +1339,25 @@ Train a phase-based neural network using gradient descent.
 - `optimiser`: Optimization algorithm (default: Adam)
 - `verbose::Bool`: Whether to print loss values
 - `sample_gradients::Int`: Frequency of gradient sampling (0 to disable)
+- `early_stop::Bool`: Stop training if the mean loss over the last `early_stop_window`
+  batches exceeds the mean over the preceding `early_stop_window` batches (default: false)
+- `early_stop_window::Int`: Number of batches in each comparison window (default: 5).
+  Requires at least `2 * early_stop_window` completed batches before checking.
 
 # Returns
 - `losses`: Array of loss values during training
 - `ps`: Updated parameters
 - `st`: Updated state
-- `gradients`: Sampled gradients if enabled
+- `gradients`: Sampled gradients (only when `sample_gradients > 0`)
 
 Automatically handles CPU/GPU device placement based on args.use_cuda.
 """
-function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.Adam, verbose::Bool = false, sample_gradients::Int = 0)
+function train(model, ps, st, train_loader, loss, args;
+               optimiser = Optimisers.Adam,
+               verbose::Bool = false,
+               sample_gradients::Int = 0,
+               early_stop::Bool = false,
+               early_stop_window::Int = 5)
     if CUDA.functional() && args.use_cuda
        @info "Training on CUDA GPU"
        #CUDA.allowscalar(false)
@@ -1297,6 +1372,7 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
    losses = []
    gradients = []
    step_count = 0
+   stopped_early = false
 
    ## Training
    for epoch in 1:args.epochs
@@ -1304,20 +1380,32 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
            step_count += 1
            x = x |> device
            y = y |> device
-           
+
            lf = p -> loss(x, y, model, p, st)
            lossval, gs = withgradient(lf, ps)
            if verbose
                println(reduce(*, ["Epoch ", string(epoch), " loss: ", string(lossval)]))
            end
            append!(losses, lossval)
-           
+
            # Save gradients if sampling is enabled and we're at a sampling step
            if sample_gradients > 0 && (step_count % sample_gradients == 0)
                push!(gradients, deepcopy(gs[1]))
            end
-           
+
            opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
+
+           # Early stopping: compare mean of last window vs preceding window
+           if early_stop && length(losses) >= 2 * early_stop_window
+               w = early_stop_window
+               current_avg = sum(losses[end-w+1:end]) / w
+               prev_avg    = sum(losses[end-2w+1:end-w]) / w
+               if current_avg > prev_avg
+                   verbose && @info "Early stopping at step $step_count: mean loss increased from $(round(prev_avg, digits=6)) to $(round(current_avg, digits=6))"
+                   stopped_early = true
+                   break
+               end
+           end
 
            # Prompt Julia's GC to reclaim Zygote tape and ODE solution objects from
            # this step before the next forward/backward solve begins.  Without this,
@@ -1325,8 +1413,9 @@ function train(model, ps, st, train_loader, loss, args; optimiser = Optimisers.A
            GC.gc(false)
            CUDA.functional() && CUDA.reclaim()
        end
+       stopped_early && break
    end
-   
+
    if sample_gradients > 0
        return losses, ps, st, gradients
    else

@@ -43,6 +43,8 @@ period_to_angfreq,
 angfreq_to_period,
 normalize_to_unit_circle,
 soft_normalize_to_unit_circle,
+periodic_von_mises_kernel,
+complex_von_mises_kernel,
 
 #spiking
 default_spk_args,

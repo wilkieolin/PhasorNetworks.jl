@@ -20,6 +20,7 @@ function network_layers_tests()
         phasor_dense_no_bias_tests()
         phasor_dense_activation_tests()
         phasor_conv_tests()
+        phasor_fixed_tests()
         min_pool_tests()
         residual_block_tests()
         codebook_tests()
@@ -53,8 +54,8 @@ function phasor_dense_tests()
         # Output should be phases (in [-1, 1])
         @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
         
-        # State should be updated
-        @test st_new != st
+        # State should be returned
+        @test st_new == st
         
         # Different inputs should give different outputs
         x2 = (rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
@@ -149,24 +150,142 @@ end
 function phasor_conv_tests()
     @testset "PhasorConv Tests" begin
         rng = Xoshiro(42)
-        
-        # Create convolutional layer
-        layer = PhasorConv((3, 3), 1 => 4, complex_to_angle)
-        ps, st = Lux.setup(rng, layer)
-        
-        # Create phase input
-        height, width, channels, batch = 28, 28, 1, 8
-        x = rand(Float32, height, width, channels, batch) .* 2.0f0 .- 1.0f0
-        
-        # Forward pass
-        y, st_new = layer(x, ps, st)
-        
-        # Output shape should have correct channel dimension
-        @test size(y)[end] == batch  # Batch size preserved
-        @test ndims(y) == 4
-        
-        # Output values should be valid
-        @test all(isfinite.(y))
+        height, width, c_in, c_out, batch = 28, 28, 1, 4, 8
+
+        @testset "Real (phase) input → phase output" begin
+            layer = PhasorConv((3, 3), c_in => c_out; pad=1)
+            ps, st = Lux.setup(rng, layer)
+
+            x = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            y, st_new = layer(x, ps, st)
+
+            @test size(y) == (height, width, c_out, batch)
+            @test eltype(y) <: Real
+            @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
+            @test all(isfinite.(y))
+        end
+
+        @testset "Complex input → complex output (no activation)" begin
+            layer = PhasorConv((3, 3), c_in => c_out; pad=1)
+            ps, st = Lux.setup(rng, layer)
+
+            xz = randn(ComplexF32, height, width, c_in, batch)
+            y, _ = layer(xz, ps, st)
+
+            @test size(y) == (height, width, c_out, batch)
+            @test eltype(y) <: Complex
+            # magnitude is NOT clamped to unit circle (no activation applied)
+            @test all(isfinite.(real.(y))) && all(isfinite.(imag.(y)))
+        end
+
+        @testset "use_bias=false excludes bias from params" begin
+            layer = PhasorConv((3, 3), c_in => c_out; use_bias=false)
+            ps, st = Lux.setup(rng, layer)
+
+            @test !haskey(ps, :bias)
+            @test haskey(ps, :layer)
+
+            x = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            y, _ = layer(x, ps, st)
+            @test all(isfinite.(y))
+        end
+
+        @testset "use_bias=true includes bias in params" begin
+            layer = PhasorConv((3, 3), c_in => c_out)
+            ps, st = Lux.setup(rng, layer)
+
+            @test haskey(ps, :bias)
+            @test haskey(ps.bias, :bias_real)
+            @test haskey(ps.bias, :bias_imag)
+        end
+
+        @testset "Different inputs give different outputs" begin
+            layer = PhasorConv((3, 3), c_in => c_out; pad=1)
+            ps, st = Lux.setup(rng, layer)
+
+            x1 = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            x2 = rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0
+            y1, _ = layer(x1, ps, st)
+            y2, _ = layer(x2, ps, st)
+            @test !all(y1 .≈ y2)
+        end
+    end
+end
+
+function phasor_fixed_tests()
+    @testset "PhasorFixed Tests" begin
+        rng = Xoshiro(42)
+        in_dim, out_dim, batch = 10, 8, 16
+
+        @testset "Weights in state, not params" begin
+            layer = PhasorFixed(in_dim => out_dim)
+            ps, st = Lux.setup(rng, layer)
+
+            @test !haskey(ps, :weight)
+            @test haskey(st, :ps_layer)
+            @test haskey(st.ps_layer, :weight)
+            @test size(st.ps_layer.weight) == (out_dim, in_dim)
+        end
+
+        @testset "Real (phase) input → phase output" begin
+            layer = PhasorFixed(in_dim => out_dim)
+            ps, st = Lux.setup(rng, layer)
+
+            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            y, _ = layer(x, ps, st)
+
+            @test size(y) == (out_dim, batch)
+            @test eltype(y) <: Real
+            @test all(y .>= -1.0f0) && all(y .<= 1.0f0)
+            @test all(isfinite.(y))
+        end
+
+        @testset "Complex input → complex output (no activation)" begin
+            layer = PhasorFixed(in_dim => out_dim)
+            ps, st = Lux.setup(rng, layer)
+
+            xz = randn(ComplexF32, in_dim, batch)
+            y, _ = layer(xz, ps, st)
+
+            @test size(y) == (out_dim, batch)
+            @test eltype(y) <: Complex
+            @test all(isfinite.(real.(y))) && all(isfinite.(imag.(y)))
+        end
+
+        @testset "use_bias=false: params empty, weights still in state" begin
+            layer = PhasorFixed(in_dim => out_dim; use_bias=false)
+            ps, st = Lux.setup(rng, layer)
+
+            @test isempty(ps) || !haskey(ps, :weight)
+            @test haskey(st, :ps_layer)
+
+            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            y, _ = layer(x, ps, st)
+            @test all(isfinite.(y))
+        end
+
+        @testset "Fixed weights do not change across calls" begin
+            layer = PhasorFixed(in_dim => out_dim)
+            ps, st = Lux.setup(rng, layer)
+
+            x = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            y1, st1 = layer(x, ps, st)
+            y2, _   = layer(x, ps, st1)
+
+            # Same input, same fixed weights → same output
+            @test y1 ≈ y2
+        end
+
+        @testset "Different inputs give different outputs" begin
+            layer = PhasorFixed(in_dim => out_dim)
+            ps, st = Lux.setup(rng, layer)
+
+            x1 = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            x2 = rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0
+            y1, _ = layer(x1, ps, st)
+            y2, _ = layer(x2, ps, st)
+            @test !all(y1 .≈ y2)
+        end
     end
 end
 

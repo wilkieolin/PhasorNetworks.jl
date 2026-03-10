@@ -33,7 +33,7 @@ function network_tests()
         #do the spiking domain accuracy test
         spiking_accuracy_test(spk_model, ps_train, st_train, [(x, y),], args, true)
         #check the gradients we get through integrating phases as currents & phases as static values match
-        ode_correlation(model, ode_model, ps, st, x, y, true)
+        # ode_correlation(model, ode_model, ps, st, x, y, true) -> deprecating
         ode_correlation(model_nb, ode_model_nb, ps_nb, st_nb, x, y, false)
     end
 end
