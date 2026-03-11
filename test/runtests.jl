@@ -43,6 +43,7 @@ include("network_tests.jl")
 include("metrics_tests.jl")
 include("network_layers_tests.jl")
 include("test_phase_type.jl")
+include("test_ssm.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
@@ -52,6 +53,7 @@ include("test_phase_type.jl")
     metrics_tests()
     network_layers_tests()
     phase_type_tests()
+    ssm_tests()
     #spiking_operations_tests()
 
     if CUDA.functional()
@@ -60,6 +62,7 @@ include("test_phase_type.jl")
             try
                 include("test_cuda.jl")
                 cuda_core_tests() # Call the main test function from test_cuda.jl
+                ssm_gpu_tests()
             catch e
                 @error "Error during CUDA tests:" exception=(e, catch_backtrace())
                 @test false # Explicitly fail CUDA test section on error

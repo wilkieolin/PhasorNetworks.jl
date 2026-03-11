@@ -75,6 +75,15 @@ similarity_outer,
 similarity_loss,
 codebook_loss,
 
+#ssm
+PhasorSSM,
+SSMReadout,
+phasor_kernel,
+causal_conv,
+hippo_legs_diagonal,
+psk_encode,
+impulse_encode,
+
 #network
 attend,
 solve_coupled,
@@ -123,6 +132,7 @@ include("gpu.jl")
 include("spiking.jl")
 include("vsa.jl")
 include("network.jl")
+include("ssm.jl")
 include("metrics.jl")
 
 end

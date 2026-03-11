@@ -23,78 +23,11 @@ Usage:
 =#
 
 using PhasorNetworks
-using Lux, LuxCore, Random, Optimisers, Zygote, Statistics
+using Lux, Random, Optimisers, Zygote, Statistics
 using MLDatasets, MLUtils, OneHotArrays
-using NNlib: batched_mul
-using ChainRulesCore: ignore_derivatives
 using CUDA, LuxCUDA
 using Plots
 using ArgParse
-
-# ================================================================
-# Import core SSM definitions (without running main)
-# ================================================================
-
-include("phasor_ssm.jl")
-
-# ================================================================
-# Impulse Encoding
-# ================================================================
-
-"""
-    impulse_encode(images; substeps=4) -> ComplexF32 array (C × L × B)
-
-Encode pixel values as temporally-shifted real-valued impulse currents.
-
-Each row of the image gets `substeps` discrete time steps (one "period").
-The pixel's phase determines WHERE within those substeps the impulse fires:
-  pixel v ∈ [0,1] → phase θ = 2v-1 → spike time t = (θ+1)/2 · T
-
-A von-Mises-shaped pulse centered at the spike time produces a real current.
-Total sequence length L = H × substeps (e.g. 28 × 4 = 112).
-
-This genuinely tests temporal memory: the phase information arrives as a
-brief pulse at a specific sub-step, and the SSM must integrate and remember
-it through subsequent steps to produce the correct output phase.
-
-Compare with `psk_encode`: there the phase is directly encoded as a complex
-value exp(iπθ) at every step — no temporal memory is required, just
-instantaneous readout.
-"""
-function impulse_encode(images::AbstractArray{<:Real, 3}; substeps::Int=4)
-    # Encoding has no trainable params — stop Zygote from tracing
-    return ignore_derivatives() do
-        _impulse_encode_impl(images; substeps)
-    end
-end
-
-function _impulse_encode_impl(images::AbstractArray{<:Real, 3}; substeps::Int=4)
-    H, W, B = size(images)
-    C = W
-    T = Float32(substeps)
-    t_sigma = T * 0.1f0
-    kappa = 1f0 / (1f0 - cos(2f0 * Float32(π) * t_sigma / T))
-
-    phases = 2f0 .* images .- 1f0                     # H × W × B → [-1,1]
-    phases_ct = permutedims(phases, (2, 1, 3))          # C × H × B
-
-    # spike_times[c, row, b] = position in [0, T) within the row's period
-    spike_times = (phases_ct .+ 1f0) ./ 2f0 .* T       # C × H × B
-
-    # Build substep time indices on the same device as input
-    ts_dev = similar(phases, Float32, substeps)
-    copyto!(ts_dev, Float32.(1:substeps))
-    ts_sub = reshape(ts_dev, 1, substeps, 1)              # 1 × substeps × 1
-
-    slices = map(1:H) do r
-        t_spike = spike_times[:, r:r, :]                # C × 1 × B
-        dt = ts_sub .- t_spike                          # C × substeps × B
-        exp.(kappa .* (cos.(2f0 * Float32(π) .* dt ./ T) .- 1f0))
-    end
-    signal = cat(slices...; dims=2)                     # C × L × B
-
-    return complex.(signal, zero(signal))
-end
 
 # ================================================================
 # Experiment Runner
