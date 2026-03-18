@@ -22,6 +22,7 @@ makedocs(;
             "VSA" => "api/vsa.md",
             "GPU" => "api/gpu.md",
             "Metrics" => "api/metrics.md",
+            "SSM" => "api/ssm.md",
         ]
     ],
 )
