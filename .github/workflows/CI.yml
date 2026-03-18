@@ -6,6 +6,8 @@ on:
     tags: ['*']
   pull_request:
   workflow_dispatch:
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 concurrency:
   # Skip intermediate builds: always.
   # Cancel intermediate builds: only if it is a pull request build.
@@ -23,14 +25,14 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.11'
+          - '1.12'
         os:
           - ubuntu-latest
         arch:
           - x64
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v1
+      - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
@@ -38,7 +40,7 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v3
+      - uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
@@ -52,9 +54,9 @@ jobs:
       statuses: write
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@latest
+      - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.11'  # Match the version used in tests
+          version: '1.12'
       - uses: julia-actions/cache@v2
       - name: Configure doc environment
         shell: julia --project=docs --color=yes {0}
