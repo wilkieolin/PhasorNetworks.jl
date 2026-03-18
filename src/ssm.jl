@@ -247,34 +247,75 @@ function (l::PhasorSSM)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::Named
 end
 
 # ================================================================
-# 5. SSM Readout Layer
+# 5. SSM Readout Layer (Codebook-First)
 # ================================================================
 
 """
-    SSMReadout(readout_frac=0.25)
+    SSMReadout(hidden_dims => n_classes; readout_frac=0.25)
 
-Bridges the 3D complex SSM output to 2D Phase output for the Codebook layer.
-Averages the last `readout_frac` fraction of time steps, normalizes to the
-unit circle, and converts to phase angles in [-1, 1].
+Temporal readout layer that applies codebook similarity at each timestep
+before averaging, avoiding the phase-cancellation problem of averaging
+rotating complex vectors.
+
+The complex membrane potentials rotate at each oscillator's angular frequency
+ω.  Averaging these rotating phasors directly causes destructive interference
+(the mean tends toward zero when the readout window spans full rotations).
+Instead, this layer:
+
+1. Normalizes to the unit circle and extracts phase at each timestep
+2. Computes cosine similarity against codebook prototypes at each timestep
+   (similarity is a rotation-invariant scalar)
+3. Averages the resulting scalar logits over the readout window
+
+This is equivalent to asking "at every moment in time, how well does the
+current phase pattern match each class?" and averaging that confidence.
 
 Input:  (C × L × B) complex  (membrane potentials over time)
-Output: (C × B)     Phase    (phase angles, ready for Codebook)
+Output: (n_classes × B) Float32  (averaged similarity logits)
+
+# Arguments
+- `hidden_dims => n_classes` — Hidden dimension (must match SSM output) and
+  number of classification targets.
+- `readout_frac` — Fraction of final time steps to average over. Default 0.25.
 """
 struct SSMReadout <: Lux.AbstractLuxLayer
+    hidden_dims::Int
+    n_classes::Int
     readout_frac::Float32
 end
 
-SSMReadout() = SSMReadout(0.25f0)
+function SSMReadout(dims::Pair{Int,Int}; readout_frac::Float32=0.25f0)
+    return SSMReadout(dims.first, dims.second, readout_frac)
+end
 
 Lux.initialparameters(::AbstractRNG, ::SSMReadout) = NamedTuple()
-Lux.initialstates(::AbstractRNG, ::SSMReadout) = NamedTuple()
+
+function Lux.initialstates(rng::AbstractRNG, l::SSMReadout)
+    return (codes = random_symbols(rng, (l.hidden_dims, l.n_classes)),)
+end
 
 function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
-    L = size(z, 2)
+    C, L, B = size(z)
     t0 = max(1, L - max(1, round(Int, L * l.readout_frac)) + 1)
-    z_avg  = mean(z[:, t0:L, :]; dims=2)[:, 1, :]   # C × B
-    z_norm = normalize_to_unit_circle(z_avg)
-    return complex_to_angle(z_norm), st               # C × B Phase
+    W = L - t0 + 1
+
+    # Extract phase at each timestep in the readout window
+    z_window = z[:, t0:L, :]                         # C × W × B
+    z_norm = normalize_to_unit_circle(z_window)
+    phases = complex_to_angle(z_norm)                 # C × W × B  Phase
+
+    # Broadcast similarity: cos(π·(phase - code)) averaged over features
+    codes = st.codes                                  # C × n_classes  Phase
+    n_cls = size(codes, 2)
+    p = reshape(phases, C, 1, W, B)                   # C × 1 × W × B
+    c = reshape(codes, C, n_cls, 1, 1)                # C × n_classes × 1 × 1
+    cos_diff = cos.(pi_f32 .* (p .- c))               # C × n_classes × W × B
+    sims_per_step = mean(cos_diff; dims=1)            # 1 × n_classes × W × B
+
+    # Average logits over the readout window
+    sims_avg = mean(sims_per_step; dims=3)            # 1 × n_classes × 1 × B
+
+    return dropdims(sims_avg; dims=(1, 3)), st        # n_classes × B
 end
 
 # ================================================================

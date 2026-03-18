@@ -23,8 +23,7 @@ function create_model(; D_hidden=128, n_classes=10, C_in=28, init=:uniform)
     model = Chain(
         PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init),
         PhasorSSM(D_hidden => D_hidden, identity; init),
-        SSMReadout(0.25f0),
-        Codebook(D_hidden => n_classes),
+        SSMReadout(D_hidden => n_classes),
     )
     return model
 end

@@ -69,8 +69,7 @@ function run_experiment(; n_epochs=20, batchsize=128, lr=3e-4, D_hidden=128,
         model = Chain(
             PhasorSSM(28 => D_hidden, normalize_to_unit_circle; init=init_mode),
             PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
-            SSMReadout(0.25f0),
-            Codebook(D_hidden => 10),
+            SSMReadout(D_hidden => 10),
         )
 
         ps, st = Lux.setup(rng, model)

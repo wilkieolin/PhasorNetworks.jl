@@ -142,24 +142,29 @@ function ssm_readout_tests()
     @testset "SSMReadout" begin
         rng = Xoshiro(42)
         C, L, B = 16, 20, 4
+        n_classes = 5
 
-        layer = SSMReadout(0.25f0)
+        layer = SSMReadout(C => n_classes)
         ps, st = Lux.setup(rng, layer)
 
         # No trainable parameters
         @test ps == NamedTuple()
 
+        # Codebook in state
+        @test size(st.codes) == (C, n_classes)
+
         z = randn(ComplexF32, C, L, B)
         out, st_new = layer(z, ps, st)
 
-        # Shape reduction: (C, L, B) → (C, B)
-        @test size(out) == (C, B)
+        # Shape: (C, L, B) → (n_classes, B) similarity logits
+        @test size(out) == (n_classes, B)
 
-        # Output is Phase type
-        @test eltype(out) == Phase
+        # Output is Float32 similarities in [-1, 1]
+        @test eltype(out) == Float32
+        @test all(out .>= -1f0 .- 1f-6) && all(out .<= 1f0 .+ 1f-6)
 
-        # Bounds [-1, 1]
-        @test all(Float32.(out) .>= -1f0) && all(Float32.(out) .<= 1f0)
+        # All values finite
+        @test all(isfinite, out)
     end
 end
 
@@ -213,8 +218,7 @@ function ssm_chain_tests()
         model = Chain(
             PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
             PhasorSSM(D_hidden => D_hidden, identity),
-            SSMReadout(0.25f0),
-            Codebook(D_hidden => n_classes),
+            SSMReadout(D_hidden => n_classes),
         )
         ps, st = Lux.setup(rng, model)
 
@@ -291,8 +295,7 @@ function ssm_gpu_tests()
             model = Chain(
                 PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
                 PhasorSSM(D_hidden => D_hidden, identity),
-                SSMReadout(0.25f0),
-                Codebook(D_hidden => n_classes),
+                SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
             ps = ps |> device
