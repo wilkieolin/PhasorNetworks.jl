@@ -83,6 +83,8 @@ causal_conv,
 hippo_legs_diagonal,
 psk_encode,
 impulse_encode,
+SSMCrossAttention,
+SSMSelfAttention,
 
 #network
 attend,

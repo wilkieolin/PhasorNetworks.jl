@@ -402,3 +402,176 @@ function _impulse_encode_impl(images::AbstractArray{<:Real, 3}; substeps::Int=4)
 
     return complex.(signal, zero(signal))
 end
+
+# ================================================================
+# 8. SSM Cross-Attention Layer
+# ================================================================
+
+"""
+    SSMCrossAttention(in_dims => d_model, n_keys, activation; kwargs...)
+
+Cross-attention layer for the phasor SSM framework.  Accepts complex-valued
+3D input and produces attention-weighted complex output using stored key
+prototypes.
+
+Two dense sub-networks project the input into complex queries (Q) and values
+(V).  Keys (K) are trainable Phase parameters — learned prototypes that the
+sequence attends to.  QK similarity scores (via `similarity_outer`) are
+exponentially scaled (via `score_scale`) and used to weight-multiply the
+values.  The result is renormalized to the unit circle.
+
+**Note:** The temporal dimension changes from L to `n_keys`.  Set
+`n_keys = L` to preserve the temporal dimension, or use a different value
+as a bottleneck / pooling mechanism.
+
+# Arguments
+- `in_dims => d_model` — Input channel dimension and output channel dimension.
+- `n_keys::Int` — Number of stored key prototypes.
+- `activation` — Applied after attention.  Default `normalize_to_unit_circle`.
+
+# Trainable parameters
+- `weight_q` (Float32, d_model × in_dims) — Query projection matrix.
+- `weight_v` (Float32, d_model × in_dims) — Value projection matrix.
+- `keys` (Phase, d_model × n_keys) — Stored key prototypes.
+- `scale` (Float32, length 1) — Exponential score scaling factor.
+
+# Data flow
+```
+Input (C_in × L × B) complex
+  → Q = W_q · x  (d_model × L × B) complex
+  → V = W_v · x  (d_model × L × B) complex
+  → Q_phase = complex_to_angle(normalize(Q))
+  → scores = score_scale(similarity_outer(Q_phase, K_phase))  (L × N_keys × B)
+  → output = batched_mul(V, scores)  (d_model × N_keys × B) complex
+  → activation(output)
+```
+"""
+struct SSMCrossAttention <: Lux.AbstractLuxLayer
+    in_dims::Int
+    d_model::Int
+    n_keys::Int
+    activation::Function
+end
+
+function SSMCrossAttention(dims::Pair{Int,Int}, n_keys::Int,
+                           act=normalize_to_unit_circle)
+    return SSMCrossAttention(dims.first, dims.second, n_keys, act)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::SSMCrossAttention)
+    inv_sqrt = 1f0 / sqrt(Float32(l.in_dims))
+    W_q = Float32.(randn(rng, l.d_model, l.in_dims)) .* inv_sqrt
+    W_v = Float32.(randn(rng, l.d_model, l.in_dims)) .* inv_sqrt
+    keys = Phase.(2f0 .* rand(rng, Float32, l.d_model, l.n_keys) .- 1f0)
+    scale = [3.0f0]
+    return (weight_q=W_q, weight_v=W_v, keys=keys, scale=scale)
+end
+
+Lux.initialstates(::AbstractRNG, ::SSMCrossAttention) = NamedTuple()
+Lux.parameterlength(l::SSMCrossAttention) = l.d_model * l.in_dims * 2 + l.d_model * l.n_keys + 1
+
+function (l::SSMCrossAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    C_in, L, B = size(x)
+
+    # Project input to Q and V via real weight matrices on complex input
+    xr = reshape(x, C_in, L * B)
+    Q = reshape(complex.(ps.weight_q * real.(xr), ps.weight_q * imag.(xr)),
+                l.d_model, L, B)
+    V = reshape(complex.(ps.weight_v * real.(xr), ps.weight_v * imag.(xr)),
+                l.d_model, L, B)
+
+    # Convert Q to phase for similarity computation
+    Q_phase = complex_to_angle(normalize_to_unit_circle(Q))  # d_model × L × B Phase
+
+    # Expand stored keys to 3D for similarity_outer
+    K_phase = repeat(reshape(ps.keys, l.d_model, l.n_keys, 1), 1, 1, B)
+
+    # Compute attention scores and weight values
+    scores = score_scale(similarity_outer(Q_phase, K_phase, dims=2),
+                         scale=ps.scale)          # L × n_keys × B
+    output = batched_mul(V, scores)                # d_model × n_keys × B
+
+    return l.activation(output), st
+end
+
+# ================================================================
+# 9. SSM Self-Attention Layer
+# ================================================================
+
+"""
+    SSMSelfAttention(in_dims => d_model, activation)
+
+Self-attention layer for the phasor SSM framework.  Projects the complex
+input into queries (Q), keys (K), and values (V) via three dense
+sub-networks.  QK similarity scores weight the values, and the result is
+renormalized to the unit circle.
+
+Unlike `SSMCrossAttention`, keys are derived from the input rather than
+stored as parameters.  Since Q and K have the same temporal extent L, the
+output preserves the temporal dimension — making this a drop-in layer in
+a `Chain`.
+
+# Arguments
+- `in_dims => d_model` — Input and output channel dimensions.
+- `activation` — Applied after attention.  Default `normalize_to_unit_circle`.
+
+# Trainable parameters
+- `weight_q` (Float32, d_model × in_dims) — Query projection.
+- `weight_k` (Float32, d_model × in_dims) — Key projection.
+- `weight_v` (Float32, d_model × in_dims) — Value projection.
+- `scale` (Float32, length 1) — Exponential score scaling factor.
+
+# Data flow
+```
+Input (C_in × L × B) complex
+  → Q = W_q · x,  K = W_k · x,  V = W_v · x   (d_model × L × B)
+  → scores = score_scale(similarity_outer(Q_phase, K_phase))  (L × L × B)
+  → output = batched_mul(V, scores)  (d_model × L × B) complex
+  → activation(output)
+```
+"""
+struct SSMSelfAttention <: Lux.AbstractLuxLayer
+    in_dims::Int
+    d_model::Int
+    activation::Function
+end
+
+function SSMSelfAttention(dims::Pair{Int,Int}, act=normalize_to_unit_circle)
+    return SSMSelfAttention(dims.first, dims.second, act)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::SSMSelfAttention)
+    inv_sqrt = 1f0 / sqrt(Float32(l.in_dims))
+    W_q = Float32.(randn(rng, l.d_model, l.in_dims)) .* inv_sqrt
+    W_k = Float32.(randn(rng, l.d_model, l.in_dims)) .* inv_sqrt
+    W_v = Float32.(randn(rng, l.d_model, l.in_dims)) .* inv_sqrt
+    scale = [3.0f0]
+    return (weight_q=W_q, weight_k=W_k, weight_v=W_v, scale=scale)
+end
+
+Lux.initialstates(::AbstractRNG, ::SSMSelfAttention) = NamedTuple()
+Lux.parameterlength(l::SSMSelfAttention) = l.d_model * l.in_dims * 3 + 1
+
+function (l::SSMSelfAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    C_in, L, B = size(x)
+
+    # Project input to Q, K, V
+    xr = reshape(x, C_in, L * B)
+    Q = reshape(complex.(ps.weight_q * real.(xr), ps.weight_q * imag.(xr)),
+                l.d_model, L, B)
+    K = reshape(complex.(ps.weight_k * real.(xr), ps.weight_k * imag.(xr)),
+                l.d_model, L, B)
+    V = reshape(complex.(ps.weight_v * real.(xr), ps.weight_v * imag.(xr)),
+                l.d_model, L, B)
+
+    # Convert Q, K to phase for similarity
+    Q_phase = complex_to_angle(normalize_to_unit_circle(Q))
+    K_phase = complex_to_angle(normalize_to_unit_circle(K))
+
+    # Compute attention scores and weight values
+    scores = score_scale(similarity_outer(Q_phase, K_phase, dims=2),
+                         scale=ps.scale)          # L × L × B
+    output = batched_mul(V, scores)                # d_model × L × B
+
+    return l.activation(output), st
+end

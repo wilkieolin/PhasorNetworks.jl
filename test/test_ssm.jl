@@ -17,6 +17,9 @@ function ssm_tests()
         impulse_encode_tests()
         ssm_chain_tests()
         ssm_gradient_tests()
+        ssm_cross_attention_tests()
+        ssm_self_attention_tests()
+        ssm_attention_chain_tests()
     end
 end
 
@@ -306,6 +309,220 @@ function ssm_gpu_tests()
 
             @test size(y) == (n_classes, B)
             @test all(isfinite, Array(y))
+        end
+
+        @testset "SSMCrossAttention on GPU" begin
+            C_in, d_model, n_keys = 8, 16, 6
+            L, B = 10, 4
+
+            layer = SSMCrossAttention(C_in => d_model, n_keys)
+            ps, st = Lux.setup(rng, layer)
+            ps = ps |> device
+            st = st |> device
+
+            x = randn(ComplexF32, C_in, L, B) |> device
+            y, _ = layer(x, ps, st)
+
+            @test size(y) == (d_model, n_keys, B)
+            @test all(isfinite, Array(y))
+        end
+
+        @testset "SSMSelfAttention on GPU" begin
+            C_in, d_model = 8, 16
+            L, B = 10, 4
+
+            layer = SSMSelfAttention(C_in => d_model)
+            ps, st = Lux.setup(rng, layer)
+            ps = ps |> device
+            st = st |> device
+
+            x = randn(ComplexF32, C_in, L, B) |> device
+            y, _ = layer(x, ps, st)
+
+            @test size(y) == (d_model, L, B)
+            @test all(isfinite, Array(y))
+        end
+    end
+end
+
+function ssm_cross_attention_tests()
+    @testset "SSMCrossAttention" begin
+        rng = Xoshiro(42)
+        C_in, d_model, n_keys = 8, 16, 6
+        L, B = 10, 4
+
+        layer = SSMCrossAttention(C_in => d_model, n_keys)
+        ps, st = Lux.setup(rng, layer)
+
+        @testset "parameter shapes" begin
+            @test size(ps.weight_q) == (d_model, C_in)
+            @test size(ps.weight_v) == (d_model, C_in)
+            @test size(ps.keys) == (d_model, n_keys)
+            @test length(ps.scale) == 1
+        end
+
+        @testset "output shape and finiteness" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, st_new = layer(x, ps, st)
+
+            @test size(y) == (d_model, n_keys, B)
+            @test eltype(y) <: Complex
+            @test all(isfinite, y)
+        end
+
+        @testset "unit circle normalization" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, _ = layer(x, ps, st)
+            mags = abs.(y)
+            @test all(abs.(mags .- 1f0) .< 0.1f0)
+        end
+
+        @testset "different inputs produce different outputs" begin
+            x1 = randn(rng, ComplexF32, C_in, L, B)
+            x2 = randn(rng, ComplexF32, C_in, L, B)
+            y1, _ = layer(x1, ps, st)
+            y2, _ = layer(x2, ps, st)
+            @test y1 != y2
+        end
+
+        @testset "gradient computation" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            loss_fn = ps -> begin
+                y, _ = layer(x, ps, st)
+                sum(abs2.(y))
+            end
+            val, grads = withgradient(loss_fn, ps)
+            g = grads[1]
+            @test isfinite(val)
+            @test all(isfinite, g.weight_q)
+            @test all(isfinite, g.weight_v)
+            @test all(isfinite, g.keys)
+            @test all(isfinite, g.scale)
+        end
+
+        @testset "parameterlength" begin
+            expected = d_model * C_in * 2 + d_model * n_keys + 1
+            @test Lux.parameterlength(layer) == expected
+        end
+    end
+end
+
+function ssm_self_attention_tests()
+    @testset "SSMSelfAttention" begin
+        rng = Xoshiro(42)
+        C_in, d_model = 8, 16
+        L, B = 10, 4
+
+        layer = SSMSelfAttention(C_in => d_model)
+        ps, st = Lux.setup(rng, layer)
+
+        @testset "parameter shapes" begin
+            @test size(ps.weight_q) == (d_model, C_in)
+            @test size(ps.weight_k) == (d_model, C_in)
+            @test size(ps.weight_v) == (d_model, C_in)
+            @test length(ps.scale) == 1
+        end
+
+        @testset "output shape preserves temporal dim" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, _ = layer(x, ps, st)
+
+            @test size(y) == (d_model, L, B)
+            @test eltype(y) <: Complex
+            @test all(isfinite, y)
+        end
+
+        @testset "unit circle normalization" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, _ = layer(x, ps, st)
+            mags = abs.(y)
+            @test all(abs.(mags .- 1f0) .< 0.1f0)
+        end
+
+        @testset "different inputs produce different outputs" begin
+            x1 = randn(rng, ComplexF32, C_in, L, B)
+            x2 = randn(rng, ComplexF32, C_in, L, B)
+            y1, _ = layer(x1, ps, st)
+            y2, _ = layer(x2, ps, st)
+            @test y1 != y2
+        end
+
+        @testset "gradient computation" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            loss_fn = ps -> begin
+                y, _ = layer(x, ps, st)
+                sum(abs2.(y))
+            end
+            val, grads = withgradient(loss_fn, ps)
+            g = grads[1]
+            @test isfinite(val)
+            @test all(isfinite, g.weight_q)
+            @test all(isfinite, g.weight_k)
+            @test all(isfinite, g.weight_v)
+            @test all(isfinite, g.scale)
+        end
+
+        @testset "parameterlength" begin
+            expected = d_model * C_in * 3 + 1
+            @test Lux.parameterlength(layer) == expected
+        end
+    end
+end
+
+function ssm_attention_chain_tests()
+    @testset "SSM Attention Chain" begin
+        rng = Xoshiro(42)
+        C_in, D_hidden, n_classes = 8, 16, 5
+        L, B = 10, 4
+
+        @testset "self-attention in chain" begin
+            model = Chain(
+                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
+                PhasorSSM(D_hidden => D_hidden, identity),
+                SSMReadout(D_hidden => n_classes),
+            )
+            ps, st = Lux.setup(rng, model)
+            x = randn(rng, ComplexF32, C_in, L, B)
+
+            y, _ = model(x, ps, st)
+            @test size(y) == (n_classes, B)
+            @test all(isfinite, y)
+        end
+
+        @testset "cross-attention in chain" begin
+            model = Chain(
+                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                SSMCrossAttention(D_hidden => D_hidden, L, normalize_to_unit_circle),
+                PhasorSSM(D_hidden => D_hidden, identity),
+                SSMReadout(D_hidden => n_classes),
+            )
+            ps, st = Lux.setup(rng, model)
+            x = randn(rng, ComplexF32, C_in, L, B)
+
+            y, _ = model(x, ps, st)
+            @test size(y) == (n_classes, B)
+            @test all(isfinite, y)
+        end
+
+        @testset "gradient through chain with self-attention" begin
+            model = Chain(
+                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
+                SSMReadout(D_hidden => n_classes),
+            )
+            ps, st = Lux.setup(rng, model)
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y_target = Float32.(rand(rng, n_classes, B))
+
+            loss_fn = ps -> begin
+                y, _ = model(x, ps, st)
+                sum(abs2.(y .- y_target))
+            end
+            val, grads = withgradient(loss_fn, ps)
+            @test isfinite(val)
+            @test all(isfinite, grads[1].layer_1.weight)
+            @test all(isfinite, grads[1].layer_2.weight_q)
         end
     end
 end

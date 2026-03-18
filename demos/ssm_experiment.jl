@@ -1,12 +1,15 @@
 #=
-SSM Encoding × Initialization Experiment
-==========================================
+SSM Encoding × Initialization × Architecture Experiment
+=========================================================
 
-Compares 4 conditions on FashionMNIST:
-  1. uniform init + complex PSK encoding
-  2. hippo   init + complex PSK encoding
-  3. uniform init + impulse encoding (real-valued temporal current)
-  4. hippo   init + impulse encoding
+Compares conditions on FashionMNIST across three axes:
+
+  Init:      uniform | hippo
+  Encoding:  complex PSK | impulse
+  Model:     base (SSM only) | attention (SSM + SSMSelfAttention)
+
+Base model:      PhasorSSM → PhasorSSM → SSMReadout
+Attention model: PhasorSSM → SSMSelfAttention → PhasorSSM → SSMReadout
 
 Complex PSK: pixel v → constant complex phasor exp(iπ(2v-1)) at each step.
   The phase information is present at every time step simultaneously.
@@ -19,7 +22,7 @@ Impulse encoding: pixel v → phase θ = (2v-1) → spike time within a period,
   and the SSM must remember it through subsequent steps.
 
 Usage:
-  julia --project demos/ssm_experiment.jl [--epochs 20] [--hidden 128]
+  julia --project demos/ssm_experiment.jl [--epochs 20] [--hidden 128] [--model both]
 =#
 
 using PhasorNetworks
@@ -33,8 +36,26 @@ using ArgParse
 # Experiment Runner
 # ================================================================
 
+function build_model(; C_in=28, D_hidden=128, n_classes=10, init_mode=:uniform,
+                       model_type=:base)
+    if model_type == :attention
+        return Chain(
+            PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init=init_mode),
+            SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
+            PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
+            SSMReadout(D_hidden => n_classes),
+        )
+    else
+        return Chain(
+            PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init=init_mode),
+            PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
+            SSMReadout(D_hidden => n_classes),
+        )
+    end
+end
+
 function run_experiment(; n_epochs=20, batchsize=128, lr=3e-4, D_hidden=128,
-                         seed=42, substeps=4)
+                         seed=42, substeps=4, model_filter="both")
     println("Loading FashionMNIST...")
     train_data = FashionMNIST(split=:train)
     test_data  = FashionMNIST(split=:test)
@@ -50,27 +71,34 @@ function run_experiment(; n_epochs=20, batchsize=128, lr=3e-4, D_hidden=128,
     device = use_cuda ? gpu_device() : cpu_device()
     println("Device: $(use_cuda ? "CUDA GPU" : "CPU")\n")
 
-    conditions = [
-        ("uniform+complex",  :uniform, :complex),
-        ("hippo+complex",    :hippo,   :complex),
-        ("uniform+impulse",  :uniform, :impulse),
-        ("hippo+impulse",    :hippo,   :impulse),
-    ]
+    model_types = if model_filter == "both"
+        [:base, :attention]
+    elseif model_filter == "attention"
+        [:attention]
+    else
+        [:base]
+    end
+
+    conditions = Tuple{String, Symbol, Symbol, Symbol}[]
+    for mt in model_types
+        suffix = mt == :attention ? "+attn" : ""
+        for (init_mode, encoding) in [(:uniform, :complex), (:hippo, :complex),
+                                       (:uniform, :impulse), (:hippo, :impulse)]
+            name = "$(init_mode)+$(encoding)$(suffix)"
+            push!(conditions, (name, init_mode, encoding, mt))
+        end
+    end
 
     results = Dict{String, @NamedTuple{losses::Vector{Float64}, accs::Vector{Float64}}}()
 
-    for (name, init_mode, encoding) in conditions
+    for (name, init_mode, encoding, model_type) in conditions
         println("="^60)
-        println("  $name  (init=$init_mode, encoding=$encoding)")
+        println("  $name  (init=$init_mode, encoding=$encoding, model=$model_type)")
         println("="^60)
 
         rng = Xoshiro(seed)
 
-        model = Chain(
-            PhasorSSM(28 => D_hidden, normalize_to_unit_circle; init=init_mode),
-            PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
-            SSMReadout(D_hidden => 10),
-        )
+        model = build_model(; D_hidden, init_mode, model_type)
 
         ps, st = Lux.setup(rng, model)
         ps = ps |> device
@@ -124,13 +152,22 @@ end
 # ================================================================
 
 function plot_results(results, n_epochs)
-    colors = Dict(
+    # Colors by init+encoding pair; linestyle by model type
+    base_colors = Dict(
         "uniform+complex"  => :blue,
         "hippo+complex"    => :red,
         "uniform+impulse"  => :cyan,
         "hippo+impulse"    => :orange,
     )
-    order = ["uniform+complex", "hippo+complex", "uniform+impulse", "hippo+impulse"]
+    get_color(name) = base_colors[replace(name, "+attn" => "")]
+    get_style(name) = endswith(name, "+attn") ? :dash : :solid
+    get_marker(name) = endswith(name, "+attn") ? :diamond : :circle
+
+    # Stable ordering: base conditions first, then attention
+    order = [
+        "uniform+complex",  "hippo+complex",  "uniform+impulse",  "hippo+impulse",
+        "uniform+complex+attn", "hippo+complex+attn", "uniform+impulse+attn", "hippo+impulse+attn",
+    ]
 
     # Accuracy curves
     p_acc = plot(title="Test Accuracy", xlabel="epoch", ylabel="accuracy (%)",
@@ -139,7 +176,8 @@ function plot_results(results, n_epochs)
         haskey(results, name) || continue
         res = results[name]
         plot!(p_acc, 1:n_epochs, res.accs .* 100,
-              label=name, lw=2, color=colors[name], marker=:circle, ms=3)
+              label=name, lw=2, color=get_color(name),
+              ls=get_style(name), marker=get_marker(name), ms=3)
     end
     hline!(p_acc, [10.0], color=:gray, ls=:dash, alpha=0.4, label="chance")
 
@@ -152,7 +190,8 @@ function plot_results(results, n_epochs)
         w = min(50, length(res.losses) ÷ max(n_epochs, 1))
         w = max(w, 1)
         smoothed = [mean(res.losses[max(1,i-w+1):i]) for i in 1:length(res.losses)]
-        plot!(p_loss, smoothed, label=name, lw=1.5, color=colors[name], alpha=0.8)
+        plot!(p_loss, smoothed, label=name, lw=1.5,
+              color=get_color(name), ls=get_style(name), alpha=0.8)
     end
 
     # Final accuracy bar
@@ -161,13 +200,13 @@ function plot_results(results, n_epochs)
     p_bar = bar(names_present, final_accs,
                 title="Final Accuracy (epoch $n_epochs)",
                 ylabel="accuracy (%)", label=nothing,
-                color=[colors[n] for n in names_present],
-                xrotation=15)
+                color=[get_color(n) for n in names_present],
+                xrotation=20)
 
     p = plot(p_acc, p_loss, p_bar;
              layout=@layout([a b; c{0.4h}]),
-             size=(1000, 800),
-             plot_title="PhasorSSM: Init × Encoding")
+             size=(1100, 850),
+             plot_title="PhasorSSM: Init × Encoding × Architecture")
 
     savefig(p, "ssm_experiment_results.png")
     println("\nPlot saved to ssm_experiment_results.png")
@@ -179,7 +218,7 @@ end
 # ================================================================
 
 function experiment_main()
-    s = ArgParseSettings(description="PhasorSSM Init × Encoding experiment")
+    s = ArgParseSettings(description="PhasorSSM Init × Encoding × Architecture experiment")
     @add_arg_table! s begin
         "--epochs"
             help = "number of training epochs per condition"
@@ -205,6 +244,10 @@ function experiment_main()
             help = "substeps per row for impulse encoding (L = 28 × substeps)"
             arg_type = Int
             default = 4
+        "--model"
+            help = "model type: base, attention, or both"
+            arg_type = String
+            default = "both"
     end
     parsed = ArgParse.parse_args(s)
 
@@ -215,6 +258,7 @@ function experiment_main()
         D_hidden=parsed["hidden"],
         seed=parsed["seed"],
         substeps=parsed["substeps"],
+        model_filter=parsed["model"],
     )
 
     plot_results(results, parsed["epochs"])
@@ -222,7 +266,11 @@ function experiment_main()
     println("\n" * "="^60)
     println("  SUMMARY")
     println("="^60)
-    for name in ["uniform+complex", "hippo+complex", "uniform+impulse", "hippo+impulse"]
+    all_names = [
+        "uniform+complex", "hippo+complex", "uniform+impulse", "hippo+impulse",
+        "uniform+complex+attn", "hippo+complex+attn", "uniform+impulse+attn", "hippo+impulse+attn",
+    ]
+    for name in all_names
         haskey(results, name) || continue
         println("  $name:  $(round(results[name].accs[end] * 100; digits=2))%")
     end
