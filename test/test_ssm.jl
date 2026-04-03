@@ -10,6 +10,8 @@ function ssm_tests()
         @info "Running SSM tests..."
         phasor_kernel_tests()
         causal_conv_tests()
+        causal_conv_fft_tests()
+        dirac_discretization_tests()
         hippo_tests()
         phasor_ssm_layer_tests()
         ssm_readout_tests()
@@ -20,6 +22,10 @@ function ssm_tests()
         ssm_cross_attention_tests()
         ssm_self_attention_tests()
         ssm_attention_chain_tests()
+        ssm_phases_to_train_tests()
+        ssm_spiking_dispatch_tests()
+        ssm_spiking_correlation_tests()
+        ssm_spiking_chain_tests()
     end
 end
 
@@ -74,6 +80,189 @@ function causal_conv_tests()
     end
 end
 
+function causal_conv_fft_tests()
+    @testset "causal_conv_fft" begin
+        @testset "matches Toeplitz for short sequences" begin
+            C, L, B = 4, 10, 3
+            K = randn(ComplexF32, C, L)
+            H = randn(ComplexF32, C, L, B)
+
+            Z_toeplitz = PhasorNetworks._causal_conv_toeplitz(K, H)
+            Z_fft = causal_conv_fft(K, H)
+
+            @test size(Z_fft) == (C, L, B)
+            @test eltype(Z_fft) <: Complex
+            @test Z_fft ≈ Z_toeplitz atol=1f-4
+        end
+
+        @testset "matches Toeplitz for medium sequences" begin
+            C, L, B = 8, 128, 4
+            λ = fill(-0.1f0, C)
+            ω = Float32.(collect(range(0.2f0, 2.5f0; length=C)))
+            K = phasor_kernel(λ, ω, 1f0, L)
+            H = randn(ComplexF32, C, L, B)
+
+            Z_toeplitz = PhasorNetworks._causal_conv_toeplitz(K, H)
+            Z_fft = causal_conv_fft(K, H)
+
+            @test Z_fft ≈ Z_toeplitz atol=1f-4
+        end
+
+        @testset "causality" begin
+            C, L, B = 4, 64, 2
+            K = randn(ComplexF32, C, L)
+            H = randn(ComplexF32, C, L, B)
+
+            Z = causal_conv_fft(K, H)
+            H2 = copy(H)
+            H2[:, 6:end, :] .= 0f0
+            Z2 = causal_conv_fft(K, H2)
+
+            # First 5 time steps should be identical
+            @test Z[:, 1:5, :] ≈ Z2[:, 1:5, :] atol=1f-5
+        end
+
+        @testset "long sequence (L=512)" begin
+            C, L, B = 8, 512, 2
+            λ = fill(-0.01f0, C)
+            ω = Float32.(collect(range(0.1f0, 1.0f0; length=C)))
+            K = phasor_kernel(λ, ω, 1f0, L)
+            H = randn(ComplexF32, C, L, B)
+
+            Z = causal_conv_fft(K, H)
+            @test size(Z) == (C, L, B)
+            @test all(isfinite, Z)
+        end
+
+        @testset "gradient flow" begin
+            C, L, B = 4, 32, 2
+            K = randn(ComplexF32, C, L)
+            H = randn(ComplexF32, C, L, B)
+
+            loss_fn = K -> sum(abs2, causal_conv_fft(K, H))
+            val, grads = withgradient(loss_fn, K)
+            @test isfinite(val)
+            @test grads[1] !== nothing
+            @test all(isfinite, grads[1])
+        end
+
+        @testset "auto-dispatch uses FFT for long sequences" begin
+            C, L, B = 4, 128, 2
+            K = randn(ComplexF32, C, L)
+            H = randn(ComplexF32, C, L, B)
+
+            # causal_conv should auto-dispatch to FFT for L > 64
+            Z_auto = causal_conv(K, H)
+            Z_fft = causal_conv_fft(K, H)
+            @test Z_auto ≈ Z_fft atol=1f-6
+        end
+    end
+end
+
+function dirac_discretization_tests()
+    @testset "Dirac Discretization" begin
+        rng = Xoshiro(42)
+
+        @testset "dirac_encode shape and finiteness" begin
+            C_in, C_out, L, B = 4, 8, 16, 3
+            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            λ = fill(-0.1f0, C_out)
+            ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
+
+            enc = dirac_encode(phases, λ, ω, 1f0)
+            @test size(enc) == (C_out, C_in, L, B)
+            @test eltype(enc) <: Complex
+            @test all(isfinite, enc)
+        end
+
+        @testset "causal_conv_dirac shape and finiteness" begin
+            C_in, C_out, L, B = 4, 8, 16, 3
+            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            W = randn(rng, Float32, C_out, C_in)
+            λ = fill(-0.1f0, C_out)
+            ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
+
+            Z = causal_conv_dirac(phases, W, λ, ω, 1f0)
+            @test size(Z) == (C_out, L, B)
+            @test eltype(Z) <: Complex
+            @test all(isfinite, Z)
+        end
+
+        @testset "gradient flow through Dirac path" begin
+            C_in, C_out, L, B = 4, 8, 10, 2
+            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            W = randn(rng, Float32, C_out, C_in)
+            λ = fill(-0.1f0, C_out)
+            ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
+
+            loss_fn = W -> sum(abs2, causal_conv_dirac(phases, W, λ, ω, 1f0))
+            val, grads = withgradient(loss_fn, W)
+            @test isfinite(val)
+            @test grads[1] !== nothing
+            @test all(isfinite, grads[1])
+        end
+
+        @testset "PhasorDense Phase 3D uses Dirac for SSM init" begin
+            C_in, C_out, L, B = 4, 8, 10, 3
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+
+            # SSM-mode layer (init_mode != :default) should use Dirac
+            layer_ssm = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                    init_mode=:uniform, use_bias=false)
+            ps, st = Lux.setup(rng, layer_ssm)
+            y_dirac, _ = layer_ssm(phases, ps, st)
+            @test size(y_dirac) == (C_out, L, B)
+            @test eltype(y_dirac) <: Phase
+            @test all(isfinite, Float32.(y_dirac))
+
+            # Default layer should use ZOH (backward compat)
+            layer_default = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                        init_mode=:default, use_bias=false)
+            ps_d, st_d = Lux.setup(rng, layer_default)
+            y_zoh, _ = layer_default(phases, ps_d, st_d)
+            @test size(y_zoh) == (C_out, L, B)
+            @test eltype(y_zoh) <: Phase
+
+            # Complex 3D input always uses ZOH regardless of init_mode
+            x_cmpx = angle_to_complex(phases)
+            y_cmpx, _ = layer_ssm(x_cmpx, ps, st)
+            @test size(y_cmpx) == (C_out, L, B)
+            @test eltype(y_cmpx) <: Complex
+        end
+
+        @testset "Dirac vs spiking ODE correlation (no substeps)" begin
+            @info "Running Dirac vs spiking correlation..."
+            C_in, C_out = 4, 8
+            L, B = 8, 3
+
+            # Use phase return type so spiking path returns phases, not SpikingCall
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:uniform, use_bias=false,
+                                return_type=SolutionType(:phase))
+            ps, st = Lux.setup(rng, layer)
+
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+
+            # Dirac discrete path
+            y_dirac, _ = layer(phases, ps, st)
+
+            # Spiking ODE path (returns Phase array with return_type=:phase)
+            spk_args_local = SpikingArgs(t_window=0.01f0, threshold=0.001f0)
+            train = ssm_phases_to_train(phases, spk_args=spk_args_local)
+            tspan_spk = (0.0f0, Float32(L) * spk_args_local.t_period)
+            sc = SpikingCall(train, spk_args_local, tspan_spk)
+            y_spk, _ = layer(sc, ps, st)
+
+            c = cor_realvals(vec(Float32.(y_dirac)), vec(Float32.(y_spk)))
+            @info "Dirac vs spiking correlation (no substeps): $c"
+            # Dirac at coarse grid should significantly exceed ZOH's ~0.09 at substeps=4.
+            # Remaining gap vs 1.0 is from accumulated differences in coupled ODE
+            # integration vs discrete two-stage approximation over multiple periods.
+            @test c > 0.99
+        end
+    end
+end
+
 function hippo_tests()
     @testset "hippo_legs_diagonal" begin
         N = 32
@@ -108,15 +297,15 @@ function phasor_ssm_layer_tests()
         layer = PhasorSSM(in_dim => out_dim, normalize_to_unit_circle)
         ps, st = Lux.setup(rng, layer)
 
-        # Parameter shapes
+        # Parameter shapes (PhasorSSM now returns PhasorDense)
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
-        @test size(ps.omega) == (out_dim,)
+        @test size(st.omega) == (out_dim,)
 
         # parameterlength
-        @test Lux.parameterlength(layer) == out_dim * in_dim + 2 * out_dim
+        @test Lux.parameterlength(layer) == out_dim * in_dim + out_dim
 
-        # Forward pass
+        # Forward pass (3D complex dispatch)
         x = randn(ComplexF32, in_dim, L, B)
         y, st_new = layer(x, ps, st)
 
@@ -133,9 +322,9 @@ function phasor_ssm_layer_tests()
 
         # HiPPO init
         layer_hippo = PhasorSSM(in_dim => out_dim, identity; init=:hippo)
-        ps_h, _ = Lux.setup(rng, layer_hippo)
+        ps_h, st_h = Lux.setup(rng, layer_hippo)
         @test size(ps_h.weight) == (out_dim, in_dim)
-        y_h, _ = layer_hippo(x, ps_h, st)
+        y_h, _ = layer_hippo(x, ps_h, st_h)
         @test size(y_h) == (out_dim, L, B)
         @test all(isfinite, y_h)
     end
@@ -258,7 +447,6 @@ function ssm_gradient_tests()
         # All gradient components finite
         @test all(isfinite, grads[1].weight)
         @test all(isfinite, grads[1].log_neg_lambda)
-        @test all(isfinite, grads[1].omega)
     end
 end
 
@@ -523,6 +711,286 @@ function ssm_attention_chain_tests()
             @test isfinite(val)
             @test all(isfinite, grads[1].layer_1.weight)
             @test all(isfinite, grads[1].layer_2.weight_q)
+        end
+    end
+end
+
+# ---- SSM Spiking Tests ----
+
+function ssm_phases_to_train_tests()
+    @testset "ssm_phases_to_train" begin
+        C, L, B = 4, 6, 2
+        phases = Phase.(rand(Float32, C, L, B) .* 2f0 .- 1f0)
+
+        train = ssm_phases_to_train(phases, spk_args=spk_args)
+
+        @testset "shape and spike count" begin
+            @test train.shape == (C, B)
+            @test length(train.times) == C * L * B
+            @test length(train.indices) == C * L * B
+        end
+
+        @testset "time range" begin
+            t_period = spk_args.t_period
+            @test all(train.times .>= 0f0)
+            @test all(train.times .<= Float32(L) * t_period)
+        end
+
+        @testset "times are ordered within periods" begin
+            t_period = spk_args.t_period
+            # Each period l maps to [(l-1)*t_period, l*t_period)
+            for l in 1:L
+                t_lo = Float32(l - 1) * t_period
+                t_hi = Float32(l) * t_period
+                mask = (train.times .>= t_lo) .& (train.times .< t_hi .+ 1f-6)
+                @test sum(mask) == C * B
+            end
+        end
+    end
+end
+
+function ssm_spiking_dispatch_tests()
+    @testset "SSM Spiking Dispatch" begin
+        rng = Xoshiro(42)
+        C_in, C_out = 4, 8
+        L, B = 6, 2
+
+        # Create input as complex, encode as spikes
+        x_cmpx = randn(rng, ComplexF32, C_in, L, B)
+        phases_in = complex_to_angle(normalize_to_unit_circle(x_cmpx))
+        train = ssm_phases_to_train(phases_in, spk_args=spk_args)
+        tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
+        sc = SpikingCall(train, spk_args, tspan_spk)
+
+        @testset "PhasorSSM SpikingCall dispatch" begin
+            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+            ps, st = Lux.setup(rng, layer)
+
+            y, st_new = layer(sc, ps, st)
+
+            @test size(y) == (C_out, L, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
+
+        @testset "PhasorSSM CurrentCall dispatch" begin
+            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+            ps, st = Lux.setup(rng, layer)
+
+            cc = CurrentCall(sc)
+            y, st_new = layer(cc, ps, st)
+
+            @test size(y) == (C_out, L, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
+
+        @testset "PhasorSSM potential return type" begin
+            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle,
+                              return_type=SolutionType(:potential))
+            ps, st = Lux.setup(rng, layer)
+
+            sol, st_new = layer(sc, ps, st)
+            # Returns ODE solution of coupled system (C_in + C_out, B)
+            @test !(sol isa AbstractArray)
+            sampled = sol(tspan_spk[2])
+            @test sampled isa AbstractArray
+            @test size(sampled) == (C_in + C_out, B)
+        end
+
+        @testset "PhasorSSM spiking return type" begin
+            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle,
+                              return_type=SolutionType(:spiking))
+            ps, st = Lux.setup(rng, layer)
+
+            result, st_new = layer(sc, ps, st)
+            @test result isa SpikingCall
+            @test result.train.shape == (C_out, B)
+        end
+
+        @testset "MakeSpikingSSM layer" begin
+            make_layer = MakeSpikingSSM(spk_args)
+            ps_m, st_m = Lux.setup(rng, make_layer)
+
+            result, _ = make_layer(x_cmpx, ps_m, st_m)
+            @test result isa SpikingCall
+            @test result.train.shape == (C_in, B)
+            @test length(result.train.times) == C_in * L * B
+        end
+
+        @testset "SSMSelfAttention SpikingCall dispatch" begin
+            layer = SSMSelfAttention(C_in => C_out)
+            ps, st = Lux.setup(rng, layer)
+
+            y, _ = layer(sc, ps, st)
+            @test size(y) == (C_out, L, B)
+            @test all(isfinite, y)
+        end
+
+        @testset "SSMCrossAttention SpikingCall dispatch" begin
+            n_keys = 4
+            layer = SSMCrossAttention(C_in => C_out, n_keys)
+            ps, st = Lux.setup(rng, layer)
+
+            y, _ = layer(sc, ps, st)
+            @test size(y) == (C_out, n_keys, B)
+            @test all(isfinite, y)
+        end
+
+        @testset "SSMReadout SpikingCall dispatch" begin
+            n_classes = 5
+            layer = SSMReadout(C_in => n_classes)
+            ps, st = Lux.setup(rng, layer)
+
+            y, _ = layer(sc, ps, st)
+            @test size(y) == (n_classes, B)
+            @test eltype(y) == Float32
+            @test all(isfinite, y)
+        end
+    end
+end
+
+function ssm_spiking_correlation_tests()
+    @testset "SSM Discrete vs Spiking Correlation" begin
+        rng = Xoshiro(42)
+        C_in, C_out = 4, 8
+        L, B = 8, 3
+
+        # Phase-returning layer for both discrete and spiking comparison
+        layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+        ps, st = Lux.setup(rng, layer)
+
+        # Create complex input on unit circle
+        x_cmpx = normalize_to_unit_circle(randn(rng, ComplexF32, C_in, L, B))
+
+        # Discrete forward pass (coarse, complex ZOH) → extract phases
+        y_discrete_cmpx, _ = layer(x_cmpx, ps, st)
+        phases_discrete = complex_to_angle(y_discrete_cmpx)
+
+        # Spiking forward pass using same parameters
+        phases_in = complex_to_angle(x_cmpx)
+        train = ssm_phases_to_train(phases_in, spk_args=spk_args)
+        tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
+        sc = SpikingCall(train, spk_args, tspan_spk)
+
+        phases_spiking, _ = layer(sc, ps, st)
+
+        @testset "output shapes match" begin
+            @test size(phases_discrete) == size(phases_spiking)
+        end
+
+        # ---- Two-stage fine-grid convergence test ----
+        #
+        # The coupled oscillator ODE has two stages:
+        #   du/dt = k₀·u + I(t)         input oscillators decode spikes at global k₀
+        #   dz/dt = k_c·z + W·u         output oscillators integrate at per-channel k_c
+        #
+        # The discrete SSM equivalent is a two-stage computation:
+        #   Stage 1: Convolve impulse input with input oscillator kernel K₀ (at k₀)
+        #   Stage 2: Apply weight matrix W, then convolve with output kernel K_c (at k_c)
+        #
+        # By encoding phases as real-valued impulses on a fine temporal grid and
+        # computing both discrete stages, the ZOH approximation tightens and the
+        # discrete output converges toward the continuous ODE.  We test at multiple
+        # resolutions to verify monotonic convergence.
+        @testset "two-stage fine-grid convergence" begin
+            λ_c = -exp.(ps.log_neg_lambda)
+            ω_c = st.omega
+
+            # Input oscillator dynamics (global k₀ from spk_args)
+            k₀ = neuron_constant(spk_args)
+            λ₀ = Float32(real(k₀))
+            ω₀ = Float32(imag(k₀))
+
+            # Convert phases to pixel values for impulse_encode
+            pixels = Float32.((Float32.(phases_in) .+ 1f0) ./ 2f0)
+            images = permutedims(pixels, (2, 1, 3))  # (L, C_in, B)
+
+            correlations = Float32[]
+
+            for substeps in [4, 10, 20, 40]
+                L_fine = L * substeps
+                Δt_fine = 1f0 / Float32(substeps)
+
+                # Encode as real-valued impulses on fine temporal grid
+                x_input = impulse_encode(images; substeps=substeps)  # (C_in, L_fine, B)
+
+                # Stage 1: Decode through input oscillator kernel (at global k₀)
+                K₀ = phasor_kernel(fill(λ₀, C_in), fill(ω₀, C_in), Δt_fine, L_fine)
+                U = causal_conv(K₀, x_input)  # (C_in, L_fine, B) — decoded input
+
+                # Stage 2: Weight mix + per-channel temporal integration
+                Ur = reshape(U, C_in, L_fine * B)
+                Hr = complex.(ps.weight * real.(Ur), ps.weight * imag.(Ur))
+                H = reshape(Hr, C_out, L_fine, B)
+
+                K_c = phasor_kernel(λ_c, ω_c, Δt_fine, L_fine)
+                Z = causal_conv(K_c, H)  # (C_out, L_fine, B)
+                Y = normalize_to_unit_circle(Z)
+
+                # Sample at period boundaries
+                sample_idx = [l * substeps for l in 1:L]
+                phases_grid = complex_to_angle(Y[:, sample_idx, :])
+
+                c = cor_realvals(vec(Float32.(phases_grid)),
+                                 vec(Float32.(phases_spiking)))
+                push!(correlations, c)
+                @info "substeps=$substeps: two-stage SSM vs spiking correlation = $c"
+            end
+
+            # Monotonic convergence: finer resolution → higher correlation
+            for i in 2:length(correlations)
+                @test correlations[i] >= correlations[i-1] - 0.05f0
+            end
+
+            # Finest resolution (substeps=40) should show strong agreement
+            @test correlations[end] > 0.7
+        end
+
+        @testset "spiking output is non-degenerate" begin
+            ph_range = maximum(Float32.(phases_spiking)) - minimum(Float32.(phases_spiking))
+            @test ph_range > 0.5
+        end
+    end
+end
+
+function ssm_spiking_chain_tests()
+    @testset "SSM Spiking Chain (end-to-end)" begin
+        rng = Xoshiro(42)
+        C_in, D_hidden, n_classes = 4, 8, 5
+        L, B = 6, 2
+
+        @testset "MakeSpikingSSM → PhasorSSM → SSMReadout" begin
+            model = Chain(
+                MakeSpikingSSM(spk_args),
+                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle,
+                          return_type=SolutionType(:spiking)),
+                SSMReadout(D_hidden => n_classes),
+            )
+            ps, st = Lux.setup(rng, model)
+
+            x = normalize_to_unit_circle(randn(rng, ComplexF32, C_in, L, B))
+            y, _ = model(x, ps, st)
+
+            @test size(y) == (n_classes, B)
+            @test all(isfinite, y)
+        end
+
+        @testset "MakeSpikingSSM → PhasorSSM → SSMSelfAttention → SSMReadout" begin
+            model = Chain(
+                MakeSpikingSSM(spk_args),
+                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle,
+                          return_type=SolutionType(:spiking)),
+                SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
+                SSMReadout(D_hidden => n_classes),
+            )
+            ps, st = Lux.setup(rng, model)
+
+            x = normalize_to_unit_circle(randn(rng, ComplexF32, C_in, L, B))
+            y, _ = model(x, ps, st)
+
+            @test size(y) == (n_classes, B)
+            @test all(isfinite, y)
         end
     end
 end

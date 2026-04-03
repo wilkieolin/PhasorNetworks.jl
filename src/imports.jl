@@ -14,6 +14,8 @@ using Statistics: cor, mean
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
 using NNlib: batched_mul
+using FFTW  # registers CPU FFT methods with AbstractFFTs
+using AbstractFFTs: fft, ifft
 using Base: @kwdef
 using Zygote: withgradient
 using Random: Xoshiro

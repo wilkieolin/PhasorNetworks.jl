@@ -109,8 +109,9 @@ function phasor_dense_no_bias_tests()
         layer = PhasorDense(in_dim => out_dim, soft_angle, use_bias=false)
         ps, st = Lux.setup(rng, layer)
 
-        # Should not have bias in parameters
-        @test !haskey(ps, :bias)
+        # Should not have bias in parameters (flat structure)
+        @test !haskey(ps, :bias_real)
+        @test !haskey(ps, :bias_imag)
 
         x = Phase.(rand(Float32, in_dim, batch_size) .* 2.0f0 .- 1.0f0)
         y, _ = layer(x, ps, st)
@@ -182,8 +183,8 @@ function phasor_conv_tests()
             layer = PhasorConv((3, 3), c_in => c_out; use_bias=false)
             ps, st = Lux.setup(rng, layer)
 
-            @test !haskey(ps, :bias)
-            @test haskey(ps, :layer)
+            @test !haskey(ps, :bias_real)
+            @test haskey(ps, :weight)
 
             x = Phase.(rand(Float32, height, width, c_in, batch) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)
@@ -194,9 +195,8 @@ function phasor_conv_tests()
             layer = PhasorConv((3, 3), c_in => c_out)
             ps, st = Lux.setup(rng, layer)
 
-            @test haskey(ps, :bias)
-            @test haskey(ps.bias, :bias_real)
-            @test haskey(ps.bias, :bias_imag)
+            @test haskey(ps, :bias_real)
+            @test haskey(ps, :bias_imag)
         end
 
         @testset "Different inputs give different outputs" begin
@@ -222,9 +222,8 @@ function phasor_fixed_tests()
             ps, st = Lux.setup(rng, layer)
 
             @test !haskey(ps, :weight)
-            @test haskey(st, :ps_layer)
-            @test haskey(st.ps_layer, :weight)
-            @test size(st.ps_layer.weight) == (out_dim, in_dim)
+            @test haskey(st, :weight)
+            @test size(st.weight) == (out_dim, in_dim)
         end
 
         @testset "Real (phase) input → phase output" begin
@@ -252,12 +251,13 @@ function phasor_fixed_tests()
             @test all(isfinite.(real.(y))) && all(isfinite.(imag.(y)))
         end
 
-        @testset "use_bias=false: params empty, weights still in state" begin
+        @testset "use_bias=false: dynamics in params, weights in state" begin
             layer = PhasorFixed(in_dim => out_dim; use_bias=false)
             ps, st = Lux.setup(rng, layer)
 
-            @test isempty(ps) || !haskey(ps, :weight)
-            @test haskey(st, :ps_layer)
+            @test !haskey(ps, :weight)
+            @test haskey(ps, :log_neg_lambda)
+            @test haskey(st, :weight)
 
             x = Phase.(rand(Float32, in_dim, batch) .* 2.0f0 .- 1.0f0)
             y, _ = layer(x, ps, st)

@@ -80,11 +80,18 @@ PhasorSSM,
 SSMReadout,
 phasor_kernel,
 causal_conv,
+causal_conv_fft,
+dirac_encode,
+causal_conv_dirac,
 hippo_legs_diagonal,
 psk_encode,
 impulse_encode,
 SSMCrossAttention,
 SSMSelfAttention,
+MakeSpikingSSM,
+ssm_phases_to_train,
+ssm_extract_phases,
+reconstruct_from_current,
 
 #network
 attend,
@@ -133,6 +140,7 @@ include("domains.jl")
 include("gpu.jl")
 include("spiking.jl")
 include("vsa.jl")
+include("kernels.jl")
 include("network.jl")
 include("ssm.jl")
 include("metrics.jl")

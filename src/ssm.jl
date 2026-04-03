@@ -1,253 +1,61 @@
 # ================================================================
-# Discrete State Space Model for Phasor Networks
+# SSM Support: Attention, Encoding, and Spiking Helpers
 # ================================================================
 #
-# Discretizes the Resonate-and-Fire neuron ODE (dz/dt = kz + I(t))
-# into a linear recurrence:  z[n+1] = A·z[n] + B·I[n]
-# where A = exp(k·Δt), B = (A-1)/k, k = λ + iω.
-#
-# Unrolling gives a causal convolution: z[n] = Σⱼ K[n-j]·I[j],
-# K[n] = Aⁿ·B, computable in parallel via matrix multiply.
+# Kernel math (phasor_kernel, causal_conv, hippo_legs_diagonal) is in kernels.jl.
+# PhasorSSM struct has been unified into PhasorDense (network.jl).
+# This file keeps: SSMReadout, attention layers, encoding, spiking helpers,
+# and a backward-compatible PhasorSSM(...) constructor function.
 
 # ================================================================
-# 1. Discrete Phasor Kernel
+# 1. PhasorSSM Backward-Compatible Constructor
 # ================================================================
 
 """
-    phasor_kernel(λ, ω, Δt, L) -> ComplexF32 matrix (C × L)
+    PhasorSSM(in_dims => out_dims, activation; init_omega_range, init, return_type)
 
-Compute the causal impulse-response kernel for C damped oscillators over L
-discrete time steps.  This is the discrete equivalent of what `oscillator_bank`
-computes continuously: given a single unit impulse at time 0, how does the
-oscillator ring down over subsequent steps?
+Backward-compatible constructor that returns a `PhasorDense` with SSM-appropriate defaults.
+
+This function exists for backward compatibility. New code should use `PhasorDense` directly
+with `init_mode=:uniform` or `init_mode=:hippo`.
 
 # Arguments
-- `λ::AbstractVector{Float32}` — **Decay rates** (length C, one per oscillator).
-  Same physical meaning as `spk_args.leakage` in the spiking system: controls
-  how fast the membrane potential spirals inward.  Must be negative for
-  stability (e.g. -0.1).  More negative = faster decay = shorter memory.
-  In the continuous ODE this appears as:  dz/dt = (λ + iω)z + I(t).
-
-- `ω::AbstractVector{Float32}` — **Angular frequencies** (length C, rad/step).
-  Same role as `2π / spk_args.t_period` in the spiking system: controls how
-  fast the oscillator rotates in the complex plane.  In the continuous ODE
-  the neuron constant is k = λ + iω; here ω is angular frequency directly
-  rather than derived from a period.
-
-- `Δt::Real` — **Time step** between consecutive input samples.  Analogous to
-  the `dt` solver argument in `oscillator_bank`.  We set Δt=1 here because
-  our "time" axis is just sample indices (row 1, row 2, ..., row 28 of the
-  image).  If your samples were 0.02s apart (like the ODE demo), you'd set
-  Δt=0.02.
-
-- `L::Int` — **Sequence length** (number of time steps).  For FashionMNIST
-  with rows-as-time, L=28.
-
-# Returns
-A `C × L` complex matrix where K[c, n] is the response of oscillator c at
-lag n.  Entry K[c, 0] (column 1) is the immediate response to the current
-input; K[c, 27] (column 28) is the lingering contribution from 27 steps ago.
-
-# Connection to the continuous ODE
-In `oscillator_bank`, the neuron constant is:
-
-    k = neuron_constant(leakage, t_period) = leakage + i·(2π / t_period)
-
-The ODE `dz/dt = k·z + I(t)` has exact solution over one step Δt:
-
-    z[n+1] = exp(k·Δt) · z[n] + B · I[n]
-
-where `A = exp(k·Δt)` and `B = (A - 1) / k` (zero-order-hold discretization).
-Unrolling this recurrence gives z[n] = Σⱼ Aⁿ⁻ʲ · B · I[j], which is a
-causal convolution with kernel K[n] = Aⁿ · B.
-
-So this function precomputes that entire kernel in one shot, replacing the
-sequential ODE solve with a single matrix that can be applied in parallel.
-"""
-function phasor_kernel(λ::AbstractVector, ω::AbstractVector, Δt::Real, L::Int)
-    k = ComplexF32.(λ .+ im .* ω)            # C eigenvalues
-    # Build range on same device as k (GPU-safe)
-    ns_cpu = Float32.(0:L-1)
-    ns = reshape(typeof(real.(k))(ns_cpu), 1, L) # 1 × L, same device as params
-    A_powers = exp.(k .* Δt .* ns)            # C × L:  A^n
-    B_gain = (exp.(k .* Δt) .- 1f0) ./ k     # C × 1:  input gain
-    return A_powers .* B_gain                  # C × L
-end
-
-# ================================================================
-# 2. Causal Convolution via Lower-Triangular Toeplitz Matrix
-# ================================================================
-
-"""
-    causal_conv(K, H) -> ComplexF32 array (C × L × B)
-
-Apply the precomputed impulse-response kernel to a batch of input signals.
-This replaces the role of `DifferentialEquations.solve()` in the spiking
-system — instead of stepping through time sequentially, we compute all
-time steps at once via matrix multiplication.
-
-# Arguments
-- `K::AbstractMatrix{<:Complex}` — **Kernel matrix** (C × L), as returned by
-  `phasor_kernel`.  Each row is one oscillator's impulse response over L lags.
-
-- `H::AbstractArray{<:Complex, 3}` — **Input signal** (C × L × B).
-  C = number of output channels (oscillators), L = time steps, B = batch size.
-
-# Returns
-`Z` (C × L × B): the complex membrane potential at each time step, for each
-oscillator, for each batch element.
-
-# Implementation
-The causal convolution Z[c,t] = Σⱼ₌₀ᵗ K[c, t-j] · H[c, j] is equivalent to
-multiplying H by a lower-triangular Toeplitz matrix.  Uses `NNlib.batched_mul`
-for GPU-friendly parallel computation.  Cost is O(C·L²·B).
-"""
-function causal_conv(K::AbstractMatrix{<:Complex}, H::AbstractArray{<:Complex, 3})
-    C, L, B = size(H)
-
-    # Pad kernel with one zero column so out-of-bounds indices map to 0
-    K_pad = cat(K, zero(K[:, 1:1]); dims=2)  # C × (L+1)
-
-    # Lower-triangular index matrix: T[i,j] = K[:, i-j+1] when i≥j, else K[:, L+1]=0
-    idx = [i >= j ? i - j + 1 : L + 1 for i in 1:L, j in 1:L]  # L × L (constant, CPU)
-    T = K_pad[:, idx]                                      # C × L × L
-
-    # batched_mul wants (M,K,batch) × (K,N,batch) → (M,N,batch), batch = C
-    T_perm = permutedims(T, (2, 3, 1))  # L × L × C
-    H_perm = permutedims(H, (2, 3, 1))  # L × B × C
-    Z_perm = batched_mul(T_perm, H_perm) # L × B × C
-    return permutedims(Z_perm, (3, 1, 2)) # C × L × B
-end
-
-# ================================================================
-# 3. HiPPO-LegS Initialization
-# ================================================================
-
-"""
-    hippo_legs_diagonal(N; clip_decay=nothing) -> (λ, ω)
-
-HiPPO-LegS (Legendre Scaled) diagonal initialization from S4D.
-
-The HiPPO framework defines optimal state matrices for online function
-approximation.  The LegS variant projects input history onto a scaled
-Legendre polynomial basis, giving a principled multi-timescale memory.
-
-Diagonalizing the N×N HiPPO-LegS matrix yields N complex eigenvalues:
-
-    k_n = -(n + 1/2) + iπ(n + 1/2),   n = 0, 1, ..., N-1
-
-# Arguments
-- `N::Int` — Number of oscillators (state dimension).
-
-# Keyword arguments
-- `clip_decay`: Maximum magnitude of λ.  When `nothing` (default), eigenvalues
-  are log-spaced from 0.5 to N-0.5 across N channels, preserving the HiPPO
-  multi-timescale structure while keeping all channels in a trainable range.
-
-# Returns
-Tuple `(λ, ω)` of Float32 vectors of length N.  Caller must map to the
-log-parameterization (`log_neg_lambda = log.(-λ)`).
-"""
-function hippo_legs_diagonal(N::Int; clip_decay::Union{Nothing, Real}=nothing)
-    if clip_decay === nothing
-        # Log-spaced variant: span from λ=-0.5 to λ=-N+0.5 on a log scale.
-        λ_mag = Float32.(exp.(range(log(0.5), log(N - 0.5); length=N)))
-    else
-        # Linear HiPPO with hard clip
-        ns = Float32.(0:N-1)
-        λ_mag = min.(ns .+ 0.5f0, Float32(clip_decay))
-    end
-    λ = -λ_mag
-    # Frequency paired to decay: one oscillation per memory window
-    ω = Float32(π) .* λ_mag
-    return λ, ω
-end
-
-# ================================================================
-# 4. PhasorSSM Layer (Lux-compatible)
-# ================================================================
-
-"""
-    PhasorSSM(in_dims => out_dims, activation; init_omega_range=(0.2, 2.5), init=:uniform)
-
-Discrete phasor state-space layer — the SSM equivalent of `PhasorDense`.
-
-Where `PhasorDense` feeds weighted input into `oscillator_bank` (a
-continuous ODE solver), `PhasorSSM` does the same integration as a
-precomputed convolution kernel applied via matrix multiply.  The two
-produce equivalent dynamics; the difference is computational:
-- ODE: sequential, expensive, but handles continuous/irregular time
-- SSM: parallel, fast, but requires uniformly-sampled discrete input
-
-# Arguments
-- `in_dims => out_dims` — Channel dimensions (same as `PhasorDense(in => out)`).
-- `activation` — Applied after temporal integration.  Typically
-  `normalize_to_unit_circle` between layers, or `identity` for the final layer.
+- `dims::Pair{Int,Int}` — Channel dimensions (same as `PhasorDense(in => out)`).
+- `activation` — Applied after temporal integration. Default `normalize_to_unit_circle`.
 - `init_omega_range` — Initial spread of angular frequencies. Default `(0.2, 2.5)`.
 - `init` — Parameter initialization: `:uniform` or `:hippo`.
+- `return_type` — Output format. Default `SolutionType(:phase)`.
 
-# Trainable parameters
-- `weight` (Float32, out × in) — Channel mixing matrix.
-- `log_neg_lambda` (Float32, out) — Log-space decay rates. λ = -exp(log_neg_lambda).
-- `omega` (Float32, out) — Angular frequencies in radians per time step.
+# Returns
+A `PhasorDense` layer configured for SSM use (no bias, uniform/hippo init).
 """
-struct PhasorSSM <: Lux.AbstractLuxLayer
-    in_dims::Int
-    out_dims::Int
-    activation::Function
-    omega_lo::Float32
-    omega_hi::Float32
-    init_mode::Symbol   # :uniform or :hippo
-end
-
 function PhasorSSM(dims::Pair{Int,Int}, act=normalize_to_unit_circle;
-                   init_omega_range=(0.2f0, 2.5f0), init=:uniform)
+                   init_omega_range=(0.2f0, 2.5f0), init=:uniform,
+                   return_type::SolutionType=SolutionType(:phase))
     @assert init in (:uniform, :hippo) "init must be :uniform or :hippo"
-    return PhasorSSM(dims.first, dims.second, act,
-                     Float32(init_omega_range[1]), Float32(init_omega_range[2]),
-                     init)
+    Base.depwarn("PhasorSSM is deprecated, use PhasorDense with init_mode instead", :PhasorSSM)
+    return PhasorDense(dims, act;
+                       init_mode=init,
+                       omega_lo=Float32(init_omega_range[1]),
+                       omega_hi=Float32(init_omega_range[2]),
+                       use_bias=false,
+                       return_type=return_type)
 end
 
-function Lux.initialparameters(rng::AbstractRNG, l::PhasorSSM)
-    W = Float32.(randn(rng, l.out_dims, l.in_dims)) ./ sqrt(Float32(l.in_dims))
-
-    if l.init_mode == :hippo
-        λ_init, ω_init = hippo_legs_diagonal(l.out_dims)
-        log_neg_lambda = log.(-λ_init)
-        omega = ω_init
-    else  # :uniform
-        log_neg_lambda = fill(Float32(log(0.1)), l.out_dims)
-        omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.out_dims)))
+# Parameterlength for backward compat (PhasorDense doesn't define this)
+function Lux.parameterlength(l::PhasorDense)
+    n = l.out_dims * l.in_dims + l.out_dims  # weight + log_neg_lambda
+    if l.use_bias
+        n += 2 * l.out_dims  # bias_real + bias_imag
     end
-    return (weight=W, log_neg_lambda=log_neg_lambda, omega=omega)
-end
-
-Lux.initialstates(::AbstractRNG, ::PhasorSSM) = NamedTuple()
-Lux.parameterlength(l::PhasorSSM) = l.out_dims * l.in_dims + 2 * l.out_dims
-
-function (l::PhasorSSM)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
-    C_in, L, B = size(x)
-
-    # Build impulse-response kernel from oscillator parameters
-    λ = -exp.(ps.log_neg_lambda)                # (out,)  leakage (always negative)
-    ω = ps.omega                                 # (out,)  angular frequency
-    K = phasor_kernel(λ, ω, 1f0, L)             # out × L
-
-    # Apply weight matrix to mix input channels (all time steps at once)
-    xr = reshape(x, C_in, L * B)
-    Hr = complex.(ps.weight * real.(xr), ps.weight * imag.(xr))
-    H  = reshape(Hr, l.out_dims, L, B)          # out × L × B
-
-    # Temporal integration via causal convolution
-    Z = causal_conv(K, H)                        # out × L × B
-
-    # Activation (e.g. project to unit circle)
-    Y = l.activation(Z)
-    return Y, st
+    if l.trainable_omega
+        n += l.out_dims
+    end
+    return n
 end
 
 # ================================================================
-# 5. SSM Readout Layer (Codebook-First)
+# 2. SSM Readout Layer (Codebook-First)
 # ================================================================
 
 """
@@ -319,7 +127,7 @@ function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::Name
 end
 
 # ================================================================
-# 6. PSK Encoding
+# 3. PSK Encoding
 # ================================================================
 
 """
@@ -347,7 +155,7 @@ function psk_encode(images::AbstractArray{<:Real, 3}; n_repeats::Int=1)
 end
 
 # ================================================================
-# 7. Impulse Encoding
+# 4. Impulse Encoding
 # ================================================================
 
 """
@@ -404,7 +212,7 @@ function _impulse_encode_impl(images::AbstractArray{<:Real, 3}; substeps::Int=4)
 end
 
 # ================================================================
-# 8. SSM Cross-Attention Layer
+# 5. SSM Cross-Attention Layer
 # ================================================================
 
 """
@@ -495,7 +303,7 @@ function (l::SSMCrossAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, s
 end
 
 # ================================================================
-# 9. SSM Self-Attention Layer
+# 6. SSM Self-Attention Layer
 # ================================================================
 
 """
@@ -574,4 +382,212 @@ function (l::SSMSelfAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st
     output = batched_mul(V, scores)                # d_model × L × B
 
     return l.activation(output), st
+end
+
+# ================================================================
+# 7. SSM Spiking Infrastructure
+# ================================================================
+
+# ---- Temporal Encoding Helpers ----
+
+"""
+    ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs) -> SpikeTrain
+
+Encode a 3D phase array (C × L × B) as a SpikeTrain for SSM spiking mode.
+
+Unlike `phase_to_train` (which repeats the same phase each period), this function
+maps each time step `l` to a separate oscillation period, with each channel firing
+at a time determined by the phase at that step.
+
+# Arguments
+- `phases`: (C × L × B) Phase array — channels × time steps × batch
+- `spk_args::SpikingArgs`: Spiking parameters (uses `t_period` for temporal mapping)
+
+# Returns
+SpikeTrain with `shape=(C, B)` containing `C*L*B` spikes total.
+Time step `l` maps to period `[(l-1)*t_period, l*t_period)`.
+"""
+function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs)
+    C, L, B = size(phases)
+    shape = (C, B)
+    period = spk_args.t_period
+
+    # Preallocate for all spikes: C channels × L time steps × B batch
+    n_total = C * L * B
+    all_indices = Vector{CartesianIndex{2}}(undef, n_total)
+    all_times = Vector{Float32}(undef, n_total)
+
+    spatial_indices = vec(CartesianIndices((C, B)))
+    idx = 0
+    for l in 1:L
+        offset = Float32(l - 1) * period
+        # phase_to_time returns times in [0, period) due to internal mod
+        # Add offset afterward to place spikes in the correct period
+        step_times = vec(phase_to_time(phases[:, l, :], period)) .+ offset
+        for j in 1:(C * B)
+            idx += 1
+            all_indices[idx] = spatial_indices[j]
+            all_times[idx] = step_times[j]
+        end
+    end
+
+    return SpikeTrain(all_indices, all_times, shape, 0.0f0)
+end
+
+"""
+    MakeSpikingSSM <: Lux.AbstractLuxLayer
+
+Chain-compatible layer that converts a 3D complex SSM input (C × L × B) into a
+SpikingCall for downstream spiking SSM layers.
+
+Extracts phases from the complex input via `complex_to_angle(normalize_to_unit_circle(x))`,
+then encodes them as a SpikeTrain with L oscillation periods using `ssm_phases_to_train`.
+
+# Fields
+- `spk_args::SpikingArgs`: Spiking parameters for temporal encoding
+"""
+struct MakeSpikingSSM <: Lux.AbstractLuxLayer
+    spk_args::SpikingArgs
+end
+
+Lux.initialparameters(::AbstractRNG, ::MakeSpikingSSM) = NamedTuple()
+Lux.initialstates(::AbstractRNG, ::MakeSpikingSSM) = NamedTuple()
+
+function (m::MakeSpikingSSM)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    C, L, B = size(x)
+    phases = complex_to_angle(normalize_to_unit_circle(x))
+    train = ssm_phases_to_train(phases, spk_args=m.spk_args)
+    tspan = (0.0f0, Float32(L) * m.spk_args.t_period)
+    call = SpikingCall(train, m.spk_args, tspan)
+    return call, st
+end
+
+# ---- ODE Output Extraction ----
+
+"""
+    ssm_extract_phases(sol, L::Int, t_period::Float32, activation::Function)
+
+Sample an ODE solution at L period boundaries and return a 3D complex array.
+
+# Arguments
+- `sol`: ODE solution (interpolatable at arbitrary times)
+- `L::Int`: Number of time steps to sample
+- `t_period::Float32`: Duration of each oscillation period
+- `activation::Function`: Applied after sampling (e.g. `normalize_to_unit_circle`)
+
+# Returns
+Complex array (out_dims × L × B) — the activated membrane potentials at each period.
+No per-channel derotation is applied; both discrete SSM and ODE include the same
+rotation from omega, so phases are directly comparable.
+"""
+function ssm_extract_phases(sol, L::Int, t_period::Float32, activation::Function)
+    samples = [sol(Float32(l) * t_period) for l in 1:L]
+
+    # Stack into 3D: each sample is (out_dims,) or (out_dims, B)
+    if ndims(samples[1]) == 1
+        # (out_dims,) → (out_dims, L)
+        Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
+    else
+        # (out_dims, B) → (out_dims, L, B)
+        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in samples]...; dims=2)
+    end
+
+    return activation(Z)
+end
+
+# ---- Reconstruct 3D complex from CurrentCall ----
+
+"""
+    reconstruct_from_current(x::CurrentCall, L::Int, spk_args::SpikingArgs)
+
+Solve a bare oscillator ODE driven by the current in `x` and sample at L period
+boundaries to reconstruct a 3D complex tensor representing the encoded input at
+each time step.
+
+Uses three steps to faithfully recover per-period phases from the continuous ODE:
+
+1. **ODE integration** at global `k₀ = leakage + i·2π/t_period`: accumulates spike
+   contributions across all L periods into a single trajectory.
+2. **Unrotation**: removes the global oscillator rotation so that each sampled
+   potential's angle reflects the input phase (not the oscillator's natural phase).
+3. **Deconvolution**: the ODE state at period `l` includes decayed residual from
+   all previous periods (`z[l] = decay·z[l-1] + response[l]`).  A backward
+   difference with `decay = exp(leakage·t_period)` removes this accumulation,
+   isolating the single-period spike response whose phase matches the original
+   input `exp(iπθ)`.
+
+# Returns
+Complex array (C × L × B), normalized to the unit circle.
+"""
+function reconstruct_from_current(x::CurrentCall, L::Int, spk_args::SpikingArgs)
+    k = neuron_constant(spk_args)
+    T = spk_args.t_period
+    sample_I = x.current.current_fn(x.t_span[1])
+    u0 = zeros(ComplexF32, size(sample_I))
+
+    dzdt(u, p, t) = k .* u .+ x.current.current_fn(t)
+    prob = ODEProblem(dzdt, u0, x.t_span)
+    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+
+    # Sample at period boundaries
+    sample_times = Float32.([l * T for l in 1:L])
+    samples = [sol(t) for t in sample_times]
+
+    # Unrotate: remove global oscillator rotation to recover encoded phases
+    unrotated = unrotate_solution(samples, sample_times, spk_args=spk_args)
+
+    # Stack into 3D array (C × L × B)
+    if ndims(unrotated[1]) >= 2
+        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in unrotated]...; dims=2)
+    else
+        Z = reduce(hcat, [reshape(s, :, 1) for s in unrotated])
+    end
+
+    # Deconvolve: remove causal accumulation from global dynamics
+    # z_unrot[l] = decay * z_unrot[l-1] + spike_response[l]
+    # => spike_response[l] = z_unrot[l] - decay * z_unrot[l-1]
+    decay = Float32(exp(spk_args.leakage * T))
+    Z_prev = cat(zero(Z[:, 1:1, :]), Z[:, 1:end-1, :]; dims=2)
+    Z_deconv = Z .- decay .* Z_prev
+
+    return normalize_to_unit_circle(Z_deconv)
+end
+
+# ---- SSMSelfAttention Spiking Dispatch ----
+
+function (l::SSMSelfAttention)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    current_call = CurrentCall(x)
+    return l(current_call, ps, st)
+end
+
+function (l::SSMSelfAttention)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    L = round(Int, (x.t_span[2] - x.t_span[1]) / x.spk_args.t_period)
+    z_3d = reconstruct_from_current(x, L, x.spk_args)
+    return l(z_3d, ps, st)
+end
+
+# ---- SSMCrossAttention Spiking Dispatch ----
+
+function (l::SSMCrossAttention)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    current_call = CurrentCall(x)
+    return l(current_call, ps, st)
+end
+
+function (l::SSMCrossAttention)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    L = round(Int, (x.t_span[2] - x.t_span[1]) / x.spk_args.t_period)
+    z_3d = reconstruct_from_current(x, L, x.spk_args)
+    return l(z_3d, ps, st)
+end
+
+# ---- SSMReadout Spiking Dispatch ----
+
+function (l::SSMReadout)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    current_call = CurrentCall(x)
+    return l(current_call, ps, st)
+end
+
+function (l::SSMReadout)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    L = round(Int, (x.t_span[2] - x.t_span[1]) / x.spk_args.t_period)
+    z_3d = reconstruct_from_current(x, L, x.spk_args)
+    return l(z_3d, ps, st)
 end

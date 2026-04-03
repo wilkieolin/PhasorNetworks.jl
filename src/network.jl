@@ -207,229 +207,381 @@ function Lux.initialstates(rng::AbstractRNG, bias::ComplexBias)
 end
 
 """
-    PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
+    PhasorDense <: Lux.AbstractLuxLayer
 
 A dense (fully-connected) layer for phase-valued and spiking neural networks.
-Implements complex-valued linear transformations with configurable normalization,
-supporting both direct phase inputs and spike train inputs through ODE integration.
+Implements complex-valued linear transformations with per-channel oscillator
+dynamics, supporting both direct phase inputs and spike train inputs.
 
-Output type is controlled via multiple dispatch on input type:
-- Complex input → complex output (linear transform + bias, no normalization)
-- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
-- Spiking input → output determined by `return_type` field
+Dispatches on input type AND dimensionality:
+- 2D complex `(C, B)` → linear transform + bias, no activation or temporal kernel
+- 3D complex `(C, L, B)` → weight + causal convolution with per-channel kernel + activation
+- 2D Phase → angle_to_complex → 2D complex → activation → complex_to_angle
+- 3D Phase → angle_to_complex → 3D complex → complex_to_angle (activation inside)
+- SpikingCall → convert to CurrentCall, delegate
+- CurrentCall → 2D spiking (oscillator ODE) or 3D spiking (coupled oscillator ODE)
 
 # Fields
-- `layer`: Underlying `Dense` layer for linear transformation (no internal bias)
-- `bias`: [`ComplexBias`](@ref) layer for phase shifts in the complex plane
-- `activation`: Normalization function that projects complex values toward the unit circle
-    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
-    and spiking forward paths; complex inputs pass through without normalization.
-- `use_bias::Bool`: Whether to apply the complex bias term
-- `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
-- `init_period::Function`: Initializer for per-neuron period scaling factors
-- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
-- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `in_dims::Int`: Input feature dimension
+- `out_dims::Int`: Output feature dimension
+- `activation::Function`: Normalization function (Complex → Complex)
+- `use_bias::Bool`: Whether to apply complex bias
+- `init_weight::Function`: Weight initializer `(rng, out, in) -> Matrix`
+- `init_bias::Function`: Bias initializer `(rng, dims) -> ComplexF32 array`
+- `init_mode::Symbol`: Initialization mode for dynamics (`:default`, `:uniform`, `:hippo`)
+- `omega_lo::Float32`: Lower bound for uniform omega init
+- `omega_hi::Float32`: Upper bound for uniform omega init
+- `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
 
-# Constructor
-```julia
-PhasorDense(shape::Pair{<:Integer,<:Integer}, activation=normalize_to_unit_circle;
-    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
-    init_bias=default_bias,               # Bias initialization function
-    use_bias=true,                         # Apply complex bias
-    init_leakage=ones32,                   # Leakage factor initializer
-    init_period=ones32,                    # Period factor initializer
-    trainable_leakage=false,               # Make leakage trainable
-    trainable_period=false,                # Make period trainable
-    kwargs...)                             # Passed to Dense layer
-```
+# Parameters (always present)
+- `weight` — `(out, in)` Float32
+- `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable)
+- `bias_real`, `bias_imag` — `(out,)` Float32 (when `use_bias=true`)
+- `omega` — `(out,)` Float32 (when `trainable_omega=true`)
 
-# Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply normalization, return array
-- `:potential`: Return raw ODE solution object
-- `:current`: Convert solution to current, return `CurrentCall` for next layer
-- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
+# State
+- `omega` — `(out,)` Float32 (when `trainable_omega=false`, the default)
 
-# Forward Pass
-For complex inputs:
-1. Applies linear transformation separately to real and imaginary parts
-2. Optionally adds complex bias
-3. Returns complex values (no normalization applied)
+# Init Modes
+- `:default` — `log_neg_lambda = fill(log(0.2), out)`, `omega = fill(2π, out)`.
+  All channels share same dynamics, degenerating to standard PhasorDense behavior.
+- `:uniform` — `log_neg_lambda` uniform, `omega` spread across `[omega_lo, omega_hi]`.
+- `:hippo` — HiPPO-LegS diagonal initialization for multi-timescale memory.
 
-For real/phase inputs:
-1. Converts input phases to complex numbers via `angle_to_complex`
-2. Dispatches to complex forward pass (steps above)
-3. Applies normalization function (projects toward unit circle)
-4. Converts back to phases via `complex_to_angle`
-
-For spiking inputs (`SpikingCall` or `CurrentCall`):
-1. Converts to `CurrentCall` if needed
-2. Integrates coupled oscillator ODEs via `oscillator_bank`
-3. Returns output based on `return_type`
-
-# Example
-```julia
-# Basic dense layer with unit circle normalization (default)
-layer = PhasorDense(64 => 32)
-
-# With trainable dynamics
-layer = PhasorDense(64 => 32, normalize_to_unit_circle;
-    trainable_leakage=true,
-    return_type=SolutionType(:current))
-
-# Initialize and apply
-rng = Random.default_rng()
-ps, st = Lux.setup(rng, layer)
-y, st_new = layer(x, ps, st)
-```
-
-See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
+See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref)
 """
-struct PhasorDense <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
-    layer # the conventional layer used to transform inputs
-    bias # the bias in the complex domain used to shift away from the origin
-    activation # normalization function: projects complex values toward the unit circle (Complex → Complex)
-    use_bias::Bool # apply the layer with the bias if true
-    init_leakage::Function # initializer for the values to scale the leakage in spk_args
-    init_period::Function # initializer for the values to scale the t_period in spk_args
-    trainable_leakage::Bool # can the ODE optimizer access leakage in params
-    trainable_period::Bool # can the ODE optimizer access period in params
-    return_type::SolutionType # return the full ODE solution from a spiking input
+struct PhasorDense <: Lux.AbstractLuxLayer
+    in_dims::Int
+    out_dims::Int
+    activation::Function
+    use_bias::Bool
+    init_weight::Function
+    init_bias::Function
+    init_mode::Symbol
+    omega_lo::Float32
+    omega_hi::Float32
+    trainable_omega::Bool
+    return_type::SolutionType
 end
 
-function PhasorDense(shape::Pair{<:Integer,<:Integer}, 
+function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     activation = normalize_to_unit_circle;
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
-                    init_leakage = ones32,
-                    init_period = ones32,
-                    trainable_leakage::Bool = false,
-                    trainable_period::Bool = false,
+                    init_weight = nothing,
+                    init = nothing,
+                    init_mode::Symbol = :default,
+                    omega_lo::Real = 0.2f0,
+                    omega_hi::Real = 2.5f0,
+                    trainable_omega::Bool = false,
                     kwargs...)
-    layer = Dense(shape, identity; use_bias=false, kwargs...)
-    bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorDense(layer, 
-                        bias, 
+    # Handle backward compatibility: 'init' kwarg maps to init_weight
+    if init_weight === nothing && init !== nothing
+        init_weight = init
+    elseif init_weight === nothing
+        init_weight = glorot_uniform
+    end
+    return PhasorDense(shape[1], shape[2],
                         activation,
                         use_bias,
-                        init_leakage,
-                        init_period,
-                        trainable_leakage,
-                        trainable_period,
+                        init_weight,
+                        init_bias,
+                        init_mode,
+                        Float32(omega_lo),
+                        Float32(omega_hi),
+                        trainable_omega,
                         return_type)
 end
 
+# Helper to initialize (log_neg_lambda, omega) based on init_mode
+function _init_dynamics(l::PhasorDense)
+    if l.init_mode == :hippo
+        λ_init, ω_init = hippo_legs_diagonal(l.out_dims)
+        log_neg_lambda = log.(-λ_init)
+        omega = ω_init
+    elseif l.init_mode == :uniform
+        log_neg_lambda = fill(Float32(log(0.1)), l.out_dims)
+        omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.out_dims)))
+    else  # :default — match standard spk_args defaults (leakage=-0.2, period=1.0)
+        log_neg_lambda = fill(Float32(log(0.2)), l.out_dims)
+        omega = fill(Float32(2π), l.out_dims)
+    end
+    return log_neg_lambda, omega
+end
+
+# Helper to get omega from params or state
+function _get_omega(a::PhasorDense, params, state)
+    return a.trainable_omega ? params.omega : state.omega
+end
+
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
-    ps_layer = Lux.initialparameters(rng, l.layer)
-    parameters = (layer = ps_layer,)
-    
+    W = l.init_weight(rng, l.out_dims, l.in_dims)
+    log_neg_lambda, omega = _init_dynamics(l)
+
+    parameters = (weight = W, log_neg_lambda = log_neg_lambda)
+
     if l.use_bias
-        ps_bias = Lux.initialparameters(rng, l.bias)
-        parameters = merge(parameters, (bias = ps_bias,))
+        bias = l.init_bias(rng, (l.out_dims,))
+        parameters = merge(parameters, (bias_real = Float32.(real.(bias)),
+                                         bias_imag = Float32.(imag.(bias))))
     end
 
-    n_out = l.layer.out_dims
-    if l.trainable_leakage
-        ps_leakage = l.init_leakage(rng, n_out,)
-        parameters = merge(parameters, (leakage = ps_leakage,))
+    if l.trainable_omega
+        parameters = merge(parameters, (omega = omega,))
     end
 
-    if l.trainable_period
-        ps_period = l.init_period(rng, n_out,)
-        parameters = merge(parameters, (period = ps_period,))
-    end
     return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorDense)
-    st_layer = Lux.initialstates(rng, l.layer)
-    st_bias = Lux.initialstates(rng, l.bias)
-    state = (layer = st_layer, bias = st_bias,)
-
-    n_out = l.layer.out_dims
-    if !l.trainable_leakage
-        st_leakage = l.init_leakage(rng, n_out,)
-        state = merge(state, (leakage = st_leakage,))
+    if !l.trainable_omega
+        _, omega = _init_dynamics(l)
+        return (omega = omega,)
     end
-
-    if !l.trainable_period
-        st_period = l.init_period(rng, n_out,)
-        state = merge(state, (period = st_period,))
-    end
-    return state
+    return NamedTuple()
 end
 
-# Calls
-"""
-    (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+# ---- 2D Complex dispatch: W * x + bias, no activation ----
 
-Complex-valued forward pass. Returns complex values without normalization.
-
-# Process
-1. Apply linear transformation to real and imaginary parts separately
-2. Add complex bias (if enabled)
-"""
 function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
-    # Linear transformation on real and imaginary components
-    y_real, _ = a.layer(real.(x), params.layer, state.layer)
-    y_imag, _ = a.layer(imag.(x), params.layer, state.layer)
-    y = y_real .+ 1.0f0im .* y_imag 
+    y_real = params.weight * real.(x)
+    y_imag = params.weight * imag.(x)
+    y = y_real .+ 1.0f0im .* y_imag
 
-    # Apply complex bias
     if a.use_bias
-        y_biased, st_updated_bias = a.bias(y, params.bias, state.bias)
-    else
-        st_updated_bias = state.bias
-        y_biased = y
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        y = y .+ bias_val
     end
 
-    st_new = merge(state, (layer = state.layer, bias = st_updated_bias))
-    return y_biased, st_new
+    return y, state
 end
 
-"""
-    (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
+# ---- 3D Complex dispatch: weight + causal_conv + activation ----
 
-Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
-then normalizes and converts back to phases via `complex_to_angle`.
-"""
+function (a::PhasorDense)(x::AbstractArray{<:Complex, 3}, params::LuxParams, state::NamedTuple)
+    C_in, L, B = size(x)
+
+    # Build impulse-response kernel from per-channel oscillator parameters
+    λ = -exp.(params.log_neg_lambda)
+    ω = _get_omega(a, params, state)
+    K = phasor_kernel(λ, ω, 1f0, L)
+
+    # Apply weight matrix to mix input channels (all time steps at once)
+    xr = reshape(x, C_in, L * B)
+    Hr = complex.(params.weight * real.(xr), params.weight * imag.(xr))
+    H  = reshape(Hr, a.out_dims, L, B)
+
+    # Temporal integration via causal convolution
+    Z = causal_conv(K, H)
+
+    # Apply bias (broadcast over time and batch)
+    if a.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        Z = Z .+ reshape(bias_val, :, 1, 1)
+    end
+
+    # Activation (e.g. project to unit circle)
+    Y = a.activation(Z)
+    return Y, state
+end
+
+# ---- 2D Phase dispatch ----
+
 function (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
-    # Convert phases to complex representation on unit circle
     xz = angle_to_complex(x)
-
-    # Dispatch to complex-valued core implementation
-    y_biased, st_new = a(xz, params, state)
-    y_normalized = a.activation(y_biased)
+    y, st_new = a(xz, params, state)
+    y_normalized = a.activation(y)
     y_phase = complex_to_angle(y_normalized)
     return y_phase, st_new
 end
+
+# ---- 3D Phase dispatch ----
+
+function (a::PhasorDense)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
+    if a.init_mode != :default
+        # SSM mode: Dirac discretization for phase inputs — analytically
+        # accounts for sub-period spike timing per output channel
+        return _forward_3d_dirac(a, x, params, state)
+    else
+        # Standard mode: ZOH (backward compatible)
+        xz = angle_to_complex(x)
+        y, st_new = a(xz, params, state)
+        return complex_to_angle(y), st_new
+    end
+end
+
+# ---- 3D Phase Dirac path ----
+
+function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
+                           params::LuxParams, state::NamedTuple)
+    λ = -exp.(params.log_neg_lambda)
+    ω = _get_omega(a, params, state)
+
+    Z = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+
+    if a.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        Z = Z .+ reshape(bias_val, :, 1, 1)
+    end
+
+    Y = a.activation(Z)
+    return complex_to_angle(Y), state
+end
+
+# ---- SpikingCall dispatch ----
 
 function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     current_call = CurrentCall(x)
     return a(current_call, params, state)
 end
 
+# ---- CurrentCall dispatch: 2D or 3D spiking ----
+
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    #pass the params and dense kernel to the solver
-    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
+    spk_args = x.spk_args
+    tspan = x.t_span
+    L = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
+
+    # Route to 3D spiking only for SSM-configured layers (non-default init).
+    # Default init layers always use 2D spiking for backward compatibility.
+    if L > 1 && a.init_mode != :default
+        return _forward_3d_spiking(a, x, params, state, L)
+    end
+
+    # 2D spiking: single-period ODE with per-channel dynamics
+    sample_I = x.current.current_fn(Float32(tspan[1]))
+    out_shape = ndims(sample_I) >= 2 ? (a.out_dims, size(sample_I)[2:end]...) : (a.out_dims,)
+    u0 = similar(sample_I, ComplexF32, out_shape)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32)
+    end
+
+    use_bias = a.use_bias && haskey(params, :bias_real)
+
+    function dzdt(u, p, t)
+        λ = -exp.(p.log_neg_lambda)
+        ω_val = a.trainable_omega ? p.omega : state.omega
+        k = ComplexF32.(λ .+ im .* ω_val)
+        I_transformed = p.weight * x.current.current_fn(t)
+        result = k .* u .+ I_transformed
+        if use_bias
+            bias_val = p.bias_real .+ 1im .* p.bias_imag
+            result = result .+ bias_current(bias_val, t, x.current.offset, spk_args)
+        end
+        return result
+    end
+
+    prob = ODEProblem(dzdt, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+
     if a.return_type.type == :phase
-        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
         y = a.activation.(u)
         phase = complex_to_angle.(y)
         return phase, state
-    elseif a.return_type.type == :potential
+        elseif a.return_type.type == :potential
+            return sol, state
+        elseif a.return_type.type == :current
+            i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
+            next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
+                                    spk_args,
+                                    tspan)
+        return next_call, state
+    else # :spiking
+        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, spk_args, tspan)
+        return next_call, state
+    end
+end
+
+# ---- 3D spiking: coupled oscillator ODE ----
+
+function _forward_3d_spiking(a::PhasorDense, x::CurrentCall, params::LuxParams, state::NamedTuple, L::Int)
+    spk_args = x.spk_args
+    tspan = x.t_span
+    k₀ = neuron_constant(spk_args)
+    C_in = a.in_dims
+    C_out = a.out_dims
+
+    # Infer shape from current function sample
+    sample_I = x.current.current_fn(Float32(tspan[1]))
+    if ndims(sample_I) >= 2
+        B = size(sample_I, 2)
+        u0 = zeros(ComplexF32, C_in + C_out, B)
+    else
+        u0 = zeros(ComplexF32, C_in + C_out)
+    end
+
+    # Combined ODE: [u_input; z_output]
+    # du/dt = k₀ · u + I(t)           (input oscillators decode spikes)
+    # dz/dt = k_c · z + W · u          (output oscillators with per-channel dynamics)
+    function dzdt(combined, p, t)
+        u_in = combined[1:C_in, :]
+        z_out = combined[C_in+1:end, :]
+
+        I_t = x.current.current_fn(t)
+
+        # Input oscillator dynamics at global frequency
+        du = k₀ .* u_in .+ I_t
+
+        # Output oscillator dynamics with per-channel k_c
+        λ = -exp.(p.log_neg_lambda)
+        ω_val = a.trainable_omega ? p.omega : state.omega
+        k_c = ComplexF32.(λ .+ im .* ω_val)
+        dz = k_c .* z_out .+ p.weight * u_in
+
+        return vcat(du, dz)
+    end
+
+    # Handle 1D (unbatched) case
+    function dzdt_1d(combined, p, t)
+        u_in = combined[1:C_in]
+        z_out = combined[C_in+1:end]
+
+        I_t = x.current.current_fn(t)
+
+        du = k₀ .* u_in .+ I_t
+
+        λ = -exp.(p.log_neg_lambda)
+        ω_val = a.trainable_omega ? p.omega : state.omega
+        k_c = ComplexF32.(λ .+ im .* ω_val)
+        dz = k_c .* z_out .+ p.weight * u_in
+
+        return vcat(du, dz)
+    end
+
+    f = ndims(sample_I) >= 2 ? dzdt : dzdt_1d
+    prob = ODEProblem(f, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+
+    if a.return_type.type == :potential
         return sol, state
-    elseif a.return_type.type == :current
-        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
-                                x.spk_args,
-                                x.t_span)
-        return next_call, state
-    else #spiking
-        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-        next_call = SpikingCall(train, x.spk_args, x.t_span)
-        return next_call, state
+    end
+
+    # Extract output oscillator portion at period boundaries
+    T = spk_args.t_period
+    sample_times = Float32.([l * T for l in 1:L])
+    samples = [sol(t) for t in sample_times]
+
+    # Extract z_out (output oscillator portion)
+    if ndims(samples[1]) >= 2
+        z_samples = [s[C_in+1:end, :] for s in samples]
+        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in z_samples]...; dims=2)
+    else
+        z_samples = [s[C_in+1:end] for s in samples]
+        Z = reduce(hcat, [reshape(s, :, 1) for s in z_samples])
+    end
+
+    Y = a.activation(Z)
+
+    if a.return_type.type == :phase
+        return complex_to_angle(Y), state
+    else  # :spiking
+        phases = complex_to_angle(Y)
+        train = ssm_phases_to_train(phases, spk_args=spk_args)
+        return SpikingCall(train, spk_args, tspan), state
     end
 end
 
@@ -438,99 +590,36 @@ end
 ###
 
 """
-    PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
+    PhasorConv <: Lux.AbstractLuxLayer
 
 A convolutional layer for phase-valued and spiking neural networks.
-Implements complex-valued convolution with configurable normalization,
-supporting both direct phase inputs and spike train inputs through ODE integration.
-
-Output type is controlled via multiple dispatch on input type:
-- Complex input → complex output (convolution + bias, no normalization)
-- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
-- Spiking input → output determined by `return_type` field
+Flat structure with per-channel oscillator dynamics, matching PhasorDense.
 
 # Fields
-- `layer`: Underlying `Conv` layer for spatial convolution (no internal bias)
-- `bias`: [`ComplexBias`](@ref) layer for phase shifts, shaped for broadcasting over spatial dims
-- `activation`: Normalization function that projects complex values toward the unit circle
-    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
-    and spiking forward paths; complex inputs pass through without normalization.
-- `use_bias::Bool`: Whether to apply the complex bias term
-- `init_leakage::Function`: Initializer for per-channel leakage scaling factors
-- `init_period::Function`: Initializer for per-channel period scaling factors
-- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
-- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `_conv`: Internal Conv layer for convolution mechanics
+- `activation::Function`: Normalization function (Complex → Complex)
+- `use_bias::Bool`: Whether to apply complex bias
+- `init_bias::Function`: Bias initializer
+- `init_mode::Symbol`: Dynamics initialization (`:default`, `:uniform`, `:hippo`)
+- `omega_lo::Float32`, `omega_hi::Float32`: For `:uniform` init
+- `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
 
-# Constructor
-```julia
-PhasorConv(kernel::Tuple{Vararg{Integer}}, channels::Pair{<:Integer,<:Integer},
-           activation=normalize_to_unit_circle;
-    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
-    init_bias=default_bias,               # Bias initialization function
-    use_bias=true,                         # Apply complex bias
-    init_leakage=ones32,                   # Leakage factor initializer
-    init_period=ones32,                    # Period factor initializer
-    trainable_leakage=false,               # Make leakage trainable
-    trainable_period=false,                # Make period trainable
-    kwargs...)                             # Passed to Conv layer (stride, pad, dilation, etc.)
-```
-
-# Arguments
-- `kernel`: Tuple specifying convolution kernel size, e.g., `(3, 3)` for 2D
-- `channels`: Input channels => Output channels, e.g., `3 => 16`
-
-# Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply normalization, return array
-- `:potential`: Return raw ODE solution object
-- `:current`: Convert solution to current, return `CurrentCall` for next layer
-- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
-
-# Forward Pass
-For complex inputs (H, W, C, B):
-1. Applies convolution separately to real and imaginary parts
-2. Optionally adds complex bias (broadcast over spatial dimensions)
-3. Returns complex values (no normalization applied)
-
-For real/phase inputs (H, W, C, B):
-1. Converts input phases to complex numbers via `angle_to_complex`
-2. Dispatches to complex forward pass (steps above)
-3. Applies normalization function (projects toward unit circle)
-4. Converts back to phases via `complex_to_angle`
-
-For spiking inputs (`SpikingCall` or `CurrentCall`):
-1. Converts to `CurrentCall` if needed
-2. Integrates coupled oscillator ODEs via `oscillator_bank`
-3. Returns output based on `return_type`
-
-# Example
-```julia
-# Basic conv layer with unit circle normalization (default)
-layer = PhasorConv((3, 3), 3 => 16; pad=1)
-
-# With trainable dynamics and strided convolution
-layer = PhasorConv((5, 5), 16 => 32, normalize_to_unit_circle;
-    stride=2,
-    trainable_leakage=true,
-    return_type=SolutionType(:current))
-
-# Initialize and apply
-rng = Random.default_rng()
-ps, st = Lux.setup(rng, layer)
-y, st_new = layer(x, ps, st)  # x: (H, W, C_in, batch)
-```
-
-See also: [`PhasorDense`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
+# Parameters
+- `weight` — Conv weight tensor
+- `log_neg_lambda` — `(out_chs,)` per-channel decay
+- `bias_real`, `bias_imag` — bias (when `use_bias=true`)
+- `omega` — `(out_chs,)` (when `trainable_omega=true`)
 """
-struct PhasorConv <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
-    layer
-    bias
-    activation
+struct PhasorConv <: Lux.AbstractLuxLayer
+    _conv  # Internal Conv for forward pass mechanics
+    activation::Function
     use_bias::Bool
-    init_leakage::Function
-    init_period::Function
-    trainable_leakage::Bool
-    trainable_period::Bool
+    init_bias::Function
+    init_mode::Symbol
+    omega_lo::Float32
+    omega_hi::Float32
+    trainable_omega::Bool
     return_type::SolutionType
 end
 
@@ -538,101 +627,107 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
-                    init_leakage = ones32,
-                    init_period = ones32,
-                    trainable_leakage::Bool = false,
-                    trainable_period::Bool = false,
+                    init_mode::Symbol = :default,
+                    omega_lo::Real = 0.2f0,
+                    omega_hi::Real = 2.5f0,
+                    trainable_omega::Bool = false,
                     kwargs...)
-    #construct the convolutional layer
-    layer = Conv(k, chs, identity; use_bias=false, kwargs...)
-    bias = ComplexBias(([1 for _ in 1:length(k)]...,chs[2],), init_bias = init_bias)
-    return PhasorConv(layer, 
-                      bias, 
-                      activation, 
-                      use_bias, 
-                      init_leakage,
-                      init_period,
-                      trainable_leakage,
-                      trainable_period,
+    conv = Conv(k, chs, identity; use_bias=false, kwargs...)
+    return PhasorConv(conv,
+                      activation,
+                      use_bias,
+                      init_bias,
+                      init_mode,
+                      Float32(omega_lo),
+                      Float32(omega_hi),
+                      trainable_omega,
                       return_type)
 end
 
+# Helper to get output channels
+_out_chs(l::PhasorConv) = l._conv.out_chs
+
+function _init_conv_dynamics(l::PhasorConv)
+    n = _out_chs(l)
+    if l.init_mode == :hippo
+        λ_init, ω_init = hippo_legs_diagonal(n)
+        log_neg_lambda = log.(-λ_init)
+        omega = ω_init
+    elseif l.init_mode == :uniform
+        log_neg_lambda = fill(Float32(log(0.1)), n)
+        omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=n)))
+    else  # :default — match standard spk_args defaults
+        log_neg_lambda = fill(Float32(log(0.2)), n)
+        omega = fill(Float32(2π), n)
+    end
+    return log_neg_lambda, omega
+end
+
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorConv)
-    ps_layer = Lux.initialparameters(rng, l.layer)
-    parameters = (layer = ps_layer,)
+    conv_ps = Lux.initialparameters(rng, l._conv)
+    log_neg_lambda, omega = _init_conv_dynamics(l)
+
+    parameters = (weight = conv_ps.weight, log_neg_lambda = log_neg_lambda)
 
     if l.use_bias
-        ps_bias = Lux.initialparameters(rng, l.bias)
-        parameters = merge(parameters, (bias = ps_bias,))
+        n = _out_chs(l)
+        bias_dims = ([1 for _ in 1:length(size(conv_ps.weight))-2]..., n)
+        bias = l.init_bias(rng, bias_dims)
+        parameters = merge(parameters, (bias_real = Float32.(real.(bias)),
+                                         bias_imag = Float32.(imag.(bias))))
     end
 
-    # Get output channels for leakage/period initialization
-    n_out = l.layer.out_chs
-    if l.trainable_leakage
-        ps_leakage = l.init_leakage(rng, n_out,)
-        parameters = merge(parameters, (leakage = ps_leakage,))
+    if l.trainable_omega
+        parameters = merge(parameters, (omega = omega,))
     end
 
-    if l.trainable_period
-        ps_period = l.init_period(rng, n_out,)
-        parameters = merge(parameters, (period = ps_period,))
-    end
     return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorConv)
-    st_layer = Lux.initialstates(rng, l.layer)
-    st_bias = Lux.initialstates(rng, l.bias)
-    state = (layer = st_layer, bias = st_bias,)
+    conv_st = Lux.initialstates(rng, l._conv)
+    state = (_conv = conv_st,)
 
-    n_out = l.layer.out_chs
-    if !l.trainable_leakage
-        st_leakage = l.init_leakage(rng, n_out,)
-        state = merge(state, (leakage = st_leakage,))
+    if !l.trainable_omega
+        _, omega = _init_conv_dynamics(l)
+        state = merge(state, (omega = omega,))
     end
 
-    if !l.trainable_period
-        st_period = l.init_period(rng, n_out,)
-        state = merge(state, (period = st_period,))
-    end
     return state
 end
 
-"""
-    (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedTuple)
-
-Complex-valued forward pass. Applies convolution to real and imaginary parts
-separately, then adds complex bias. Returns complex values without normalization.
-"""
-function (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedTuple)
-    y_real_conv, _ = pc.layer(real.(x), ps.layer, st.layer)
-    y_imag_conv, _ = pc.layer(imag.(x), ps.layer, st.layer)
-    y = y_real_conv .+ 1.0f0im .* y_imag_conv
-
-    if pc.use_bias
-        y_biased, st_updated_bias = pc.bias(y, ps.bias, st.bias)
-    else
-        st_updated_bias = st.bias
-        y_biased = y
-    end
-
-    st_new = merge(st, (layer = st.layer, bias = st_updated_bias))
-    return y_biased, st_new
+function _get_omega(a::PhasorConv, params, state)
+    return a.trainable_omega ? params.omega : state.omega
 end
 
-"""
-    (pc::PhasorConv)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTuple)
+# ---- Complex dispatch ----
 
-Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
-then normalizes and converts back to phases via `complex_to_angle`.
-"""
+function (pc::PhasorConv)(x::AbstractArray{<:Complex}, ps::LuxParams, st::NamedTuple)
+    conv_ps = (weight = ps.weight,)
+    conv_st = haskey(st, :_conv) ? st._conv : NamedTuple()
+    y_real, _ = pc._conv(real.(x), conv_ps, conv_st)
+    y_imag, _ = pc._conv(imag.(x), conv_ps, conv_st)
+    y = y_real .+ 1.0f0im .* y_imag
+
+    if pc.use_bias
+        bias_val = ps.bias_real .+ 1.0f0im .* ps.bias_imag
+        y = y .+ bias_val
+    end
+
+    return y, st
+end
+
+# ---- Phase dispatch ----
+
 function (pc::PhasorConv)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTuple)
     xz = angle_to_complex(x)
-    y_biased, st_new = pc(xz, ps, st)
-    y_normalized = pc.activation(y_biased)
+    y, st_new = pc(xz, ps, st)
+    y_normalized = pc.activation(y)
     y_phase = complex_to_angle(y_normalized)
     return y_phase, st_new
 end
+
+# ---- Spiking dispatch ----
 
 function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     current_call = CurrentCall(x)
@@ -640,24 +735,56 @@ function (a::PhasorConv)(x::SpikingCall, params::LuxParams, state::NamedTuple)
 end
 
 function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    #pass the params and dense kernel to the solver
-    sol = oscillator_bank(x.current, a, params, state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
+    spk_args = x.spk_args
+    tspan = x.t_span
+
+    # Compute output shape by running conv on a sample
+    conv_ps = (weight = params.weight,)
+    conv_st = haskey(state, :_conv) ? state._conv : NamedTuple()
+    sample_out, _ = a._conv(x.current.current_fn(Float32(tspan[1])), conv_ps, conv_st)
+    u0 = similar(sample_out, ComplexF32)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32)
+    end
+
+    ω_val = _get_omega(a, params, state)
+    use_bias = a.use_bias && haskey(params, :bias_real)
+
+    function dzdt(u, p, t)
+        λ = -exp.(p.log_neg_lambda)
+        k = ComplexF32.(λ .+ im .* ω_val)
+        # Reshape k for conv broadcasting: (1...1, out_chs, 1)
+        k_shaped = reshape(k, [1 for _ in 1:ndims(u)-2]..., length(k), 1)
+        conv_p = (weight = p.weight,)
+        I_transformed, _ = a._conv(x.current.current_fn(t), conv_p, conv_st)
+        result = k_shaped .* u .+ I_transformed
+        if use_bias
+            bias_val = p.bias_real .+ 1im .* p.bias_imag
+            # bias_val is shaped for conv broadcasting
+            result = result .+ bias_val
+        end
+        return result
+    end
+
+    prob = ODEProblem(dzdt, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+
     if a.return_type.type == :phase
-        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
         y = a.activation.(u)
         phase = complex_to_angle.(y)
         return phase, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
-        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
-                                x.spk_args,
-                                x.t_span)
+        i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
+                                spk_args,
+                                tspan)
         return next_call, state
     else #spiking
-        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, spk_args, tspan)
         return next_call, state
     end
 end
@@ -726,232 +853,146 @@ end
 
 
 """
-    PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias)}
+    PhasorFixed <: Lux.AbstractLuxLayer
 
 A dense layer with non-trainable (fixed) weights for phase-valued and spiking networks.
-Weights are stored in layer state rather than parameters, making them immune to
-gradient updates while still supporting the full range of input types.
-
-Output type is controlled via multiple dispatch on input type:
-- Complex input → complex output (linear transform + bias, no normalization)
-- Real/phase input → real/phase output (normalization applied, then `complex_to_angle`)
-- Spiking input → output determined by `return_type` field
+Weights and bias are stored in state, dynamics parameters in params.
 
 # Fields
-- `layer`: Template `Dense` layer (weights stored in state, not used directly)
-- `bias`: [`ComplexBias`](@ref) layer for phase shifts (parameters also stored in state)
-- `activation`: Normalization function that projects complex values toward the unit circle
-    (Complex → Complex, e.g., `normalize_to_unit_circle`). Applied only in the real/phase
-    and spiking forward paths; complex inputs pass through without normalization.
-- `use_bias::Bool`: Whether to apply the complex bias term
-- `init_leakage::Function`: Initializer for per-neuron leakage scaling factors
-- `init_period::Function`: Initializer for per-neuron period scaling factors
-- `trainable_leakage::Bool`: If `true`, leakage factors are trainable parameters
-- `trainable_period::Bool`: If `true`, period factors are trainable parameters
+- `in_dims::Int`, `out_dims::Int`: Layer dimensions
+- `activation::Function`: Normalization function
+- `use_bias::Bool`: Whether to apply complex bias
+- `init_weight`: Weight initializer or `nothing` for glorot_uniform
+- `init_bias::Function`: Bias initializer
+- `init_mode::Symbol`: Dynamics init (`:default`, `:uniform`, `:hippo`)
+- `trainable_omega::Bool`: Whether omega is trainable
 - `return_type::SolutionType`: Output format for spiking inputs
-- `init_weight`: Weight initialization function, or `nothing` for Glorot uniform
 
-# Constructor
-```julia
-PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation=normalize_to_unit_circle;
-    return_type=SolutionType(:spiking),  # :phase, :potential, :current, or :spiking
-    init_weight=nothing,                   # Custom weight init: (rng, in, out) -> matrix
-    init_bias=default_bias,                # Bias initialization function
-    use_bias=false,                        # Apply complex bias (default off)
-    init_leakage=ones32,                   # Leakage factor initializer
-    init_period=ones32,                    # Period factor initializer
-    trainable_leakage=false,               # Make leakage trainable
-    trainable_period=false,                # Make period trainable
-    kwargs...)                             # Additional options
-```
+# Parameters
+- `log_neg_lambda` — per-channel decay (always trainable)
+- `omega` — per-channel frequency (when `trainable_omega=true`)
 
-# Weight Initialization Options
-- `init_weight=nothing`: Uses Glorot uniform initialization (default)
-- `init_weight=identity_init`: Creates identity matrix (requires square shape)
-- Custom function with signature `(rng, in_dim, out_dim) -> weight_matrix`
-
-# State Structure
-The layer state contains:
-- `weight`: The fixed weight matrix (out_dim × in_dim)
-- `layer`: Nested structure with weight for `oscillator_bank` compatibility
-- `bias_params`: Complex bias parameters (real and imaginary parts)
-- `bias`: Bias layer state
-- `leakage`: Per-neuron leakage factors (if not trainable)
-- `period`: Per-neuron period factors (if not trainable)
-
-# Return Types (for spiking inputs)
-- `:phase`: Extract phases from ODE solution, apply normalization, return array
-- `:potential`: Return raw ODE solution object
-- `:current`: Convert solution to current, return `CurrentCall` for next layer
-- `:spiking`: Convert solution to spike train, return `SpikingCall` (default)
-
-# Forward Pass
-For complex inputs:
-1. Applies fixed weight matrix separately to real and imaginary parts
-2. Optionally adds complex bias
-3. Returns complex values (no normalization applied)
-
-For real/phase inputs:
-1. Converts input phases to complex numbers via `angle_to_complex`
-2. Dispatches to complex forward pass (steps above)
-3. Applies normalization function (projects toward unit circle)
-4. Converts back to phases via `complex_to_angle`
-
-For spiking inputs (`SpikingCall` or `CurrentCall`):
-1. Converts to `CurrentCall` if needed
-2. Constructs pseudo-params from state for `oscillator_bank`
-3. Integrates coupled oscillator ODEs
-4. Returns output based on `return_type`
-
-# Example
-```julia
-# Fixed random projection with unit circle normalization (default)
-layer = PhasorFixed(64 => 64)
-
-# Identity layer (no transformation)
-identity_init(rng, in_dim, out_dim) = Matrix{Float32}(I, out_dim, in_dim)
-layer = PhasorFixed(64 => 64, identity; init_weight=identity_init)
-
-# Fixed layer with trainable dynamics
-layer = PhasorFixed(128 => 64, normalize_to_unit_circle;
-    trainable_leakage=true,
-    return_type=SolutionType(:current))
-
-# Initialize and apply
-rng = Random.default_rng()
-ps, st = Lux.setup(rng, layer)
-y, st_new = layer(x, ps, st)
-
-# Weights are in state, not params
-@assert !haskey(ps, :weight)  # No weights in params
-@assert haskey(st, :weight)   # Weights in state
-```
-
-# Use Cases
-- Fixed random projections for reservoir computing
-- Identity or permutation mappings
-- Frozen pretrained layers in transfer learning
-- Non-trainable feature extractors
-- Dimensionality-preserving transformations
-
-See also: [`PhasorDense`](@ref) for trainable version, [`ComplexBias`](@ref), [`oscillator_bank`](@ref)
+# State
+- `weight` — fixed weight matrix
+- `bias_real`, `bias_imag` — bias (when `use_bias=true`)
+- `omega` — frequency (when `trainable_omega=false`)
 """
-struct PhasorFixed <: LuxCore.AbstractLuxContainerLayer{(:layer, :bias,)}
-    layer # the conventional layer used to transform inputs (fixed weights)
-    bias # the bias in the complex domain used to shift away from the origin
-    activation # normalization function: projects complex values toward the unit circle (Complex → Complex)
-    use_bias::Bool # apply the layer with the bias if true
-    init_leakage::Function # initializer for the values to scale the leakage in spk_args
-    init_period::Function # initializer for the values to scale the t_period in spk_args
-    trainable_leakage::Bool # can the ODE optimizer access leakage in params
-    trainable_period::Bool # can the ODE optimizer access period in params
-    return_type::SolutionType # the type of solution to return from a spiking input
-    init_weight # function to initialize fixed weights, or nothing for default
+struct PhasorFixed <: Lux.AbstractLuxLayer
+    in_dims::Int
+    out_dims::Int
+    activation::Function
+    use_bias::Bool
+    init_weight
+    init_bias::Function
+    init_mode::Symbol
+    omega_lo::Float32
+    omega_hi::Float32
+    trainable_omega::Bool
+    return_type::SolutionType
 end
 
 function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
-                     return_type::SolutionType = SolutionType(:spiking), 
-                     init_bias = default_bias, 
+                     return_type::SolutionType = SolutionType(:spiking),
+                     init_bias = default_bias,
                      use_bias::Bool = false,
-                     init_leakage = ones32,
-                     init_period = ones32,
-                     trainable_leakage::Bool = false,
-                     trainable_period::Bool = false,
                      init_weight = nothing,
+                     init_mode::Symbol = :default,
+                     omega_lo::Real = 0.2f0,
+                     omega_hi::Real = 2.5f0,
+                     trainable_omega::Bool = false,
                      kwargs...)
-    # Create a fixed Dense layer with use_bias=false and weights initialized later
-    layer = Dense(shape, identity; use_bias=false, kwargs...)
-    bias = ComplexBias((shape[2],); init_bias = init_bias)
-    return PhasorFixed(layer, 
-                       bias, 
-                       activation, 
-                       use_bias, 
-                       init_leakage,
-                       init_period,
-                       trainable_leakage,
-                       trainable_period,
-                       return_type, 
-                       init_weight)
+    return PhasorFixed(shape[1], shape[2],
+                       activation,
+                       use_bias,
+                       init_weight,
+                       init_bias,
+                       init_mode,
+                       Float32(omega_lo),
+                       Float32(omega_hi),
+                       trainable_omega,
+                       return_type)
+end
+
+function _init_dynamics(l::PhasorFixed)
+    if l.init_mode == :hippo
+        λ_init, ω_init = hippo_legs_diagonal(l.out_dims)
+        log_neg_lambda = log.(-λ_init)
+        omega = ω_init
+    elseif l.init_mode == :uniform
+        log_neg_lambda = fill(Float32(log(0.1)), l.out_dims)
+        omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.out_dims)))
+    else  # :default — match standard spk_args defaults
+        log_neg_lambda = fill(Float32(log(0.2)), l.out_dims)
+        omega = fill(Float32(2π), l.out_dims)
+    end
+    return log_neg_lambda, omega
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorFixed)
-    # Weights are stored in state (non-trainable)
-    # But leakage/period can be trainable
-    parameters = NamedTuple()
+    log_neg_lambda, omega = _init_dynamics(l)
+    parameters = (log_neg_lambda = log_neg_lambda,)
 
-    n_out = l.layer.out_dims
-    if l.trainable_leakage
-        ps_leakage = l.init_leakage(rng, n_out,)
-        parameters = merge(parameters, (leakage = ps_leakage,))
-    end
-
-    if l.trainable_period
-        ps_period = l.init_period(rng, n_out,)
-        parameters = merge(parameters, (period = ps_period,))
+    if l.trainable_omega
+        parameters = merge(parameters, (omega = omega,))
     end
     return parameters
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorFixed)
-    ps_layer = Lux.initialparameters(rng, l.layer)
-    ps_bias = Lux.initialparameters(rng, l.bias)
+    # Weight in state (non-trainable)
+    if l.init_weight !== nothing
+        W = l.init_weight(rng, l.in_dims, l.out_dims)
+    else
+        W = glorot_uniform(rng, l.out_dims, l.in_dims)
+    end
+    state = (weight = W,)
 
-    st_layer = Lux.initialstates(rng, l.layer)
-    st_bias = Lux.initialstates(rng, l.bias)
-
-    state = (ps_layer = ps_layer,
-            ps_bias = ps_bias,
-            st_layer = st_layer,
-            st_bias = st_bias,)
-
-    n_out = l.layer.out_dims
-    if !l.trainable_leakage
-        st_leakage = l.init_leakage(rng, n_out,)
-        state = merge(state, (leakage = st_leakage,))
+    # Bias in state (non-trainable)
+    if l.use_bias
+        bias = l.init_bias(rng, (l.out_dims,))
+        state = merge(state, (bias_real = Float32.(real.(bias)),
+                               bias_imag = Float32.(imag.(bias))))
     end
 
-    if !l.trainable_period
-        st_period = l.init_period(rng, n_out,)
-        state = merge(state, (period = st_period,))
+    # Omega in state when not trainable
+    if !l.trainable_omega
+        _, omega = _init_dynamics(l)
+        state = merge(state, (omega = omega,))
     end
+
     return state
 end
 
-"""
-    (a::PhasorFixed)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+function _get_omega(a::PhasorFixed, params, state)
+    return a.trainable_omega ? params.omega : state.omega
+end
 
-Complex-valued forward pass. Weights are read from state (non-trainable).
-Returns complex values without normalization.
-"""
+# ---- Complex dispatch (weights from state) ----
+
 function (a::PhasorFixed)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
-    y_real, _ = a.layer(real.(x), state.ps_layer, state.st_layer)
-    y_imag, _ = a.layer(imag.(x), state.ps_layer, state.st_layer)
+    y_real = state.weight * real.(x)
+    y_imag = state.weight * imag.(x)
     y = y_real .+ 1.0f0im .* y_imag
 
     if a.use_bias
-        y_biased, st_updated_bias = a.bias(y, state.ps_bias, state.st_bias)
-        st_new = merge(state, (st_bias = st_updated_bias,))
-    else
-        y_biased = y
-        st_new = state
+        bias_val = state.bias_real .+ 1.0f0im .* state.bias_imag
+        y = y .+ bias_val
     end
 
-    return y_biased, st_new
+    return y, state
 end
 
-"""
-    (a::PhasorFixed)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
+# ---- Phase dispatch ----
 
-Phase-based forward pass. Converts phases to complex, applies the complex forward pass,
-then normalizes and converts back to phases via `complex_to_angle`.
-"""
 function (a::PhasorFixed)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     xz = angle_to_complex(x)
-    y_biased, st_new = a(xz, params, state)
-    y_normalized = a.activation(y_biased)
+    y, st_new = a(xz, params, state)
+    y_normalized = a.activation(y)
     y_phase = complex_to_angle(y_normalized)
     return y_phase, st_new
 end
+
+# ---- Spiking dispatch ----
 
 function (a::PhasorFixed)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     current_call = CurrentCall(x)
@@ -959,50 +1000,53 @@ function (a::PhasorFixed)(x::SpikingCall, params::LuxParams, state::NamedTuple)
 end
 
 function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
-    # Create a pseudo-params structure for oscillator_bank that includes weights from state
-    # The layer field must contain weight for the Dense layer call in oscillator_bank
-    # state.ps_layer contains the layer parameters (including weight)
-    # state.ps_bias contains the bias parameters (bias_real, bias_imag)
-    fixed_params = (layer = state.ps_layer, bias = state.ps_bias)
-    
-    # Add leakage/period to params if trainable, otherwise they come from state
-    if a.trainable_leakage
-        fixed_params = merge(fixed_params, (leakage = params.leakage,))
+    spk_args = x.spk_args
+    tspan = x.t_span
+
+    # Compute output shape
+    sample_I = x.current.current_fn(Float32(tspan[1]))
+    out_shape = ndims(sample_I) >= 2 ? (a.out_dims, size(sample_I)[2:end]...) : (a.out_dims,)
+    u0 = similar(sample_I, ComplexF32, out_shape)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32)
     end
-    if a.trainable_period
-        fixed_params = merge(fixed_params, (period = params.period,))
+
+    # Weight from state, dynamics from params
+    W = state.weight
+    use_bias = a.use_bias && haskey(state, :bias_real)
+
+    function dzdt(u, p, t)
+        λ = -exp.(p.log_neg_lambda)
+        ω_val = _get_omega(a, p, state)
+        k = ComplexF32.(λ .+ im .* ω_val)
+        I_transformed = W * x.current.current_fn(t)
+        result = k .* u .+ I_transformed
+        if use_bias
+            bias_val = state.bias_real .+ 1im .* state.bias_imag
+            result = result .+ bias_current(bias_val, t, x.current.offset, spk_args)
+        end
+        return result
     end
-    
-    # Create a state structure that oscillator_bank expects (with layer field)
-    # state.st_layer and state.st_bias contain the actual layer/bias states
-    fixed_state = (layer = state.st_layer, bias = state.st_bias)
-    
-    # Add leakage/period to state if not trainable
-    if !a.trainable_leakage
-        fixed_state = merge(fixed_state, (leakage = state.leakage,))
-    end
-    if !a.trainable_period
-        fixed_state = merge(fixed_state, (period = state.period,))
-    end
-    
-    # Pass the fixed params to the solver
-    sol = oscillator_bank(x.current, a, fixed_params, fixed_state, tspan=x.t_span, spk_args=x.spk_args, use_bias=a.use_bias)
+
+    prob = ODEProblem(dzdt, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+
     if a.return_type.type == :phase
-        u = unrotate_solution(sol.u, sol.t, spk_args=x.spk_args, offset=x.current.offset)
+        u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
         y = a.activation.(u)
         phase = complex_to_angle.(y)
         return phase, state
     elseif a.return_type.type == :potential
         return sol, state
     elseif a.return_type.type == :current
-        i_fn = t -> potential_to_current(sol(t), spk_args=x.spk_args)
-        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(x.spk_args)),
-                                x.spk_args,
-                                x.t_span)
+        i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
+                                spk_args,
+                                tspan)
         return next_call, state
     else #spiking
-        train = solution_to_train(sol, x.t_span, spk_args=x.spk_args, offset=x.current.offset)
-        next_call = SpikingCall(train, x.spk_args, x.t_span)
+        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, spk_args, tspan)
         return next_call, state
     end
 end
