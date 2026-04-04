@@ -126,6 +126,25 @@ function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::Name
     return dropdims(sims_avg; dims=(1, 3)), st        # n_classes × B
 end
 
+function (l::SSMReadout)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+    # Phase input: already normalized, skip normalize_to_unit_circle
+    C, L, B = size(x)
+    t0 = max(1, L - max(1, round(Int, L * l.readout_frac)) + 1)
+    W = L - t0 + 1
+
+    phases = x[:, t0:L, :]                               # C × W × B  Phase
+
+    codes = st.codes                                      # C × n_classes  Phase
+    n_cls = size(codes, 2)
+    p = reshape(phases, C, 1, W, B)
+    c = reshape(codes, C, n_cls, 1, 1)
+    cos_diff = cos.(pi_f32 .* (Float32.(p) .- Float32.(c)))
+    sims_per_step = mean(cos_diff; dims=1)
+    sims_avg = mean(sims_per_step; dims=3)
+
+    return dropdims(sims_avg; dims=(1, 3)), st
+end
+
 # ================================================================
 # 3. PSK Encoding
 # ================================================================

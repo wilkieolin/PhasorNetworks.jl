@@ -128,22 +128,24 @@ function generate_copying_data(rng::AbstractRNG, codebook::AbstractMatrix{<:Comp
                                seq_len::Int, n_samples::Int;
                                noise_scale::Float32=0.5f0)
     D_token, n_classes = size(codebook)
+    codebook_phases = complex_to_angle(codebook)
 
     labels = rand(rng, 0:n_classes-1, n_samples)
-    x = zeros(ComplexF32, D_token, seq_len, n_samples)
+
+    # Generate as Phase arrays so PhasorDense uses the Dirac path
+    x = zeros(Float32, D_token, seq_len, n_samples)
     for i in 1:n_samples
-        x[:, 1, i] .= codebook[:, labels[i] + 1]
+        x[:, 1, i] .= Float32.(codebook_phases[:, labels[i] + 1])
     end
 
-    # Add random complex noise at positions 2:end to create interference
+    # Add random phase noise at positions 2:end to create interference
     if noise_scale > 0f0
-        noise_phases = Phase.(2f0 .* rand(rng, Float32, D_token, seq_len - 1, n_samples) .- 1f0)
-        noise = noise_scale .* angle_to_complex(noise_phases)
-        x[:, 2:end, :] .= noise
+        noise_phases = 2f0 .* rand(rng, Float32, D_token, seq_len - 1, n_samples) .- 1f0
+        x[:, 2:end, :] .= noise_phases
     end
 
     y = Float32.(onehotbatch(labels, 0:n_classes-1))
-    return x, y
+    return Phase.(x), y
 end
 
 # ================================================================
@@ -298,15 +300,46 @@ end
 # 5. Loss Functions
 # ================================================================
 
+# Cross-entropy on similarity logits — works at any hidden dimension,
+# unlike similarity_loss which requires high-dimensional (~512+) codebooks
+# for the random prototypes to be approximately orthogonal.
+
+function _softmax_ce(sims, y)
+    # sims: (n_classes, B) similarity scores in [-1, 1]
+    # y: (n_classes, B) one-hot targets
+    # Scale similarities to logit range and apply cross-entropy
+    logits = 5f0 .* sims  # scale factor to sharpen softmax
+    # Numerically stable log-softmax
+    logits_max = maximum(logits; dims=1)
+    shifted = logits .- logits_max
+    log_sum_exp = log.(sum(exp.(shifted); dims=1))
+    log_probs = shifted .- log_sum_exp
+    # Cross-entropy: -Σ y · log(p)
+    return -mean(sum(y .* log_probs; dims=1))
+end
+
 function copying_loss(x, y, model, ps, st)
     sims, _ = model(x, ps, st)
-    return mean(similarity_loss(sims, y))
+    return _softmax_ce(sims, y)
 end
 
 function mnist_loss(x, y, model, ps, st)
-    x_enc = psk_encode(x)
+    x_enc = intensity_to_phase(x)
     sims, _ = model(x_enc, ps, st)
-    return mean(similarity_loss(sims, y))
+    return _softmax_ce(sims, y)
+end
+
+"""
+    intensity_to_phase(images) -> Phase array (C × L × B)
+
+Encode pixel intensities as phases: 0 (black) → 0 (0°), 1 (white) → 0.5 (90°).
+Returns Phase arrays so PhasorDense uses the Dirac discretization path.
+"""
+function intensity_to_phase(images::AbstractArray{<:Real, 3})
+    H, W, B = size(images)
+    phases = Float32.(images) .* 0.5f0           # [0,1] → [0, 0.5]
+    phases_ct = permutedims(phases, (2, 1, 3))   # channels × time × batch
+    return Phase.(phases_ct)
 end
 
 # ================================================================
@@ -511,7 +544,7 @@ function main()
         train_loader, test_loader, mnist_L, mnist_C = load_sequential_mnist(; batchsize, pixels_per_step=pps)
 
         mnist_results = run_conditions("sMNIST-L=$mnist_L", train_loader, test_loader,
-                                       mnist_loss, psk_encode;
+                                       mnist_loss, intensity_to_phase;
                                        C_in=mnist_C, D_hidden, n_classes=10,
                                        n_epochs, batchsize, lr, seed, use_cuda,
                                        readout_frac=0.25f0, seq_len=mnist_L)
