@@ -193,76 +193,59 @@ end
 # ================================================================
 
 """
-    dirac_encode(phases, λ, ω, T; k₀) -> ComplexF32 array (C_out × C_in × L × B)
+    dirac_encode(phases, λ, ω, T) -> ComplexF32 array (C_out × C_in × L × B)
 
-Encode phase inputs as coupled two-stage Dirac spike responses.
+Encode phase inputs as single-oscillator Dirac spike responses.
 
-For a spike at phase θ in period n, the spike fires at absolute time
-`t_s = n·T + (θ/2 + 0.5)·T`.  The coupled two-stage ODE response at the
-end of that period (time `(n+1)·T`) is:
+Each R&F neuron integrates incoming spikes directly.  A spike at phase θ
+arrives at time `t_s = (θ/2 + 0.5)·T` within the period, leaving
+`dt = T·(0.5 - θ/2)` until the next sample point.  The neuron with
+eigenvalue k_c responds as `exp(k_c · dt)`.
 
-```
-G(k_c, k₀, dt) = (exp(k_c·dt) - exp(k₀·dt)) / (k_c - k₀)
-```
-
-where `dt = T - t_within = T·(0.5 - θ/2)`.  This encoding captures the
-continuous coupling between input oscillators (at k₀) and output oscillators
-(at per-channel k_c).
+All neurons in a layer share the same resonant frequency — spikes carry
+phase information via timing, and the receiving neuron's response depends
+only on its own dynamics k_c and the elapsed time dt.
 
 # Arguments
 - `phases::AbstractArray{<:Real, 3}` — (C_in, L, B) phases in [-1, 1]
-- `λ::AbstractVector` — (C_out,) output channel decay rates
-- `ω::AbstractVector` — (C_out,) output channel angular frequencies
+- `λ::AbstractVector` — (C_out,) per-channel decay rates
+- `ω::AbstractVector` — (C_out,) per-channel angular frequencies
 - `T::Real` — Oscillation period
-- `k₀::Complex` — Global neuron constant for input oscillators
 
 # Returns
 (C_out, C_in, L, B) complex array — per-channel Dirac-encoded input.
 """
 function dirac_encode(phases::AbstractArray{<:Real, 3},
-                      λ::AbstractVector, ω::AbstractVector, T::Real;
-                      k₀::Complex=ComplexF32(-0.2f0 + im * Float32(2π)))
+                      λ::AbstractVector, ω::AbstractVector, T::Real)
     k_c = ComplexF32.(λ .+ im .* ω)                            # (C_out,)
     dt = Float32(T) .* (0.5f0 .- Float32.(phases) ./ 2f0)     # (C_in, L, B)
 
     k_c_r = reshape(k_c, :, 1, 1, 1)                           # (C_out, 1, 1, 1)
     dt_r = reshape(dt, 1, size(dt)...)                          # (1, C_in, L, B)
-    k₀_f = ComplexF32(k₀)
-
-    exp_kc = exp.(k_c_r .* dt_r)                                # (C_out, C_in, L, B)
-    exp_k0 = exp.(k₀_f .* dt_r)                                # (1, C_in, L, B)
-    dk = k_c_r .- k₀_f                                         # (C_out, 1, 1, 1)
-    return (exp_kc .- exp_k0) ./ dk                             # (C_out, C_in, L, B)
+    return exp.(k_c_r .* dt_r)                                  # (C_out, C_in, L, B)
 end
 
 """
-    causal_conv_dirac(phases, W, λ, ω, T; k₀, spike_energy) -> ComplexF32 (C_out × L × B)
+    causal_conv_dirac(phases, W, λ, ω, T) -> ComplexF32 (C_out × L × B)
 
-Exact causal convolution with Dirac discretization for phase-valued inputs.
+Causal convolution with Dirac discretization for phase-valued inputs.
 
-Computes the exact elapsed time from each input spike to each output sample
-point and evaluates the coupled two-stage integral analytically.  The key
-factoring splits `exp(k·Δt_elapsed)` into a lag-dependent part (causal
-convolution kernel) and a phase-dependent part (input encoding):
+Models a single R&F neuron per output channel directly integrating incoming
+spikes.  A spike at phase θ arrives at time `t_s = (θ/2 + 0.5)·T` within
+the period.  The neuron at eigenvalue k_c responds with `exp(k_c · dt)` where
+`dt = T·(0.5 - θ/2)` is the time remaining until the next sample point.
 
-```
-exp(k · [(m-n)·T - t_within]) = exp(k·(m-n)·T) · exp(-k·t_within)
-                                 ^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^
-                                 lag kernel          phase encoding
-```
-
-The coupled integral `G = (exp(k_c·Δt) - exp(k₀·Δt))/(k_c - k₀)` then
-decomposes into **two independent causal convolutions**:
+The computation factors into a phase-dependent encoding and a lag-dependent
+causal convolution kernel:
 
 ```
-z_c[m] = E/(k_c-k₀) · { conv(A_c^n, H_c^kc)[m] - conv(A₀^n, H_c^k₀)[m] }
+exp(k_c · Δt_elapsed) = exp(k_c · lag·T) · exp(k_c · dt)
+                         ^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^
+                         kernel (FFT-able)  phase encoding
 ```
 
-- **Term 1**: per-channel encoding `exp(-k_c·t_within)` + per-channel kernel `A_c^n`
-- **Term 2**: shared encoding `exp(-k₀·t_within)` + shared kernel `A₀^n`
-
-Both use FFT convolution for O(L·log(L)) per channel.  Total cost is
-O(C_out·C_in·L·B) for encoding + O(C_out·L·log(L)·B) for two convolutions.
+So: `z_c[m] = Σ_n K_c[m-n] · H_c[n]`  where  `K_c[n] = exp(k_c·n·T)`
+and  `H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])`.
 
 # Arguments
 - `phases::AbstractArray{<:Real, 3}` — (C_in, L, B) phases in [-1, 1]
@@ -270,56 +253,31 @@ O(C_out·C_in·L·B) for encoding + O(C_out·L·log(L)·B) for two convolutions.
 - `λ::AbstractVector` — (C_out,) per-channel decay rates
 - `ω::AbstractVector` — (C_out,) per-channel angular frequencies
 - `T::Real` — Oscillation period
-- `k₀::Complex` — Global neuron constant for input oscillators.
-  Default: `-0.2 + i·2π` (standard SpikingArgs defaults)
-- `spike_energy::Float32` — Integral of the spike kernel (≈ 2·t_window).
-  Default: `0.002` (matches SpikingArgs t_window=0.001)
 """
 function causal_conv_dirac(phases::AbstractArray{<:Real, 3},
                            W::AbstractMatrix{<:Real},
-                           λ::AbstractVector, ω::AbstractVector, T::Real;
-                           k₀::Complex=ComplexF32(-0.2f0 + im * Float32(2π)),
-                           spike_energy::Float32=0.002f0)
+                           λ::AbstractVector, ω::AbstractVector, T::Real)
     C_in, L, B = size(phases)
     C_out = length(λ)
     k_c = ComplexF32.(λ .+ im .* ω)                        # (C_out,)
-    k₀_f = ComplexF32(k₀)
     T_f = Float32(T)
 
     # Time remaining from spike to end of same period: dt = T·(0.5 - θ/2)
-    # Spike at step n fires at absolute time (n-1)·T + (θ/2+0.5)·T
-    # ODE samples at m·T, so elapsed = m·T - spike_time = (m-n)·T + dt
-    # where dt = T·(0.5 - θ/2) is the within-period remainder
     dt = T_f .* (0.5f0 .- Float32.(phases) ./ 2f0)        # (C_in, L, B)
 
-    # GPU-safe lag indices
-    ns_cpu = Float32.(0:L-1)
-    ns = reshape(typeof(real.(k_c))(ns_cpu), 1, L)         # (1, L) on same device as params
+    # Per-channel Dirac encoding: exp(k_c · dt)
+    p_c = exp.(reshape(k_c, :, 1, 1, 1) .* reshape(dt, 1, C_in, L, B))  # (C_out, C_in, L, B)
 
-    # === Term 1: per-channel encoding + per-channel kernel ===
-    # p_c[c,j,n] = exp(k_c[c] · dt[j,n])
-    p_c = exp.(reshape(k_c, :, 1, 1, 1) .* reshape(dt, 1, C_in, L, B))
-    # Weight contraction: H^(1)_c[n] = Σ_j W[c,j] · p_c[c,j,n]
+    # Weight contraction: H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
     W_r = reshape(ComplexF32.(W), C_out, C_in, 1, 1)
-    H1 = dropdims(sum(W_r .* p_c; dims=2); dims=2)        # (C_out, L, B)
-    # Per-channel kernel: K_c[n] = exp(k_c · n · T)
-    K_c = exp.(k_c .* T_f .* ns)                           # (C_out, L)
-    Z1 = causal_conv(K_c, H1)                              # (C_out, L, B)
+    H = dropdims(sum(W_r .* p_c; dims=2); dims=2)         # (C_out, L, B)
 
-    # === Term 2: shared encoding + shared kernel ===
-    # p₀[j,n] = exp(k₀ · dt[j,n])  — channel-independent
-    p₀ = exp.(k₀_f .* dt)                                  # (C_in, L, B)
-    # Standard weight multiply (shared across output channels)
-    p₀_r = reshape(p₀, C_in, L * B)
-    H2 = reshape(complex.(W * real.(p₀_r), W * imag.(p₀_r)), C_out, L, B)
-    # Shared kernel: K₀[n] = exp(k₀ · n · T), replicated for causal_conv
-    K₀_row = exp.(k₀_f .* T_f .* ns)                       # (1, L)
-    K₀ = repeat(K₀_row, C_out, 1)                          # (C_out, L)
-    Z2 = causal_conv(K₀, H2)                               # (C_out, L, B)
+    # Causal convolution kernel: K_c[n] = exp(k_c · n · T)
+    ns_cpu = Float32.(0:L-1)
+    ns = reshape(typeof(real.(k_c))(ns_cpu), 1, L)         # (1, L) GPU-safe
+    K = exp.(k_c .* T_f .* ns)                             # (C_out, L)
 
-    # === Combine: z = E · (Z1 - Z2) / (k_c - k₀) ===
-    dk = reshape(k_c .- k₀_f, :, 1, 1)                    # (C_out, 1, 1)
-    return spike_energy .* (Z1 .- Z2) ./ dk
+    return causal_conv(K, H)
 end
 
 # ================================================================

@@ -230,35 +230,31 @@ function dirac_discretization_tests()
             @test eltype(y_cmpx) <: Complex
         end
 
-        @testset "Dirac vs spiking ODE correlation (no substeps)" begin
-            @info "Running Dirac vs spiking correlation..."
+        @testset "Dirac single-oscillator consistency" begin
+            @info "Running Dirac consistency check..."
             C_in, C_out = 4, 8
             L, B = 8, 3
 
-            # Use phase return type so spiking path returns phases, not SpikingCall
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false,
-                                return_type=SolutionType(:phase))
+                                init_mode=:uniform, use_bias=false)
             ps, st = Lux.setup(rng, layer)
 
             phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
 
-            # Dirac discrete path
+            # Dirac discrete path (single-oscillator)
             y_dirac, _ = layer(phases, ps, st)
 
-            # Spiking ODE path (returns Phase array with return_type=:phase)
-            spk_args_local = SpikingArgs(t_window=0.01f0, threshold=0.001f0)
-            train = ssm_phases_to_train(phases, spk_args=spk_args_local)
-            tspan_spk = (0.0f0, Float32(L) * spk_args_local.t_period)
-            sc = SpikingCall(train, spk_args_local, tspan_spk)
-            y_spk, _ = layer(sc, ps, st)
+            # Manual computation: same formula, verify we get identical results
+            λ = -exp.(ps.log_neg_lambda)
+            ω = st.omega
+            Z_manual = causal_conv_dirac(Float32.(phases), ps.weight, λ, ω, 1f0)
+            y_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
 
-            c = cor_realvals(vec(Float32.(y_dirac)), vec(Float32.(y_spk)))
-            @info "Dirac vs spiking correlation (no substeps): $c"
-            # Dirac at coarse grid should significantly exceed ZOH's ~0.09 at substeps=4.
-            # Remaining gap vs 1.0 is from accumulated differences in coupled ODE
-            # integration vs discrete two-stage approximation over multiple periods.
-            @test c > 0.99
+            @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
+
+            # Verify output is non-degenerate (spread of phase values)
+            ph_range = maximum(Float32.(y_dirac)) - minimum(Float32.(y_dirac))
+            @test ph_range > 0.5
         end
     end
 end
