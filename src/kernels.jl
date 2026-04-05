@@ -184,8 +184,8 @@ function causal_conv_fft(K::AbstractMatrix{<:Complex}, H::AbstractArray{<:Comple
     Z_full = ifft(Z_f, 2)                 # C × N × B
     Z = Z_full[:, 1:L, :]                 # C × L × B
 
-    # Ensure output stays ComplexF32 (FFT may promote to ComplexF64)
-    return ComplexF32.(Z)
+    # Only cast if FFT promoted away from ComplexF32 (e.g. from mixed precision)
+    return eltype(Z) === ComplexF32 ? Z : ComplexF32.(Z)
 end
 
 # ================================================================
@@ -256,7 +256,8 @@ and  `H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])`.
 """
 function causal_conv_dirac(phases::AbstractArray{<:Real, 3},
                            W::AbstractMatrix{<:Real},
-                           λ::AbstractVector, ω::AbstractVector, T::Real)
+                           λ::AbstractVector, ω::AbstractVector, T::Real;
+                           group_size::Int = 8)
     C_in, L, B = size(phases)
     C_out = length(λ)
     k_c = ComplexF32.(λ .+ im .* ω)                        # (C_out,)
@@ -265,20 +266,22 @@ function causal_conv_dirac(phases::AbstractArray{<:Real, 3},
     # Time remaining from spike to end of same period: dt = T·(0.5 - θ/2)
     dt = T_f .* (0.5f0 .- Float32.(phases) ./ 2f0)        # (C_in, L, B)
 
-    # Diagonal encoding: compute H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
-    # one channel at a time to avoid materializing (C_out, C_in, L, B) tensor.
+    # Grouped diagonal encoding: compute H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
+    # Processes G output channels at once to reduce GPU kernel launch overhead
+    # while avoiding the full (C_out, C_in, L, B) tensor.
     # Uses map (not a mutating loop) for Zygote compatibility.
-    # Avoids scalar indexing (k_c[c]) for GPU compatibility — uses
-    # range slicing (k_c[c:c]) which returns a 1-element device array.
+    # Avoids scalar indexing for GPU compatibility — uses range slicing.
     W_c = ComplexF32.(W)                                    # (C_out, C_in)
-    dt_flat = reshape(dt, C_in, L * B)                     # (C_in, L*B)
+    dt_flat = reshape(dt, 1, C_in, L * B)                  # (1, C_in, L*B)
+    G = min(group_size, C_out)
 
-    H_slices = map(1:C_out) do c
-        k_slice = reshape(k_c[c:c], 1, 1)                  # (1, 1) — stays on device
-        enc = exp.(k_slice .* dt_flat)                      # (C_in, L*B)
-        w_row = reshape(W_c[c:c, :], C_in, 1)              # (C_in, 1) — range index, no scalar
-        h = sum(w_row .* enc; dims=1)                       # (1, L*B)
-        reshape(h, 1, L, B)                                 # (1, L, B)
+    H_slices = map(1:G:C_out) do c_start
+        c_end = min(c_start + G - 1, C_out)
+        k_group = reshape(k_c[c_start:c_end], :, 1, 1)     # (g, 1, 1)
+        enc = exp.(k_group .* dt_flat)                       # (g, C_in, L*B)
+        w_group = reshape(W_c[c_start:c_end, :], :, C_in, 1) # (g, C_in, 1)
+        h = sum(w_group .* enc; dims=2)                      # (g, 1, L*B)
+        reshape(dropdims(h; dims=2), :, L, B)                # (g, L, B)
     end
     H = reduce(vcat, H_slices)                              # (C_out, L, B)
 

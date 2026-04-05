@@ -426,8 +426,14 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
         Z = Z .+ reshape(bias_val, :, 1, 1)
     end
 
-    Y = a.activation(Z)
-    return complex_to_angle(Y), state
+    # Skip normalization when activation is normalize_to_unit_circle:
+    # angle() is magnitude-independent, so normalizing first is wasted work.
+    if a.activation === normalize_to_unit_circle
+        return complex_to_angle(Z), state
+    else
+        Y = a.activation(Z)
+        return complex_to_angle(Y), state
+    end
 end
 
 # ---- SpikingCall dispatch ----
@@ -1369,6 +1375,54 @@ function (tb::SingleHeadCABlock)(q, kv, ps, st)
 end
 
 """
+    _adjust_ssm_lr!(opt_state, ps, lr_ssm)
+
+Walk the optimizer state tree and set the learning rate for SSM dynamics parameters
+(`log_neg_lambda`, `omega`) to `lr_ssm`, leaving all other parameters unchanged.
+"""
+function _adjust_ssm_lr!(opt_state, ps, lr_ssm)
+    ssm_keys = (:log_neg_lambda, :omega)
+    for (kp, _) in Optimisers.trainables(ps, path=true)
+        if last(kp.keys) in ssm_keys
+            node = opt_state
+            for k in kp.keys
+                node = getproperty(node, k)
+            end
+            Optimisers.adjust!(node, lr_ssm)
+        end
+    end
+end
+
+"""
+    _apply_weight_decay(gs, ps, wd)
+
+Add L2 weight decay to gradients for `:weight` parameters only.
+Returns a modified gradient tree. SSM dynamics parameters (log_neg_lambda, omega)
+and bias parameters are not penalized.
+"""
+function _apply_weight_decay(gs, ps, wd)
+    decay_keys = (:weight,)
+    for (kp, param) in Optimisers.trainables(ps, path=true)
+        if last(kp.keys) in decay_keys
+            # Navigate to the corresponding gradient leaf
+            g_node = gs
+            for k in kp.keys[1:end-1]
+                g_node = getproperty(g_node, k)
+            end
+            old_g = getproperty(g_node, last(kp.keys))
+            # gs is a NamedTuple tree — we can't mutate it, so we accumulate
+            # the decay into the gradient via broadcasting (creates new array)
+            new_g = old_g .+ eltype(old_g)(wd) .* param
+            # Rebuild the leaf. Since NamedTuples are immutable, we use
+            # Optimisers.trainables to identify locations but apply decay
+            # in-place on the gradient array (which IS mutable).
+            old_g .= new_g
+        end
+    end
+    return gs
+end
+
+"""
     train(model, ps, st, train_loader, loss, args; optimiser=Optimisers.Adam, verbose=false, sample_gradients=0, early_stop=false, early_stop_window=5)
 
 Train a phase-based neural network using gradient descent.
@@ -1395,6 +1449,16 @@ Train a phase-based neural network using gradient descent.
 - `gradients`: Sampled gradients (only when `sample_gradients > 0`)
 
 Automatically handles CPU/GPU device placement based on args.use_cuda.
+
+# Training features
+- **Differential LR**: Set `args.lr_ssm` to use a lower learning rate for SSM dynamics
+  parameters (`log_neg_lambda`, `omega`) vs connection weights.
+- **Weight decay**: Set `args.weight_decay > 0` to apply L2 regularization to weight
+  matrices only (not SSM dynamics parameters).
+- **Cosine schedule**: Set `args.cosine_schedule = true` to anneal learning rates from
+  initial values down to `args.lr_min` over training.
+- **GC interval**: Set `args.gc_interval > 0` to reduce garbage collection frequency
+  (useful for SSM convolution workloads that don't accumulate ODE solution objects).
 """
 function train(model, ps, st, train_loader, loss, args;
                optimiser = Optimisers.Adam,
@@ -1413,6 +1477,20 @@ function train(model, ps, st, train_loader, loss, args;
 
    ## Optimizer
    opt_state = Optimisers.setup(optimiser(args.lr), ps)
+
+   # Differential learning rates for SSM dynamics parameters
+   use_ssm_lr = args.lr_ssm > 0 && args.lr_ssm != args.lr
+   if use_ssm_lr
+       _adjust_ssm_lr!(opt_state, ps, args.lr_ssm)
+   end
+
+   # Precompute total steps for cosine schedule
+   use_cosine = args.cosine_schedule
+   total_steps = args.epochs * length(train_loader)
+
+   # GC interval
+   gc_every = args.gc_interval > 0 ? args.gc_interval : 1
+
    losses = []
    gradients = []
    step_count = 0
@@ -1437,7 +1515,24 @@ function train(model, ps, st, train_loader, loss, args;
                push!(gradients, deepcopy(gs[1]))
            end
 
+           # Apply weight decay to gradient (weights only, not SSM params)
+           if args.weight_decay > 0
+               _apply_weight_decay(gs[1], ps, args.weight_decay)
+           end
+
            opt_state, ps = Optimisers.update(opt_state, ps, gs[1]) ## update parameters
+
+           # Cosine LR schedule: anneal from initial LR to lr_min
+           if use_cosine
+               progress = step_count / total_steps
+               cos_mult = 0.5 * (1.0 + cos(Float64(pi) * progress))
+               lr_t = args.lr_min + (args.lr - args.lr_min) * cos_mult
+               Optimisers.adjust!(opt_state, lr_t)
+               if use_ssm_lr
+                   lr_ssm_t = args.lr_min + (args.lr_ssm - args.lr_min) * cos_mult
+                   _adjust_ssm_lr!(opt_state, ps, lr_ssm_t)
+               end
+           end
 
            # Early stopping: compare mean of last window vs preceding window
            if early_stop && length(losses) >= 2 * early_stop_window
@@ -1454,8 +1549,10 @@ function train(model, ps, st, train_loader, loss, args;
            # Prompt Julia's GC to reclaim Zygote tape and ODE solution objects from
            # this step before the next forward/backward solve begins.  Without this,
            # large sol.u arrays (one per saveat point) accumulate on the host and GPU.
-           GC.gc(false)
-           CUDA.functional() && CUDA.reclaim()
+           if step_count % gc_every == 0
+               GC.gc(false)
+               CUDA.functional() && CUDA.reclaim()
+           end
        end
        stopped_early && break
    end

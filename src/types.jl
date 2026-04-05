@@ -5,6 +5,11 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 
 # Fields
 - `lr::Float64`: Learning rate for optimization (default: 0.0003). Kept as Float64 for Optimisers.jl compatibility
+- `lr_ssm::Float64`: Learning rate for SSM dynamics parameters (log_neg_lambda, omega). When different from `lr`, enables differential learning rates. (default: 0.0, meaning use `lr` for all params)
+- `weight_decay::Float64`: Weight decay applied to connection weights only, not SSM dynamics parameters (default: 0.0)
+- `cosine_schedule::Bool`: Whether to use cosine annealing LR schedule (default: false)
+- `lr_min::Float64`: Minimum learning rate for cosine schedule (default: 1e-6)
+- `gc_interval::Int`: GC every N batches. 0 = every batch (default for ODE workloads). Set higher (e.g. 50) for SSM convolution workloads. (default: 0)
 - `batchsize::Int`: Number of samples per batch during training (default: 128)
 - `epochs::Int`: Number of training epochs (default: 10)
 - `use_cuda::Bool`: Whether to use GPU acceleration if available (default: true)
@@ -12,6 +17,11 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 """
 @kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
     lr::Float64 = 0.0003       ## learning rate
+    lr_ssm::Float64 = 0.0      ## SSM dynamics learning rate (0 = use lr)
+    weight_decay::Float64 = 0.0 ## weight decay (weights only, not SSM params)
+    cosine_schedule::Bool = false ## cosine LR annealing
+    lr_min::Float64 = 1e-6     ## minimum LR for cosine schedule
+    gc_interval::Int = 0       ## GC every N batches (0 = every batch)
     batchsize::Int = 128    ## batch size
     epochs::Int = 10        ## number of epochs
     use_cuda::Bool = true   ## use gpu (if cuda available)

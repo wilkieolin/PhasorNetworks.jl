@@ -25,6 +25,7 @@ Usage:
   julia --project=. demos/long_range_demo.jl --benchmark both --epochs 10
   julia --project=. demos/long_range_demo.jl --benchmark copying --copy-lengths 128,256,512
   julia --project=. demos/long_range_demo.jl --benchmark mnist --epochs 15
+  julia --project=. demos/long_range_demo.jl --benchmark mnist --epochs 20 --lr 0.008 --lr-ssm 0.002 --weight-decay 0.0001 --cosine-schedule
 =#
 
 using PhasorNetworks
@@ -88,6 +89,21 @@ function parse_args()
             help = "pixels grouped per timestep for sequential MNIST (1=full 784, 4=196 steps)"
             arg_type = Int
             default = 4
+        "--lr-ssm"
+            help = "learning rate for SSM dynamics params (log_neg_lambda, omega). 0 = use --lr for all."
+            arg_type = Float64
+            default = 0.0
+        "--weight-decay"
+            help = "L2 weight decay on connection weights only (not SSM params)"
+            arg_type = Float64
+            default = 0.0
+        "--cosine-schedule"
+            help = "enable cosine LR annealing"
+            action = :store_true
+        "--gc-interval"
+            help = "GC every N batches (0 = every batch). Set higher for SSM workloads."
+            arg_type = Int
+            default = 50
     end
     return ArgParse.parse_args(s)
 end
@@ -385,7 +401,9 @@ function run_conditions(name::String, train_loader, test_loader,
                         C_in::Int, D_hidden::Int, n_classes::Int,
                         n_epochs::Int, batchsize::Int, lr::Float64,
                         seed::Int, use_cuda::Bool, readout_frac::Float32,
-                        seq_len::Int)
+                        seq_len::Int, lr_ssm::Float64=0.0,
+                        weight_decay::Float64=0.0, cosine_schedule::Bool=false,
+                        gc_interval::Int=50)
 
     device = use_cuda ? gpu_device() : cpu_device()
 
@@ -418,7 +436,8 @@ function run_conditions(name::String, train_loader, test_loader,
                 n_params, minimum(λ_1), maximum(λ_1))
 
         args = Args(epochs=1, batchsize=batchsize, lr=lr, use_cuda=use_cuda,
-                    rng=Xoshiro(seed))
+                    rng=Xoshiro(seed), lr_ssm=lr_ssm, weight_decay=weight_decay,
+                    cosine_schedule=cosine_schedule, gc_interval=gc_interval)
 
         all_losses = Float64[]
         accs = Float64[]
@@ -496,10 +515,18 @@ function main()
     copy_lens  = parse.(Int, split(parsed["copy-lengths"], ","))
 
     pps        = parsed["pixels-per-step"]
+    lr_ssm     = Float64(parsed["lr-ssm"])
+    wd         = Float64(parsed["weight-decay"])
+    cosine     = parsed["cosine-schedule"]
+    gc_int     = parsed["gc-interval"]
 
     use_cuda = !no_cuda && CUDA.functional()
     println("Device: $(use_cuda ? "CUDA GPU" : "CPU")")
     println("Hidden dim: $D_hidden, LR: $lr, Batch: $batchsize, Epochs: $n_epochs")
+    lr_ssm > 0 && println("SSM LR: $lr_ssm")
+    wd > 0 && println("Weight decay: $wd")
+    cosine && println("Cosine LR schedule enabled")
+    gc_int > 0 && println("GC interval: $gc_int batches")
 
     n_classes = 10
 
@@ -528,7 +555,9 @@ function main()
                                      copying_loss, identity;
                                      C_in=D_token, D_hidden, n_classes,
                                      n_epochs, batchsize, lr, seed, use_cuda,
-                                     readout_frac=0.1f0, seq_len=L)
+                                     readout_frac=0.1f0, seq_len=L,
+                                     lr_ssm, weight_decay=wd,
+                                     cosine_schedule=cosine, gc_interval=gc_int)
             copying_results[L] = results
         end
 
@@ -547,7 +576,9 @@ function main()
                                        mnist_loss, intensity_to_phase;
                                        C_in=mnist_C, D_hidden, n_classes=10,
                                        n_epochs, batchsize, lr, seed, use_cuda,
-                                       readout_frac=0.25f0, seq_len=mnist_L)
+                                       readout_frac=0.25f0, seq_len=mnist_L,
+                                       lr_ssm, weight_decay=wd,
+                                       cosine_schedule=cosine, gc_interval=gc_int)
 
         print_mnist_table(mnist_results)
     end
