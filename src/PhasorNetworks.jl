@@ -1,17 +1,14 @@
 module PhasorNetworks
 
-export 
+export
 #types
-SpikeTrain, 
-CoupledChain,
-CoupledLayerOutput, 
+SpikeTrain,
 SpikeTrainGPU,
 MakeSpiking,
 LocalCurrent,
-SpikingArgs, 
-SpikingCall, 
+SpikingArgs,
+SpikingCall,
 CurrentCall,
-SpikingArgs_NN,
 TrackOutput,
 SolutionType,
 PhaseSolution,
@@ -95,9 +92,6 @@ reconstruct_from_current,
 
 #network
 attend,
-solve_coupled,
-get_layer_potential,
-get_layer_phase,
 variance_scaling,
 dense_onehot,
 Codebook,

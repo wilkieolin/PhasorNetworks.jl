@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PhasorNetworks.jl is a Julia package for phasor neural networks combining oscillatory computing, neuromorphic engineering, and Vector Symbolic Architectures (VSA). Information is represented as phases (angles in [-1, 1] in units of pi) rather than scalar activations. Networks can execute via atemporal floating-point computation or via coupled oscillator ODEs producing spike trains.
+PhasorNetworks.jl is a Julia package for phasor neural networks combining oscillatory computing, neuromorphic engineering, and Vector Symbolic Architectures (VSA). Information is represented as phases (angles in [-1, 1] in units of pi) rather than scalar activations.
+
+The architecture is built on a unified State Space Model (SSM): each layer of neurons is defined by a single equation `dz/dt = k*z + W*I(t)` where `k = lambda + i*omega` is a per-channel complex eigenvalue. This equation can be evaluated in multiple equivalent modes: discrete (phase matrices, causal convolution, FFT), or continuous ODE (spiking/current input). The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) links the modes.
 
 Built on Lux.jl (functional neural network framework), with Zygote.jl for AD, DifferentialEquations.jl for ODE solving, and CUDA.jl for GPU acceleration with hand-written kernels.
 
@@ -33,24 +35,43 @@ There is no linter or formatter configured. Julia 1.11+ is required.
 
 ## Architecture
 
-### Three Execution Modes via Multiple Dispatch
+### Unified SSM Model
 
-Every layer supports three calling conventions through Julia's multiple dispatch:
+Every layer implements a single defining equation with per-channel oscillator dynamics:
 
-1. **Phase mode** (`AbstractArray` input) — direct floating-point phase computation, fast inference
-2. **Spiking mode** (`SpikingCall` input) — event-driven ODE integration via `oscillator_bank`
-3. **Current mode** (`CurrentCall` input) — continuous current input, intermediate representation
+    dz_c/dt = k_c * z_c + W * I(t),  where k_c = lambda_c + i*omega_c
+
+This equation is evaluated via multiple dispatch on the input type:
+
+1. **2D Phase/Complex** (`AbstractArray{<:Phase}` or `AbstractArray{<:Complex}`) — direct linear transform `W*x + bias`, fast single-step inference
+2. **3D Phase** (`AbstractArray{<:Phase, 3}`) — Dirac discretization + causal convolution via `causal_conv_dirac`, returns Phase
+3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — weight mixing + causal convolution via `phasor_kernel` + `causal_conv` (Toeplitz or FFT)
+4. **SpikingCall** — converts to CurrentCall, then ODE integration
+5. **CurrentCall** — continuous ODE: `dz/dt = k*z + W*I(t)`, solved via DifferentialEquations.jl
+
+The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) is mathematically equivalent to the continuous ODE, linking all modes.
 
 ### Lux Layer Contract
 
 All layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, state) -> (output, state)`. Must implement `Lux.initialparameters(rng, layer)` and `Lux.initialstates(rng, layer)`. Trainable values go in parameters, fixed values in state.
 
+### Per-Channel Dynamics Parameters
+
+Each layer has per-channel trainable dynamics:
+- `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable, parameterized as `lambda = -exp(log_neg_lambda)`)
+- `omega` — `(out,)` Float32, per-channel angular frequency (trainable or fixed in state)
+- `weight` — `(out, in)` Float32, connection weights
+
+Init modes: `:default` (uniform dynamics), `:uniform` (spread omega), `:hippo` (HiPPO-LegS multi-timescale)
+
 ### Data Flow
 
 ```
-Input → Phase Encoding (angle_to_complex / phase_to_train)
-      → Network Layers (PhasorDense / PhasorConv / PhasorAttention)
-      → Codebook (similarity-based classification)
+Input → Encoding (Phase, complex, or spike train)
+      → Network Layers (PhasorDense / PhasorConv / PhasorSTFT / PhasorAttention)
+      │   Discrete path: weight mixing → causal_conv(phasor_kernel, input)
+      │   ODE path:      dz/dt = k*z + W*I(t) via oscillator_bank
+      → Readout (Codebook / SSMReadout — similarity-based classification)
       → Loss & Metrics
 ```
 
@@ -58,14 +79,15 @@ Input → Phase Encoding (angle_to_complex / phase_to_train)
 
 | File | Role |
 |------|------|
-| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase` |
-| `domains.jl` | Phase↔complex↔potential↔spike conversions, kernels, normalization, `bias_to_complex_offset` |
-| `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
-| `network.jl` | `PhasorDense`, `PhasorConv`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
+| `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
+| `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
+| `network.jl` | `PhasorDense`, `PhasorConv`, `PhasorSTFT`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, encoding helpers, spiking dispatch, deprecated `PhasorSSM` compat |
 | `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
+| `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
 | `gpu.jl` | CUDA kernels mirroring CPU paths for spike processing, scatter-add, similarity |
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
-| `network_complex.jl` | Complex-native `PhasorDenseComplex` variant (in development on `cmpx_layers`) |
 
 ### Key Type Aliases
 
@@ -83,11 +105,11 @@ Use `Float32` for all neural data. Write `1.0f0` not `1.0`. GPU kernels require 
 
 Phases are represented as `Phase` values in [-1, 1] (units of pi). Producer functions (`complex_to_angle`, `soft_angle`, `remap_phase`, `random_symbols`, `time_to_phase`, `potential_to_phase`, `angular_mean`) return `Phase` arrays. Network layers (`PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, `attend`, `PhasorAttention`) dispatch on `AbstractArray{<:Phase}` for their phase-mode forward pass. Use `Phase.()` to wrap raw `Float32` data at network input boundaries. Arithmetic on `Phase` promotes to `Float32` — use `remap_phase(x)` after arithmetic that may exceed bounds. Use circular distance metrics (`arc_error`) not naive subtraction for phase comparisons.
 
-### Bias Application: Post-ODE Only
+### Bias Application
 
-**Never inject bias during ODE solving** — it causes adjoint gradient instability (NaN/Inf). Always:
-1. Solve ODE with `use_bias=false`
-2. Apply bias afterward with `bias_to_complex_offset(bias, tspan; spk_args)`
+In **discrete mode** (3D complex/Phase), bias is applied directly as a complex offset after causal convolution.
+
+In **ODE mode** (CurrentCall), bias can be injected as periodic current via `bias_current`, or applied post-hoc via `bias_to_complex_offset(bias, tspan; spk_args)`. For training stability, prefer post-ODE application when gradients are unstable.
 
 ### Zygote AD Compatibility
 

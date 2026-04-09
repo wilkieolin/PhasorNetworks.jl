@@ -27,8 +27,8 @@ Pkg.add("PhasorNetworks")
 ```julia
 using PhasorNetworks
 
-# Create a basic phasor network
-spk_args = SpikingArgs_NN(
+# Create spiking arguments for ODE-mode execution
+spk_args = SpikingArgs(
     t_period = 1.0f0,
     t_window = 0.01f0,
     threshold = 0.001f0

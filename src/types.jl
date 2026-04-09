@@ -244,10 +244,8 @@ Controls neuron dynamics, spike generation, and numerical integration.
 - `spike_kernel::Union{Symbol, Function}`: Spike kernel function (e.g., :gaussian) or custom function
 - `solver`: ODE solver for neural dynamics (typically Heun())
 - `solver_args::Dict`: Arguments for the ODE solver
-- `update_fn::Function`: Update function for neural state
 
 Used in both simulation and training of spiking neural networks.
-See also: [`SpikingArgs_NN`](@ref) for neural network specific variant.
 """
 struct SpikingArgs
     leakage::Float32
@@ -283,61 +281,6 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             spike_kernel,
             solver,
             solver_args,)
-end
-
-"""
-    SpikingArgs_NN(;
-        leakage::Real = -0.2f0,
-        t_period::Real = 1.0f0,
-        t_window::Real = 0.01f0,
-        spk_scale::Real = 1.0f0,
-        threshold::Real = 0.001f0,
-        spike_kernel = :gaussian,
-        solver = Heun(),
-        solver_args = Dict(...),
-        update_fn::Function)
-
-Neural network specific variant of spiking arguments configuration.
-
-# Arguments
-- `leakage`: Neuron leakage rate (default: -0.2f0)
-- `t_period`: Time period for oscillation (default: 1.0f0)
-- `t_window`: Time window for spike integration (default: 0.01f0)
-- `spk_scale`: Scaling factor for spikes (default: 1.0f0)
-- `threshold`: Spike threshold value (default: 0.001f0)
-- `spike_kernel`: Type of spike kernel to use (default: :gaussian)
-- `solver`: ODE solver to use (default: Heun())
-- `solver_args`: Dictionary of solver arguments
-- `update_fn`: Function for updating neuron state
-
-# Returns
-- SpikingArgs configuration object for neural networks
-"""
-function SpikingArgs_NN(; leakage::Real = -0.2f0,
-    t_period::Real = 1.0f0,
-    t_window::Real = 0.01f0,
-    spk_scale::Real = 1.0f0,
-    steepness::Real = 1000.0f0,
-    threshold::Real = 0.001f0,
-    spike_kernel = :gaussian,
-    solver = Heun(),
-    solver_args = Dict(:dt => 0.01f0,
-                    :adaptive => false,
-                    :dense => false,
-                    :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                    :save_start => true),
-    update_fn::Function)
-
-    return SpikingArgs(Float32(leakage),
-            Float32(t_period),
-            Float32(t_window),
-            Float32(spk_scale),
-            Float32(steepness),
-            Float32(threshold),
-            spike_kernel,
-            solver,
-            solver_args,
-            update_fn)
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)

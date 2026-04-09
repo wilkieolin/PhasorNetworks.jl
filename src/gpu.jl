@@ -367,10 +367,10 @@ function f32_tspan(tspan::Tuple{<:Real, <:Real})
 end
 
 function oscillator_bank(u0::CuArray, dzdt::Function; tspan::Tuple{<:Float32, <:Float32}, spk_args::SpikingArgs)
-    #solve the memory compartment
+    #solve the ODE
     prob = ODEProblem(dzdt, u0, tspan)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    
+
     return sol
 end
 
@@ -387,8 +387,7 @@ Simulates the dynamics of a bank of oscillators driven by spike inputs.
 
 # Implementation
 Sets up and solves the ODE system:
-dz/dt = update_fn(z) + spike_current(x, t)
-where z is the complex potential of each neuron.
+dz/dt = k*z + spike_current(x, t), where k = leakage + i*(2pi/t_period)
 
 See also: [`oscillator_bank`](@ref) in spiking.jl for CPU version
 """
@@ -402,77 +401,6 @@ function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0
 
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
-    return sol
-end
-
-function oscillator_bank(x::SpikeTrainGPU, w::AbstractMatrix, b::AbstractVecOrMat; kwargs...)
-    return oscillator_bank(x, cu(w), cu(b); kwargs...)
-end
-
-function oscillator_bank(x::SpikeTrainGPU{2}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    tspan = tspan |> f32_tspan
-    #get the number of batches & output neurons
-    output_shape = (size(w, 1), x.shape[2])
-    u0 = CUDA.zeros(ComplexF32, output_shape)
-
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) + w * spike_current(x, t, spk_args) .+ bias_current(b, t, x.offset, spk_args)
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    #return full solution
-    return sol
-end
-
-"""
-    oscillator_bank(x::SpikeTrainGPU{3}, w::CuArray, b::CuArray; tspan, spk_args) -> ODESolution
-
-GPU-optimized neural network layer simulation for 3D spike trains (batched 2D data).
-Implements the weighted connections and bias terms for network layers.
-
-# Arguments
-- `x::SpikeTrainGPU{3}`: Input spike train with shape (features, spatial_dim, batch)
-- `w::CuArray`: Weight matrix
-- `b::CuArray`: Bias terms
-- `tspan`: Time span for simulation
-- `spk_args::SpikingArgs`: Neuron parameters
-
-# Implementation
-Solves the neural ODE:
-dz/dt = update_fn(z) + W * spike_current(x, t) + bias_current(b, t)
-
-Returns an ODESolution object containing the network dynamics.
-
-See also: Other `oscillator_bank` methods for different dimensionalities
-"""
-function oscillator_bank(x::SpikeTrainGPU{3}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    tspan = tspan |> f32_tspan
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-    #get the number of batches & output neurons
-    output_shape = (size(w, 1), x.shape[2], x.shape[3])
-    u0 = CUDA.zeros(ComplexF32, output_shape)
-
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + batched_mul(x, spike_current(x, t, spk_args)) .+ bias_current(b, t, x.offset, spk_args)
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    #return full solution
-    return sol
-end
-
-function oscillator_bank(x::SpikeTrainGPU{4}, w::CuArray, b::CuArray; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    tspan = tspan |> f32_tspan
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-    #get the number of batches, channels, & output neurons
-    output_shape = (size(w, 1), size(w,2), x.shape[2], x.shape[3])
-    u0 = CUDA.zeros(ComplexF32, output_shape)
-
-    #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + batched_mul(x, spike_current(x, t, spk_args)) .+ bias_current(b, t, x.offset, spk_args)
-    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
-
-    #return full solution
     return sol
 end
 

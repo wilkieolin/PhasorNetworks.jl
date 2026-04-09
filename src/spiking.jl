@@ -357,76 +357,67 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
 end
 
 function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the memory compartment
+    #solve the ODE
     prob = ODEProblem(dzdt, u0, tspan)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    
+
     return sol
 end
 
 function oscillator_bank(u0::AbstractArray, dzdt::Function, params::LuxParams; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the memory compartment with external parameters passed
+    #solve the ODE with external parameters
     prob = ODEProblem(dzdt, u0, tspan, params)
     sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
-    
+
     return sol
 end
 
+"""
+    oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params, state)
+
+Solve the layer ODE driven by the current in `x`, applying the layer's weight
+matrix at each time step.
+
+Uses the unified SSM equation: dz/dt = k*z + W*I(t) [+ bias_current]
+where k = lambda + i*omega are per-channel eigenvalues read from params/state.
+
+Expects `params` to contain:
+- `weight` — (out, in) real weight matrix
+- `log_neg_lambda` — (out,) log-parameterized decay rates
+- `bias_real`, `bias_imag` — (out,) complex bias (when use_bias=true)
+
+And `state` (or params, when `layer.trainable_omega`) to contain:
+- `omega` — (out,) angular frequencies
+"""
 function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
-    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args,)
+    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args)
 end
 
 function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, use_bias::Bool=true)
-    #set up compartments for each sample
-    output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
-    u0 = similar(output_sample, ComplexF32)
+    # Determine output shape from a sample
+    sample_I = x.current_fn(0.0f0)
+    out_shape = ndims(sample_I) >= 2 ? (layer.out_dims, size(sample_I)[2:end]...) : (layer.out_dims,)
+    u0 = similar(sample_I, ComplexF32, out_shape)
     ignore_derivatives() do
-        u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+        u0 .= zero(ComplexF32)
     end
 
-    #resonate in time with the input spikes, applying the kernel to the spike current
+    has_bias = use_bias && haskey(params, :bias_real)
+
     function dzdt(u, p, t)
-        if layer.trainable_leakage
-            leak_scale = p.leakage
-        else
-            leak_scale = state.leakage
+        λ = -exp.(p.log_neg_lambda)
+        ω_val = hasproperty(layer, :trainable_omega) && layer.trainable_omega ? p.omega : state.omega
+        k = ComplexF32.(λ .+ im .* ω_val)
+        I_transformed = p.weight * x.current_fn(t)
+        result = k .* u .+ I_transformed
+        if has_bias
+            bias_val = p.bias_real .+ 1im .* p.bias_imag
+            result = result .+ bias_current(bias_val, t, x.offset, spk_args)
         end
-
-        if layer.trainable_period
-            period_scale = p.period
-        else
-            period_scale = state.period
-        end
-
-        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        biasing_current = bias_current(p.bias, t, x.offset, spk_args)
-        return resonant_update(u, leak_scale .* spk_args.leakage, period_scale .* spk_args.t_period) .+ transformed_current .+ biasing_current
+        return result
     end
 
-    function dzdt_nobias(u, p, t)
-        if layer.trainable_leakage
-            leak_scale = p.leakage
-        else
-            leak_scale = state.leakage
-        end
-
-        if layer.trainable_period
-            period_scale = p.period
-        else
-            period_scale = state.period
-        end
-
-        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        return resonant_update(u, leak_scale .* spk_args.leakage, period_scale .* spk_args.t_period) .+ transformed_current
-    end
-
-     #solve the memory compartment using the base oscillator_bank method
-    if use_bias
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
-    else
-        sol = oscillator_bank(u0, dzdt_nobias, tspan=tspan, spk_args=spk_args, params)
-    end
-
     return sol
 end
 

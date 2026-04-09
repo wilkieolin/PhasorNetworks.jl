@@ -434,17 +434,16 @@ function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     return a(current_call, params, state)
 end
 
-# ---- CurrentCall dispatch: single-stage ODE ----
+# ---- CurrentCall dispatch: continuous ODE mode ----
 #
-# Solves dz_c/dt = k_c · z_c + Σ_j W[c,j] · I_j(t) directly.
-# Each output oscillator integrates weighted spike currents at its own
-# eigenvalue k_c. No input oscillator stage is needed because all layers
-# share the same resonant period (equal-period constraint).
+# Solves dz_c/dt = k_c · z_c + Σ_j W[c,j] · I_j(t)
+# where k_c = λ_c + iω_c is the per-channel complex eigenvalue.
+# This is the continuous-time equivalent of the discrete causal convolution
+# used in the 3D complex/Phase dispatch paths.
 #
 # For SSM-mode layers (init_mode != :default) with multi-period inputs,
 # the solution is sampled at period boundaries to produce a (C_out, L, B)
-# phase/spiking output. Default-mode layers always use the legacy
-# per-solver-step output (continuous ODE integration over the full tspan).
+# phase/spiking output. Default-mode layers use per-solver-step output.
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     spk_args = x.spk_args

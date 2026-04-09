@@ -286,15 +286,15 @@ function hippo_tests()
 end
 
 function phasor_ssm_layer_tests()
-    @testset "PhasorSSM layer" begin
+    @testset "PhasorDense SSM layer" begin
         rng = Xoshiro(42)
         in_dim, out_dim = 8, 16
         L, B = 10, 4
 
-        layer = PhasorSSM(in_dim => out_dim, normalize_to_unit_circle)
+        layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
         ps, st = Lux.setup(rng, layer)
 
-        # Parameter shapes (PhasorSSM now returns PhasorDense)
+        # Parameter shapes
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
         @test size(st.omega) == (out_dim,)
@@ -318,7 +318,7 @@ function phasor_ssm_layer_tests()
         @test y != y2
 
         # HiPPO init
-        layer_hippo = PhasorSSM(in_dim => out_dim, identity; init=:hippo)
+        layer_hippo = PhasorDense(in_dim => out_dim, identity; init_mode=:hippo, use_bias=false)
         ps_h, st_h = Lux.setup(rng, layer_hippo)
         @test size(ps_h.weight) == (out_dim, in_dim)
         y_h, _ = layer_hippo(x, ps_h, st_h)
@@ -405,8 +405,8 @@ function ssm_chain_tests()
         L, B = 10, 4
 
         model = Chain(
-            PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
-            PhasorSSM(D_hidden => D_hidden, identity),
+            PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+            PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
         ps, st = Lux.setup(rng, model)
@@ -426,7 +426,7 @@ function ssm_gradient_tests()
         in_dim, out_dim = 4, 8
         L, B = 6, 2
 
-        layer = PhasorSSM(in_dim => out_dim, normalize_to_unit_circle)
+        layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
         ps, st = Lux.setup(rng, layer)
 
         x = randn(ComplexF32, in_dim, L, B)
@@ -453,11 +453,11 @@ function ssm_gpu_tests()
         rng = Xoshiro(42)
         device = gpu_device()
 
-        @testset "PhasorSSM forward on GPU" begin
+        @testset "PhasorDense SSM forward on GPU" begin
             in_dim, out_dim = 8, 16
             L, B = 10, 4
 
-            layer = PhasorSSM(in_dim => out_dim, normalize_to_unit_circle)
+            layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
             ps, st = Lux.setup(rng, layer)
             ps = ps |> device
             st = st |> device
@@ -481,8 +481,8 @@ function ssm_gpu_tests()
             L, B = 10, 4
 
             model = Chain(
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
-                PhasorSSM(D_hidden => D_hidden, identity),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -662,9 +662,9 @@ function ssm_attention_chain_tests()
 
         @testset "self-attention in chain" begin
             model = Chain(
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                PhasorSSM(D_hidden => D_hidden, identity),
+                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -677,9 +677,9 @@ function ssm_attention_chain_tests()
 
         @testset "cross-attention in chain" begin
             model = Chain(
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
                 SSMCrossAttention(D_hidden => D_hidden, L, normalize_to_unit_circle),
-                PhasorSSM(D_hidden => D_hidden, identity),
+                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -692,7 +692,7 @@ function ssm_attention_chain_tests()
 
         @testset "gradient through chain with self-attention" begin
             model = Chain(
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
                 SSMReadout(D_hidden => n_classes),
             )
@@ -759,8 +759,8 @@ function ssm_spiking_dispatch_tests()
         tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
         sc = SpikingCall(train, spk_args, tspan_spk)
 
-        @testset "PhasorSSM SpikingCall dispatch" begin
-            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+        @testset "PhasorDense SSM SpikingCall dispatch" begin
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
             ps, st = Lux.setup(rng, layer)
 
             y, st_new = layer(sc, ps, st)
@@ -770,8 +770,8 @@ function ssm_spiking_dispatch_tests()
             @test all(isfinite, Float32.(y))
         end
 
-        @testset "PhasorSSM CurrentCall dispatch" begin
-            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+        @testset "PhasorDense SSM CurrentCall dispatch" begin
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
             ps, st = Lux.setup(rng, layer)
 
             cc = CurrentCall(sc)
@@ -782,9 +782,9 @@ function ssm_spiking_dispatch_tests()
             @test all(isfinite, Float32.(y))
         end
 
-        @testset "PhasorSSM potential return type" begin
-            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle,
-                              return_type=SolutionType(:potential))
+        @testset "PhasorDense SSM potential return type" begin
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
             sol, st_new = layer(sc, ps, st)
@@ -795,9 +795,9 @@ function ssm_spiking_dispatch_tests()
             @test size(sampled) == (C_out, B)
         end
 
-        @testset "PhasorSSM spiking return type" begin
-            layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle,
-                              return_type=SolutionType(:spiking))
+        @testset "PhasorDense SSM spiking return type" begin
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking))
             ps, st = Lux.setup(rng, layer)
 
             result, st_new = layer(sc, ps, st)
@@ -854,7 +854,7 @@ function ssm_spiking_correlation_tests()
         L, B = 8, 3
 
         # Phase-returning layer for both Dirac and spiking comparison
-        layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
+        layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
         ps, st = Lux.setup(rng, layer)
 
         # Random phase input
@@ -903,11 +903,11 @@ function ssm_spiking_chain_tests()
         C_in, D_hidden, n_classes = 4, 8, 5
         L, B = 6, 2
 
-        @testset "MakeSpikingSSM → PhasorSSM → SSMReadout" begin
+        @testset "MakeSpikingSSM → PhasorDense → SSMReadout" begin
             model = Chain(
                 MakeSpikingSSM(spk_args),
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle,
-                          return_type=SolutionType(:spiking)),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
+                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -919,11 +919,11 @@ function ssm_spiking_chain_tests()
             @test all(isfinite, y)
         end
 
-        @testset "MakeSpikingSSM → PhasorSSM → SSMSelfAttention → SSMReadout" begin
+        @testset "MakeSpikingSSM → PhasorDense → SSMSelfAttention → SSMReadout" begin
             model = Chain(
                 MakeSpikingSSM(spk_args),
-                PhasorSSM(C_in => D_hidden, normalize_to_unit_circle,
-                          return_type=SolutionType(:spiking)),
+                PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
+                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
                 SSMReadout(D_hidden => n_classes),
             )
