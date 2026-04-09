@@ -7,13 +7,18 @@ by running two benchmarks with three initialization conditions:
 
   1. Selective Copying (synthetic) — recall a phase pattern placed at position 0
      after a long blank gap. Tested at multiple sequence lengths.
-  2. Sequential MNIST (pixel-by-pixel) — classify MNIST digits processed as
-     784-step sequences with 1 channel per timestep.
+  2. Sequential FashionMNIST (column-by-column) — classify garments processed as
+     28-step sequences with 28 channels per timestep (one column per step).
 
 Three conditions:
   - hippo:        HiPPO-LegS multi-timescale initialization, scaled for sequence length
   - uniform:      uniformly spread frequencies, moderate decay scaled for sequence length
   - short-memory: deliberately high leakage relative to sequence, cannot retain info
+
+Ablation mode (--benchmark ablation):
+  Tests the contribution of individual architectural components:
+  - FashionMNIST: compares models with and without the PhasorSTFT input layer
+  - Copying: compares models with and without SSMSelfAttention
 
 Key insight: PhasorDense uses Δt=1 in its convolutional mode, so the kernel
 magnitude at lag n is |K[n]| = exp(λ·n).  For a signal at position 0 to survive
@@ -24,8 +29,9 @@ so the memory window matches the target sequence length.
 Usage:
   julia --project=. demos/long_range_demo.jl --benchmark both --epochs 10
   julia --project=. demos/long_range_demo.jl --benchmark copying --copy-lengths 128,256,512
-  julia --project=. demos/long_range_demo.jl --benchmark mnist --epochs 15
-  julia --project=. demos/long_range_demo.jl --benchmark mnist --epochs 20 --lr 0.008 --lr-ssm 0.002 --weight-decay 0.0001 --cosine-schedule
+  julia --project=. demos/long_range_demo.jl --benchmark fmnist --epochs 15
+  julia --project=. demos/long_range_demo.jl --benchmark ablation --epochs 15
+  julia --project=. demos/long_range_demo.jl --benchmark fmnist --epochs 20 --lr 0.008 --lr-ssm 0.002 --weight-decay 0.0001 --cosine-schedule
 =#
 
 using PhasorNetworks
@@ -66,7 +72,7 @@ function parse_args()
             help = "disable CUDA even if available"
             action = :store_true
         "--benchmark"
-            help = "which benchmark to run: copying, mnist, or both"
+            help = "which benchmark to run: copying, fmnist, both, or ablation"
             arg_type = String
             default = "both"
         "--d-token"
@@ -86,9 +92,9 @@ function parse_args()
             arg_type = String
             default = "128,256,512"
         "--pixels-per-step"
-            help = "pixels grouped per timestep for sequential MNIST (1=full 784, 4=196 steps)"
+            help = "pixels grouped per timestep for sequential FashionMNIST (28=column-wise, 1=full 784)"
             arg_type = Int
-            default = 4
+            default = 28
         "--lr-ssm"
             help = "learning rate for SSM dynamics params (log_neg_lambda, omega). 0 = use --lr for all."
             arg_type = Float64
@@ -169,23 +175,22 @@ end
 # ================================================================
 
 """
-    load_sequential_mnist(; batchsize, pixels_per_step)
+    load_sequential_fmnist(; batchsize, pixels_per_step)
 
-Load MNIST and reshape for sequential processing.
+Load FashionMNIST and reshape for sequential processing.
 
 Groups `pixels_per_step` pixels into each timestep as separate channels.
-With pixels_per_step=1: (784, 1, N) → L=784, C=1 (classic sMNIST, very slow)
-With pixels_per_step=4: (196, 4, N) → L=196, C=4 (practical default)
+With pixels_per_step=28: (28, 28, N) → L=28, C=28 (column-wise, fast)
+With pixels_per_step=1:  (784, 1, N) → L=784, C=1 (pixel-wise, slow)
 
-The raw data is returned as (L × C × N) Float32 for use with `psk_encode`,
-which transposes to (C × L × N) complex.
+The raw data is returned as (L × C × N) Float32.
 
 Returns (train_loader, test_loader, L, C_in).
 """
-function load_sequential_mnist(; batchsize::Int=64, pixels_per_step::Int=4)
-    println("Loading MNIST...")
-    train_data = MNIST(split=:train)
-    test_data  = MNIST(split=:test)
+function load_sequential_fmnist(; batchsize::Int=64, pixels_per_step::Int=28)
+    println("Loading FashionMNIST...")
+    train_data = FashionMNIST(split=:train)
+    test_data  = FashionMNIST(split=:test)
 
     n_pixels = 784
     @assert n_pixels % pixels_per_step == 0 "784 must be divisible by pixels_per_step"
@@ -209,6 +214,10 @@ end
 # 4. Model Construction
 # ================================================================
 
+# Convert Phase arrays to complex (for attention layers); pass complex through unchanged
+_to_complex(x::AbstractArray{<:Phase}) = angle_to_complex(x)
+_to_complex(x::AbstractArray{<:Complex}) = x
+
 """
     create_model(; C_in, D_hidden, n_classes, init_mode, readout_frac)
 
@@ -223,6 +232,37 @@ function create_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
                     init_mode=init_mode, use_bias=false),
         SSMReadout(D_hidden => n_classes; readout_frac=readout_frac),
     )
+end
+
+"""
+    create_ablation_model(; C_in, D_hidden, n_classes, use_stft, use_attention, readout_frac)
+
+Build a model with optional PhasorSTFT and SSMSelfAttention for ablation testing.
+"""
+function create_ablation_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
+                                 use_stft::Bool=true, use_attention::Bool=true,
+                                 readout_frac::Float32=0.25f0)
+    layers = []
+
+    # Input layer: PhasorSTFT (trainable omega, outputs complex) or PhasorDense
+    if use_stft
+        push!(layers, PhasorSTFT(C_in => D_hidden, normalize_to_unit_circle))
+    else
+        push!(layers, PhasorDense(C_in => D_hidden, normalize_to_unit_circle; use_bias=false))
+    end
+
+    # Optional attention (requires complex input; Phase output from prior layer
+    # must be converted to complex on the unit circle)
+    if use_attention
+        push!(layers, Lux.WrappedFunction(_to_complex))
+        push!(layers, SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle))
+    end
+
+    # Second SSM layer + readout
+    push!(layers, PhasorDense(D_hidden => D_hidden, identity; use_bias=false))
+    push!(layers, SSMReadout(D_hidden => n_classes; readout_frac=readout_frac))
+
+    return Chain(Tuple(layers)...)
 end
 
 """
@@ -244,72 +284,61 @@ influence at position L, we need |λ| ≈ O(1/L).
 
 Must be called BEFORE moving to GPU.
 """
+# Helper: apply a function to all layers that have log_neg_lambda in params
+function _map_ssm_layers(fn_ps, fn_st, ps::NamedTuple, st::NamedTuple)
+    ps_dict = Dict(pairs(ps))
+    st_dict = Dict(pairs(st))
+    for k in keys(ps)
+        layer_ps = ps[k]
+        layer_st = get(st, k, NamedTuple())
+        if layer_ps isa NamedTuple && haskey(layer_ps, :log_neg_lambda)
+            ps_dict[k] = fn_ps(layer_ps)
+            if layer_st isa NamedTuple
+                st_dict[k] = fn_st(layer_st)
+            end
+        end
+    end
+    return NamedTuple(ps_dict), NamedTuple(st_dict)
+end
+
 function scale_dynamics_for_length(ps::NamedTuple, st::NamedTuple,
                                    seq_len::Int, D_hidden::Int, init_mode::Symbol)
     if init_mode == :hippo
         λ_base, ω_base = hippo_legs_diagonal(D_hidden)
-        # HiPPO gives λ ∈ [-0.5, -(N-0.5)] with log spacing.
-        # Scale so the slowest channel (|λ|=0.5) has memory window = 2*seq_len:
-        #   |λ_scaled| = |λ_base| / seq_len  →  slowest: 0.5/L, fastest: (N-0.5)/L
-        #   At lag L: exp(-0.5) ≈ 0.61 (slowest), exp(-(N-0.5)) ≈ 0 (fastest)
         scale = Float32(seq_len)
         λ_scaled = λ_base ./ scale
         ω_scaled = ω_base ./ scale
         log_neg_lambda = Float32.(log.(-λ_scaled))
         omega = ω_scaled
     else  # :uniform
-        # Moderate decay: exp(-2/L * L) = exp(-2) ≈ 0.13 at full sequence length
         λ_val = 2f0 / Float32(seq_len)
         log_neg_lambda = fill(Float32(log(λ_val)), D_hidden)
         omega = Float32.(collect(range(0.1f0, 1.5f0; length=D_hidden)))
     end
 
-    ps_new = merge(ps, (
-        layer_1 = merge(ps.layer_1, (log_neg_lambda = log_neg_lambda,)),
-        layer_2 = merge(ps.layer_2, (log_neg_lambda = log_neg_lambda,)),
-    ))
-    st_new = merge(st, (
-        layer_1 = merge(st.layer_1, (omega = omega,)),
-        layer_2 = merge(st.layer_2, (omega = omega,)),
-    ))
-
-    return ps_new, st_new
+    return _map_ssm_layers(
+        lp -> merge(lp, (log_neg_lambda = log_neg_lambda,)),
+        ls -> haskey(ls, :omega) ? merge(ls, (omega = omega,)) : ls,
+        ps, st)
 end
 
 """
     force_short_memory(ps, st, seq_len; memory_frac)
 
 Override parameters to create a short-memory baseline relative to sequence length.
-Sets |λ| = 20/L so memory decays within ~L/20 steps (5% of sequence).
+Sets |λ| = 1/(memory_frac*L) so memory decays within ~memory_frac*L steps.
 Must be called BEFORE moving to GPU.
 """
 function force_short_memory(ps::NamedTuple, st::NamedTuple, seq_len::Int;
                             memory_frac::Float32=0.05f0)
-    # Memory decays to exp(-1) within memory_frac * seq_len steps
-    # |λ| = 1 / (memory_frac * L)
     decay_val = 1f0 / (memory_frac * Float32(seq_len))
     log_val = Float32(log(decay_val))
-
-    ps_new = merge(ps, (
-        layer_1 = merge(ps.layer_1, (
-            log_neg_lambda = fill(log_val, size(ps.layer_1.log_neg_lambda)),
-        )),
-        layer_2 = merge(ps.layer_2, (
-            log_neg_lambda = fill(log_val, size(ps.layer_2.log_neg_lambda)),
-        )),
-    ))
-
     omega_val = 1.0f0
-    st_new = merge(st, (
-        layer_1 = merge(st.layer_1, (
-            omega = fill(omega_val, size(st.layer_1.omega)),
-        )),
-        layer_2 = merge(st.layer_2, (
-            omega = fill(omega_val, size(st.layer_2.omega)),
-        )),
-    ))
 
-    return ps_new, st_new
+    return _map_ssm_layers(
+        lp -> merge(lp, (log_neg_lambda = fill(log_val, size(lp.log_neg_lambda)),)),
+        ls -> haskey(ls, :omega) ? merge(ls, (omega = fill(omega_val, size(ls.omega)),)) : ls,
+        ps, st)
 end
 
 # ================================================================
@@ -482,9 +511,9 @@ function print_copying_table(results_by_length::Dict, lengths::Vector{Int})
     println("="^64)
 end
 
-function print_mnist_table(results::Dict)
+function print_fmnist_table(results::Dict)
     println("\n" * "="^48)
-    println("  SEQUENTIAL MNIST RESULTS")
+    println("  SEQUENTIAL FASHIONMNIST RESULTS")
     println("="^48)
     @printf("  %-14s | %-14s\n", "Condition", "Final Accuracy")
     println("  " * "-"^14 * "-|-" * "-"^14)
@@ -496,8 +525,70 @@ function print_mnist_table(results::Dict)
     println("="^48)
 end
 
+function print_ablation_table(results::Dict)
+    println("\n" * "="^56)
+    println("  ABLATION RESULTS")
+    println("="^56)
+    @printf("  %-30s | %-14s\n", "Configuration", "Final Accuracy")
+    println("  " * "-"^30 * "-|-" * "-"^14)
+    for (name, res) in sort(collect(results); by=first)
+        @printf("  %-30s | %12.2f%%\n", name, res.accs[end] * 100)
+    end
+    println("="^56)
+end
+
 # ================================================================
-# 9. Main
+# 9. Ablation Runner
+# ================================================================
+
+"""
+    run_ablation(name, train_loader, test_loader, loss_fn, encode_fn; kwargs...)
+
+Run a single ablation configuration: build a model with the specified
+use_stft and use_attention flags, train it, and return results.
+"""
+function run_ablation(name::String, train_loader, test_loader,
+                      loss_fn::Function, encode_fn::Function;
+                      C_in::Int, D_hidden::Int, n_classes::Int,
+                      n_epochs::Int, batchsize::Int, lr::Float64,
+                      seed::Int, use_cuda::Bool, readout_frac::Float32,
+                      use_stft::Bool, use_attention::Bool,
+                      lr_ssm::Float64=0.0, weight_decay::Float64=0.0,
+                      cosine_schedule::Bool=false, gc_interval::Int=50)
+
+    device = use_cuda ? gpu_device() : cpu_device()
+    rng = Xoshiro(seed)
+
+    model = create_ablation_model(; C_in, D_hidden, n_classes,
+                                    use_stft, use_attention, readout_frac)
+    ps, st = Lux.setup(rng, model)
+    ps = ps |> device
+    st = st |> device
+
+    n_params = _count(ps)
+    println("  [$name] Parameters: $n_params, STFT=$use_stft, Attention=$use_attention")
+
+    args = Args(epochs=1, batchsize=batchsize, lr=lr, use_cuda=use_cuda,
+                rng=Xoshiro(seed), lr_ssm=lr_ssm, weight_decay=weight_decay,
+                cosine_schedule=cosine_schedule, gc_interval=gc_interval)
+
+    all_losses = Float64[]
+    accs = Float64[]
+
+    for epoch in 1:n_epochs
+        losses, ps, st = train(model, ps, st, train_loader, loss_fn, args)
+        append!(all_losses, Float64.(losses))
+        acc = evaluate(model, ps, st, test_loader, device; encode_fn)
+        push!(accs, acc)
+        @printf("  [%s] Epoch %2d/%d  loss=%.4f  acc=%.4f\n",
+                name, epoch, n_epochs, mean(losses), acc)
+    end
+
+    return (losses=all_losses, accs=accs)
+end
+
+# ================================================================
+# 10. Main
 # ================================================================
 
 function main()
@@ -537,14 +628,12 @@ function main()
         println("#"^64)
         println("  D_token=$D_token, n_classes=$n_classes, n_train=$n_train")
 
-        # Generate codebook once — shared across all sequence lengths, train/test splits
         codebook = generate_copying_codebook(Xoshiro(seed), n_classes, D_token)
         copying_results = Dict{Int, Dict}()
 
         for L in copy_lens
             println("\n>>> Sequence length L=$L <<<")
 
-            # Generate train/test data from the shared codebook
             x_train, y_train = generate_copying_data(Xoshiro(seed + 1000), codebook, L, n_train)
             x_test, y_test   = generate_copying_data(Xoshiro(seed + 2000), codebook, L, n_test)
 
@@ -564,23 +653,70 @@ function main()
         print_copying_table(copying_results, copy_lens)
     end
 
-    # ---- Sequential MNIST ----
-    if benchmark in ("mnist", "both")
+    # ---- Sequential FashionMNIST ----
+    if benchmark in ("fmnist", "both")
         println("\n" * "#"^64)
-        println("  BENCHMARK: SEQUENTIAL MNIST")
+        println("  BENCHMARK: SEQUENTIAL FASHIONMNIST")
         println("#"^64)
 
-        train_loader, test_loader, mnist_L, mnist_C = load_sequential_mnist(; batchsize, pixels_per_step=pps)
+        train_loader, test_loader, fmnist_L, fmnist_C = load_sequential_fmnist(; batchsize, pixels_per_step=pps)
 
-        mnist_results = run_conditions("sMNIST-L=$mnist_L", train_loader, test_loader,
-                                       mnist_loss, intensity_to_phase;
-                                       C_in=mnist_C, D_hidden, n_classes=10,
-                                       n_epochs, batchsize, lr, seed, use_cuda,
-                                       readout_frac=0.25f0, seq_len=mnist_L,
-                                       lr_ssm, weight_decay=wd,
-                                       cosine_schedule=cosine, gc_interval=gc_int)
+        fmnist_results = run_conditions("sFashionMNIST-L=$fmnist_L", train_loader, test_loader,
+                                        mnist_loss, intensity_to_phase;
+                                        C_in=fmnist_C, D_hidden, n_classes=10,
+                                        n_epochs, batchsize, lr, seed, use_cuda,
+                                        readout_frac=0.25f0, seq_len=fmnist_L,
+                                        lr_ssm, weight_decay=wd,
+                                        cosine_schedule=cosine, gc_interval=gc_int)
 
-        print_mnist_table(mnist_results)
+        print_fmnist_table(fmnist_results)
+    end
+
+    # ---- Ablation ----
+    if benchmark == "ablation"
+        ablation_results = Dict{String, NamedTuple}()
+        common_kwargs = (; D_hidden, n_classes=10, n_epochs, batchsize, lr, seed,
+                           use_cuda, lr_ssm, weight_decay=wd,
+                           cosine_schedule=cosine, gc_interval=gc_int)
+
+        # --- FashionMNIST ablation: STFT vs no STFT ---
+        println("\n" * "#"^64)
+        println("  ABLATION: PhasorSTFT on FashionMNIST")
+        println("#"^64)
+
+        train_loader, test_loader, fmnist_L, fmnist_C = load_sequential_fmnist(; batchsize, pixels_per_step=pps)
+
+        for (name, stft) in [("fmnist+STFT", true), ("fmnist-no-STFT", false)]
+            ablation_results[name] = run_ablation(name, train_loader, test_loader,
+                                                   mnist_loss, intensity_to_phase;
+                                                   C_in=fmnist_C,
+                                                   use_stft=stft, use_attention=false,
+                                                   readout_frac=0.25f0,
+                                                   common_kwargs...)
+        end
+
+        # --- Copying ablation: attention vs no attention ---
+        println("\n" * "#"^64)
+        println("  ABLATION: SSMSelfAttention on Selective Copying")
+        println("#"^64)
+
+        L_copy = copy_lens[end]  # use longest copying length
+        codebook = generate_copying_codebook(Xoshiro(seed), n_classes, D_token)
+        x_train, y_train = generate_copying_data(Xoshiro(seed + 1000), codebook, L_copy, n_train)
+        x_test, y_test   = generate_copying_data(Xoshiro(seed + 2000), codebook, L_copy, n_test)
+        train_loader = DataLoader((x_train, y_train); batchsize, shuffle=true)
+        test_loader  = DataLoader((x_test,  y_test);  batchsize)
+
+        for (name, attn) in [("copy+attention", true), ("copy-no-attention", false)]
+            ablation_results[name] = run_ablation(name, train_loader, test_loader,
+                                                   copying_loss, identity;
+                                                   C_in=D_token,
+                                                   use_stft=false, use_attention=attn,
+                                                   readout_frac=0.1f0,
+                                                   common_kwargs...)
+        end
+
+        print_ablation_table(ablation_results)
     end
 
     println("\nDone.")

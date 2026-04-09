@@ -26,6 +26,7 @@ function ssm_tests()
         ssm_spiking_dispatch_tests()
         ssm_spiking_correlation_tests()
         ssm_spiking_chain_tests()
+        phasor_stft_tests()
     end
 end
 
@@ -787,11 +788,11 @@ function ssm_spiking_dispatch_tests()
             ps, st = Lux.setup(rng, layer)
 
             sol, st_new = layer(sc, ps, st)
-            # Returns ODE solution of coupled system (C_in + C_out, B)
+            # Returns ODE solution of single-stage system (C_out, B)
             @test !(sol isa AbstractArray)
             sampled = sol(tspan_spk[2])
             @test sampled isa AbstractArray
-            @test size(sampled) == (C_in + C_out, B)
+            @test size(sampled) == (C_out, B)
         end
 
         @testset "PhasorSSM spiking return type" begin
@@ -847,105 +848,51 @@ function ssm_spiking_dispatch_tests()
 end
 
 function ssm_spiking_correlation_tests()
-    @testset "SSM Discrete vs Spiking Correlation" begin
+    @testset "SSM Dirac vs Spiking ODE Correlation" begin
         rng = Xoshiro(42)
         C_in, C_out = 4, 8
         L, B = 8, 3
 
-        # Phase-returning layer for both discrete and spiking comparison
+        # Phase-returning layer for both Dirac and spiking comparison
         layer = PhasorSSM(C_in => C_out, normalize_to_unit_circle)
         ps, st = Lux.setup(rng, layer)
 
-        # Create complex input on unit circle
-        x_cmpx = normalize_to_unit_circle(randn(rng, ComplexF32, C_in, L, B))
+        # Random phase input
+        phases_in = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
 
-        # Discrete forward pass (coarse, complex ZOH) → extract phases
-        y_discrete_cmpx, _ = layer(x_cmpx, ps, st)
-        phases_discrete = complex_to_angle(y_discrete_cmpx)
+        # Dirac convolution (exact analytical)
+        phases_dirac, _ = layer(phases_in, ps, st)
 
-        # Spiking forward pass using same parameters
-        phases_in = complex_to_angle(x_cmpx)
+        # Spiking ODE (single-stage: dz/dt = k·z + W·I(t))
         train = ssm_phases_to_train(phases_in, spk_args=spk_args)
         tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
         sc = SpikingCall(train, spk_args, tspan_spk)
-
         phases_spiking, _ = layer(sc, ps, st)
 
         @testset "output shapes match" begin
-            @test size(phases_discrete) == size(phases_spiking)
+            @test size(phases_dirac) == size(phases_spiking)
         end
 
-        # ---- Two-stage fine-grid convergence test ----
-        #
-        # The coupled oscillator ODE has two stages:
-        #   du/dt = k₀·u + I(t)         input oscillators decode spikes at global k₀
-        #   dz/dt = k_c·z + W·u         output oscillators integrate at per-channel k_c
-        #
-        # The discrete SSM equivalent is a two-stage computation:
-        #   Stage 1: Convolve impulse input with input oscillator kernel K₀ (at k₀)
-        #   Stage 2: Apply weight matrix W, then convolve with output kernel K_c (at k_c)
-        #
-        # By encoding phases as real-valued impulses on a fine temporal grid and
-        # computing both discrete stages, the ZOH approximation tightens and the
-        # discrete output converges toward the continuous ODE.  We test at multiple
-        # resolutions to verify monotonic convergence.
-        @testset "two-stage fine-grid convergence" begin
+        @testset "Dirac matches manual causal_conv_dirac" begin
             λ_c = -exp.(ps.log_neg_lambda)
             ω_c = st.omega
-
-            # Input oscillator dynamics (global k₀ from spk_args)
-            k₀ = neuron_constant(spk_args)
-            λ₀ = Float32(real(k₀))
-            ω₀ = Float32(imag(k₀))
-
-            # Convert phases to pixel values for impulse_encode
-            pixels = Float32.((Float32.(phases_in) .+ 1f0) ./ 2f0)
-            images = permutedims(pixels, (2, 1, 3))  # (L, C_in, B)
-
-            correlations = Float32[]
-
-            for substeps in [4, 10, 20, 40]
-                L_fine = L * substeps
-                Δt_fine = 1f0 / Float32(substeps)
-
-                # Encode as real-valued impulses on fine temporal grid
-                x_input = impulse_encode(images; substeps=substeps)  # (C_in, L_fine, B)
-
-                # Stage 1: Decode through input oscillator kernel (at global k₀)
-                K₀ = phasor_kernel(fill(λ₀, C_in), fill(ω₀, C_in), Δt_fine, L_fine)
-                U = causal_conv(K₀, x_input)  # (C_in, L_fine, B) — decoded input
-
-                # Stage 2: Weight mix + per-channel temporal integration
-                Ur = reshape(U, C_in, L_fine * B)
-                Hr = complex.(ps.weight * real.(Ur), ps.weight * imag.(Ur))
-                H = reshape(Hr, C_out, L_fine, B)
-
-                K_c = phasor_kernel(λ_c, ω_c, Δt_fine, L_fine)
-                Z = causal_conv(K_c, H)  # (C_out, L_fine, B)
-                Y = normalize_to_unit_circle(Z)
-
-                # Sample at period boundaries
-                sample_idx = [l * substeps for l in 1:L]
-                phases_grid = complex_to_angle(Y[:, sample_idx, :])
-
-                c = cor_realvals(vec(Float32.(phases_grid)),
-                                 vec(Float32.(phases_spiking)))
-                push!(correlations, c)
-                @info "substeps=$substeps: two-stage SSM vs spiking correlation = $c"
-            end
-
-            # Monotonic convergence: finer resolution → higher correlation
-            for i in 2:length(correlations)
-                @test correlations[i] >= correlations[i-1] - 0.05f0
-            end
-
-            # Finest resolution (substeps=40) should show strong agreement
-            @test correlations[end] > 0.7
+            Z_manual = causal_conv_dirac(Float32.(phases_in), ps.weight, λ_c, ω_c, 1f0)
+            phases_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
+            @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end
 
         @testset "spiking output is non-degenerate" begin
             ph_range = maximum(Float32.(phases_spiking)) - minimum(Float32.(phases_spiking))
             @test ph_range > 0.5
+        end
+
+        @testset "spiking ODE correlates with Dirac" begin
+            c = cor_realvals(vec(Float32.(phases_dirac)),
+                             vec(Float32.(phases_spiking)))
+            # The single-stage ODE should correlate positively with the
+            # exact Dirac result. The gap comes from the finite-width spike
+            # kernel and ODE solver temporal discretization.
+            @test c > 0.3
         end
     end
 end
@@ -988,5 +935,91 @@ function ssm_spiking_chain_tests()
             @test size(y) == (n_classes, B)
             @test all(isfinite, y)
         end
+    end
+end
+
+function phasor_stft_tests()
+    @testset "PhasorSTFT" begin
+        rng = Xoshiro(42)
+        in_dim, n_freqs = 8, 16
+        L, B = 10, 4
+
+        layer = PhasorSTFT(in_dim => n_freqs, normalize_to_unit_circle)
+        ps, st = Lux.setup(rng, layer)
+
+        # Parameter structure: weight, log_neg_lambda, omega all trainable
+        @test size(ps.weight) == (n_freqs, in_dim)
+        @test size(ps.log_neg_lambda) == (n_freqs,)
+        @test size(ps.omega) == (n_freqs,)
+
+        # State: omega_out is fixed
+        @test haskey(st, :omega_out)
+        @test st.omega_out ≈ Float32(2π)
+
+        # Omega initialized as uniform spread
+        @test ps.omega[1] ≈ 0.2f0
+        @test ps.omega[end] ≈ 2.5f0
+
+        # parameterlength
+        @test Lux.parameterlength(layer) == n_freqs * in_dim + n_freqs + n_freqs
+
+        # 3D complex forward pass
+        x = randn(rng, ComplexF32, in_dim, L, B)
+        y, st_new = layer(x, ps, st)
+
+        @test size(y) == (n_freqs, L, B)
+        @test all(isfinite, y)
+        # Unit circle activation: magnitudes ≈ 1
+        @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
+
+        # Different inputs give different outputs
+        x2 = randn(rng, ComplexF32, in_dim, L, B)
+        y2, _ = layer(x2, ps, st)
+        @test y != y2
+
+        # 3D Phase forward pass
+        x_phase = Phase.(2f0 .* rand(rng, Float32, in_dim, L, B) .- 1f0)
+        y_phase, _ = layer(x_phase, ps, st)
+
+        @test size(y_phase) == (n_freqs, L, B)
+        @test eltype(y_phase) == Phase
+        @test all(isfinite, Float32.(y_phase))
+
+        # Gradient finiteness
+        loss_fn(ps) = begin
+            y, _ = layer(x, ps, st)
+            mean(abs2.(y))
+        end
+        val, grads = withgradient(loss_fn, ps)
+        @test isfinite(val)
+        @test all(isfinite, grads[1].weight)
+        @test all(isfinite, grads[1].log_neg_lambda)
+        @test all(isfinite, grads[1].omega)
+
+        # Frequency shift identity: when omega_out == omega, shift is no-op
+        st_match = (omega_out = ps.omega[1],)
+        layer_id = PhasorSTFT(in_dim => 1, identity; omega_lo=ps.omega[1], omega_hi=ps.omega[1])
+        ps_id, _ = Lux.setup(rng, layer_id)
+        # Override omega to match omega_out exactly
+        ps_id = merge(ps_id, (omega = Float32[st_match.omega_out],))
+        x_small = randn(rng, ComplexF32, in_dim, L, B)
+        y_shift, _ = layer_id(x_small, ps_id, st_match)
+        # Build expected output without shift (standard causal conv)
+        λ_id = -exp.(ps_id.log_neg_lambda)
+        K_id = phasor_kernel(λ_id, ps_id.omega, 1f0, L)
+        xr = reshape(x_small, in_dim, L * B)
+        Hr = complex.(ps_id.weight * real.(xr), ps_id.weight * imag.(xr))
+        H_id = reshape(Hr, 1, L, B)
+        Z_expected = causal_conv(K_id, H_id)
+        @test y_shift ≈ Z_expected atol=1f-5
+
+        # With bias
+        layer_bias = PhasorSTFT(in_dim => n_freqs, normalize_to_unit_circle; use_bias=true)
+        ps_b, st_b = Lux.setup(rng, layer_bias)
+        @test haskey(ps_b, :bias_real)
+        @test haskey(ps_b, :bias_imag)
+        y_b, _ = layer_bias(x, ps_b, st_b)
+        @test size(y_b) == (n_freqs, L, B)
+        @test all(isfinite, y_b)
     end
 end

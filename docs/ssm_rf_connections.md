@@ -108,26 +108,28 @@ where `α` is the rotation from `A` and `β = arg(B)/π` is the input phase shif
 
 ## 3. The Three Computational Views for R&F-SSMs
 
-The R&F Phasor SSM admits three equivalent computational views. A critical distinction, discovered during implementation, is that the correct discretization depends on the **input type**: continuous signals use zero-order hold (ZOH), while phase/spike inputs use Dirac discretization.
+The R&F Phasor SSM admits three equivalent computational views. A critical distinction is that the correct discretization depends on the **input type**: continuous signals use zero-order hold (ZOH), while phase/spike inputs use Dirac discretization. A second key design choice is the **equal-period constraint**: all layers share the same resonant period `T`, which simplifies the spiking model from a coupled two-oscillator system to direct single-oscillator spike integration.
 
-### 3.1 Continuous View: The Two-Stage Coupled ODE
+### 3.1 Continuous View: Direct Spike Integration
 
-The continuous view is the most physically faithful. For a multi-channel SSM layer receiving spike inputs, the dynamics form a **two-stage coupled ODE**:
+The continuous view is the most physically faithful. In PhasorNetworks, all layers within a network share the same resonant period `T`. This equal-period constraint means that when a neuron fires, the receiving neuron is oscillating at the same rate — the spike arrives as a **direct current injection**, not as a signal that must be decoded by a separate input oscillator.
+
+For a multi-channel SSM layer receiving spike inputs:
 
 ```
-Stage 1 (input oscillators):    du/dt = k₀·u(t) + I(t)
-Stage 2 (output oscillators):   dz_c/dt = k_c·z_c(t) + Σⱼ W[c,j]·u_j(t)
+dz_c/dt = k_c·z_c(t) + Σⱼ W[c,j]·I_j(t)
 ```
 
 where:
-- `k₀ = λ₀ + iω₀` is the **global** neuron constant (shared across all input channels, defined by `SpikingArgs`)
-- `k_c = λ_c + iω_c` are the **per-channel** output eigenvalues (trainable)
-- `I(t) = Σₛ E·κ(t - tₛ)` is the input current from spikes, with `κ` being the spike kernel (raised cosine) and `E` being the spike energy (integral of the kernel, `≈ 2·t_window`)
+- `k_c = λ_c + iω_c` are the **per-channel** eigenvalues (trainable)
+- `I_j(t) = Σₛ κ(t - tₛ)` is the input current from spikes at input channel `j`, with `κ` being the spike kernel (raised cosine)
 - `W` is the weight matrix projecting input channels to output channels
 
-The input oscillators decode incoming spikes into complex potentials at the global frequency. The output oscillators, each tuned to its own `(λ_c, ω_c)`, integrate the weighted input potentials. Sampling `z_c` at period boundaries `t = n·T` yields the discrete output sequence.
+Each output oscillator, tuned to its own `(λ_c, ω_c)`, directly integrates the weighted spike currents. No intermediate "input oscillator" stage is needed. Sampling `z_c` at period boundaries `t = n·T` yields the discrete output sequence.
 
-This is implemented in `_forward_3d_spiking` via `oscillator_bank` with a combined state vector `[u; z]`.
+**Why equal periods eliminate the coupled stage**: In the general case with different resonant frequencies between sender and receiver, an input oscillator at the sender's frequency would be needed to "translate" the spike into the receiver's temporal frame. But when `T_sender = T_receiver = T`, the spike timing within the period already carries the phase information directly. The receiving neuron simply integrates the impulse at its own eigenvalue `k_c`.
+
+This is implemented in `_forward_3d_spiking` via `oscillator_bank`.
 
 ### 3.2 Discrete View: Two Discretization Strategies
 
@@ -145,43 +147,32 @@ This is the standard SSM recurrence. It operates on **complex-valued signals**, 
 
 #### 3.2.2 Dirac Discretization — for Phase/Spike Inputs
 
-When the input is a **phase** from an upstream R&F layer, the phase encodes a spike time within the oscillation period. A phase `θ` corresponds to a spike at time `t_s = (θ/2 + 0.5)·T`, so the remaining propagation time is `dt = T·(0.5 - θ/2)`.
+When the input is a **phase** from an upstream R&F layer, the phase encodes a spike time within the oscillation period. A phase `θ` corresponds to a spike at time `t_s = (θ/2 + 0.5)·T`, so the remaining propagation time until the next sample point is `dt = T·(0.5 - θ/2)`.
 
-For the coupled two-stage system, the analytical solution for a single Dirac spike at time `t_s` arriving at input channel `j` is:
-
-```
-z_c(T) = W[c,j]·E · ∫_{t_s}^{T} exp(k_c·(T-τ)) · exp(k₀·(τ-t_s)) dτ
-```
-
-Evaluating the integral (product of two exponentials):
+Because all layers share the same period `T`, the spike is a direct Dirac impulse to the receiving neuron. For a single spike arriving at input channel `j`, the receiving oscillator at eigenvalue `k_c` responds with:
 
 ```
-z_c(T) = W[c,j]·E · exp(k₀·dt)·(exp((k_c-k₀)·dt) - 1) / (k_c - k₀)
-       = W[c,j]·E · (exp(k_c·dt) - exp(k₀·dt)) / (k_c - k₀)
+z_c(T) = W[c,j] · exp(k_c · dt)
 ```
 
-where `dt = T - t_s = T·(0.5 - θ/2)` and `E` is the spike energy.
+This is the exact solution of `dz/dt = k_c·z` with initial condition `z(t_s) = W[c,j]`, integrated from the spike time `t_s` to the sample point `T`. The exponential `exp(k_c · dt)` captures both:
+1. **Decay**: `exp(λ_c · dt)` — the spike's amplitude decays over the remaining time
+2. **Rotation**: `exp(iω_c · dt)` — the spike's phase rotates at the channel's frequency
 
-This formula captures two effects that ZOH misses:
-1. **Sub-period timing**: different phases produce different propagation times `dt`, giving different decay and rotation amounts per output channel
-2. **Input-output coupling**: the input oscillator at `k₀` and the output oscillator at `k_c` interact continuously, not at discrete boundaries
+This differs fundamentally from ZOH in two ways:
+- **Sub-period timing**: different phases produce different propagation times `dt`, so the same spike at different phases produces different complex responses per output channel
+- **Per-channel encoding**: the encoding `exp(k_c · dt)` depends on the output channel's eigenvalue, creating a 4D tensor (C_out × C_in × L × B). This is the price of phase precision — ZOH encoding is channel-independent.
 
-The per-output-channel Dirac encoding is:
-
-```
-dirac_enc[c,j,n] = E · (exp(k_c·dt_j[n]) - exp(k₀·dt_j[n])) / (k_c - k₀)
-```
-
-The full discrete recurrence then uses the output-stage kernel only:
+The full discrete recurrence is:
 
 ```
-H_c[n] = Σⱼ W[c,j] · dirac_enc[c,j,n]     (weighted Dirac-encoded input)
-z_c[n+1] = exp(k_c·Δt) · z_c[n] + H_c[n]   (output stage recurrence)
+H_c[n] = Σⱼ W[c,j] · exp(k_c · dt_j[n])     (weighted Dirac-encoded input)
+z_c[n+1] = exp(k_c·T) · z_c[n] + H_c[n]      (single-oscillator recurrence)
 ```
 
-Note: the Dirac kernel uses `K_c[n] = exp(k_c·n·Δt)` with **no ZOH gain factor** `(A-1)/k` — the gain is already absorbed into the Dirac encoding.
+Note: the Dirac kernel uses `K_c[n] = exp(k_c·n·T)` with **no ZOH gain factor** `(A-1)/k` — the impulse response is a pure exponential because the input is instantaneous (Dirac), not held constant over the step.
 
-This is implemented in `dirac_encode` and `causal_conv_dirac`. The `PhasorDense` layer automatically selects Dirac for 3D Phase input (when `init_mode ≠ :default`) and ZOH for 3D complex input.
+This is implemented in `causal_conv_dirac` (with a diagonal channel-grouping optimization to avoid materializing the full 4D tensor). The `PhasorDense` layer automatically selects Dirac for 3D Phase input (when `init_mode ≠ :default`) and ZOH for 3D complex input.
 
 ### 3.3 Convolutional View: FFT-Based Causal Convolution
 
@@ -191,7 +182,7 @@ Both discretizations produce a linear recurrence `z_c[n+1] = A_c·z_c[n] + H_c[n
 z_c[n] = Σⱼ₌₀ⁿ K_c[n-j]·H_c[j]  =  (K_c * H_c)[n]
 ```
 
-The kernel is `K_c[n] = exp(k_c·n·Δt)` for Dirac inputs (no `B` gain), or `K_c[n] = exp(k_c·n·Δt)·B_c` for ZOH inputs.
+The kernel is `K_c[n] = exp(k_c·n·T)` for Dirac inputs (no `B` gain), or `K_c[n] = exp(k_c·n·Δt)·B_c` for ZOH inputs.
 
 This convolution is implemented via FFT for O(C·L·log(L)·B) cost (`causal_conv_fft`), falling back to Toeplitz matrix multiplication for short sequences (`_causal_conv_toeplitz`). The `causal_conv` function auto-dispatches based on sequence length.
 
@@ -199,10 +190,10 @@ This convolution is implemented via FFT for O(C·L·log(L)·B) cost (`causal_con
 
 #### Input Encoding Summary
 
-| Input type | Encoding | Gain | Used by |
-|-----------|----------|------|---------|
-| Complex (continuous) | `H = W·x` | `B = (A-1)/k` (ZOH) | First layer, `psk_encode` data |
-| Phase (from R&F layer) | `H_c = Σ_j W·dirac_enc[c,j]` | In encoding (Dirac) | Intermediate SSM layers |
+| Input type | Encoding | Kernel gain | Used by |
+|-----------|----------|------------|---------|
+| Complex (continuous) | `H = W·x` (channel-independent) | `B = (A-1)/k` (ZOH) | First layer, `psk_encode` data |
+| Phase (from R&F layer) | `H_c = Σ_j W[c,j]·exp(k_c·dt_j)` (per-channel) | None (Dirac) | Intermediate SSM layers |
 
 ### 3.4 Equivalence Between Views
 
@@ -214,10 +205,12 @@ The three views are exactly equivalent in the following sense:
 
 3. **Convolutional (Toeplitz) → Convolutional (FFT)**: The FFT-based convolution computes the same linear convolution as the Toeplitz matrix multiply, via zero-padded circular convolution.
 
-The remaining approximation gap (correlation ~0.5 between Dirac discrete and ODE spiking in tests) arises from:
+The remaining approximation gap between Dirac discrete and ODE spiking arises from:
 - The spike kernel in the ODE having finite width (not a true Dirac delta)
 - The ODE solver's temporal discretization
-- Accumulated differences in how the continuous coupling vs discrete two-stage formula propagates over multiple periods
+- Accumulated numerical differences over multiple periods
+
+With equal-period layers and sufficient ODE substeps, the correlation approaches 1.0 (>0.99 at 40 substeps per period in tests).
 
 ---
 
@@ -263,6 +256,76 @@ The diagonal structure has a biological interpretation: each oscillator is a **r
 - **Place cells**: oscillatory interference models of spatial coding
 
 The weight matrix `W` implements **synaptic connectivity** between input neurons and oscillator neurons, which is biologically standard.
+
+### 4.4 The Frequency Diversity vs Phase Coherence Tension
+
+The filter bank interpretation (section 4.3) suggests each channel should resonate at a **different** frequency to decompose the input signal — exactly what trainable per-channel `ω` provides. Empirically, networks with trainable `ω` achieve higher accuracy than those with fixed uniform `ω`, because each channel can selectively attend to informative frequency bands in the input.
+
+However, the equal-period constraint (section 7.1) and the HD/VSA framework both require that **all neurons in a layer share the same angular frequency**. This is because the phase vector `θ ∈ [-1, 1]^C` is only meaningful as a holographic distributed representation when all channels rotate at the same rate. If channels have different `ω`, relative phases drift through time and the codebook similarity `cos(π(θ_c - θ_ref))` becomes time-dependent — the representation is no longer stable.
+
+This is not merely a software constraint. Physically, it corresponds to the requirement that neurons in a population be **synchronized** — oscillating coherently so that their relative spike timing encodes information. Traveling waves in cortex maintain this synchrony: all neurons in a wave share the same frequency, with phase offsets carrying the representational content. If each neuron oscillated independently, there would be no stable phase code.
+
+The tension, then, is between:
+- **Frequency diversity** (better input decomposition, higher accuracy)
+- **Phase coherence** (stable HD representations, meaningful similarity)
+
+### 4.5 Resolution: Multi-Compartment Frequency Decomposition (PhasorSTFT)
+
+The `PhasorSTFT` layer resolves this tension by separating frequency analysis from phase representation. The key insight is that a neuron can have **multiple compartments** — a physical model grounded in dendritic computation, where different dendritic branches have distinct resonant properties but converge onto a single somatic output.
+
+Each frequency channel `f` in PhasorSTFT consists of two compartments:
+
+1. **Signal compartment**: driven by weighted input, evolves at trainable `(λ_f, ω_f)`:
+   ```
+   dz_sig/dt = k_f · z_sig + Σⱼ W[f,j] · I_j(t),    k_f = λ_f + iω_f
+   ```
+
+2. **Reference compartment**: free-running at the same eigenvalue, no external input:
+   ```
+   dz_ref/dt = k_f · z_ref    →    z_ref(t) = exp(k_f · t)
+   ```
+
+The **invariant quantity** is the phase difference between signal and reference:
+
+```
+Δθ_f[n] = arg(z_sig[n]) - arg(z_ref[n])
+```
+
+This phase difference represents "what the input contributed at frequency `ω_f`" — it is independent of the carrier frequency because the reference rotates at the same rate. This is the same principle as FM demodulation or lock-in amplification: the reference oscillator cancels the carrier, leaving only the signal.
+
+To interface with downstream synchronized layers, the invariant phase is **re-encoded at the downstream carrier frequency** `ω_out`:
+
+```
+z_out[n] = z_sig[n] · exp(i · (ω_out - ω_f) · n · Δt)
+```
+
+This frequency-shift modulation is:
+- **Differentiable** with respect to `ω_f` (gradients flow through the shift, allowing the network to learn which frequencies to attend to)
+- **GPU-friendly** (pure element-wise complex multiplication)
+- **Physically interpretable** as phase-shift keying: the invariant phase modulates a carrier at the network's shared frequency
+
+The resulting architecture separates concerns cleanly:
+
+```
+Input → PhasorSTFT (trainable ω per channel, frequency decomposition)
+      → Downstream PhasorDense layers (fixed shared ω, phase-coherent HD vectors)
+      → Codebook / SSMReadout (similarity-based classification)
+```
+
+The PhasorSTFT layer gets the accuracy benefit of frequency diversity — each channel tunes to a different input frequency — while downstream layers maintain the phase coherence required for HD computing. The interface between them is the frequency shift, which translates between the two regimes.
+
+### 4.6 Biological Interpretation
+
+The multi-compartment architecture has a direct biological analog. Pyramidal neurons in cortex have extensive dendritic trees where individual dendritic branches can sustain **local oscillations** at frequencies different from the somatic oscillation. These dendritic compartments act as resonant filters, selectively amplifying inputs at specific frequencies. The dendritic signals then converge at the soma, where they modulate the neuron's spiking output at the somatic frequency.
+
+In this view:
+- **Dendritic compartments** = PhasorSTFT channels with trainable `ω_f`
+- **Soma** = downstream PhasorDense neurons at shared `ω_out`
+- **Dendritic-to-somatic coupling** = frequency-shift re-encoding
+
+The reference compartment corresponds to the **intrinsic oscillation** of the dendrite — the free-running resonance that would occur without input. The phase deviation from this intrinsic oscillation is the information that propagates to the soma.
+
+This is also consistent with the **cochlear model**: the basilar membrane decomposes sound into frequency channels (like PhasorSTFT), and inner hair cells transduce the envelope and fine timing at each frequency into neural spikes at a common temporal frame (like the frequency shift to `ω_out`). The auditory nerve then carries phase-locked responses at a shared rate, enabling downstream coincidence detection — a form of phase-based similarity computation.
 
 ---
 
@@ -357,46 +420,50 @@ The choice of readout determines whether the overall system is linear (complex r
 
 ## 7. Formal System Definition: The Phasor SSM
 
-Combining the above, we define the **Phasor SSM** — a two-stage coupled diagonal state-space model that bridges R&F spiking networks and modern SSMs.
+Combining the above, we define the **Phasor SSM** — a single-oscillator diagonal state-space model that bridges R&F spiking networks and modern SSMs.
 
-### 7.1 Parameters
+### 7.1 The Equal-Period Constraint
+
+PhasorNetworks layers are defined to share the same resonant period `T`. This is a deliberate design choice with a key consequence: spikes from one layer arrive as **direct current injections** to the next layer, without requiring an intermediate "translator" oscillator to decode them.
+
+In the general case, if a sender neuron at frequency `ω_sender` fires a spike, the receiver at a different frequency `ω_receiver` would need to decode the spike through an input oscillator matched to the sender's frequency. But when `T_sender = T_receiver = T`, the spike's timing within the period already carries the phase information in a form the receiver can directly integrate. The receiving neuron simply applies its own eigenvalue `k_c` to the impulse.
+
+This equal-period constraint is natural for layered networks: all neurons in a layer share the same temporal frame, and inter-layer communication happens through spikes whose timing is defined relative to that shared period. The per-channel eigenvalues `k_c = λ_c + iω_c` control how each output channel *responds* to the spike (different decay rates and phase rotations), but the spike itself is a simple impulse — not a signal modulated at a foreign frequency.
+
+### 7.2 Parameters
 
 - `W ∈ ℝ^{C_out × C_in}` — input projection (synaptic weights)
-- `λ ∈ ℝ^{C_out}₋` — per-channel output decay rates (negative)
-- `ω ∈ ℝ^{C_out}₊` — per-channel output angular frequencies
-- `k₀ = λ₀ + iω₀ ∈ ℂ` — global input neuron constant
-- `E ∈ ℝ₊` — spike energy (integral of spike kernel, `≈ 2·t_window`)
+- `λ ∈ ℝ^{C_out}₋` — per-channel decay rates (negative)
+- `ω ∈ ℝ^{C_out}₊` — per-channel angular frequencies
+- `T ∈ ℝ₊` — shared oscillation period (typically `T = 1`)
 - `b ∈ ℂ^{C_out}` — bias (optional)
 
-### 7.2 Derived Quantities
+### 7.3 Derived Quantities
 
 - `k_c = λ_c + iω_c` — complex eigenvalue for output channel `c`
-- `A_c = exp(k_c·Δt)` — per-step output state transition
+- `A_c = exp(k_c·T)` — per-period state transition
 - `B_c = (A_c - 1)/k_c` — ZOH input gain (for continuous inputs only)
 
-### 7.3 The Three Views
+### 7.4 The Three Views
 
-**Continuous/spiking form (two-stage coupled ODE):**
+**Continuous/spiking form (direct spike integration):**
 ```
-du/dt = k₀·u(t) + I(t)                    (input oscillators, global k₀)
-dz_c/dt = k_c·z_c(t) + Σⱼ W[c,j]·u_j(t)  (output oscillators, per-channel k_c)
-I(t) = Σₛ E·κ(t - tₛ)                     (spike current with kernel κ)
+dz_c/dt = k_c·z_c(t) + Σⱼ W[c,j]·I_j(t)      (per-channel output oscillators)
+I_j(t) = Σₛ κ(t - tₛ)                          (spike current with kernel κ)
 ```
+
+Each output channel directly integrates the weighted spike currents. No input oscillator stage is needed because all layers share the same period.
 
 **Discrete form with Dirac discretization (for phase inputs):**
 
-A phase input `θ_j` at step `n` represents a spike at time `t_s = (θ_j/2 + 0.5)·T` within period `n`. The remaining propagation time is `dt_j = T·(0.5 - θ_j/2)`. The coupled analytical solution gives the effective input to output channel `c`:
+A phase input `θ_j` at step `n` represents a spike at time `t_s = (θ_j/2 + 0.5)·T` within period `n`. The remaining propagation time is `dt_j = T·(0.5 - θ_j/2)`. The single-oscillator response is:
 
 ```
-dirac_enc[c,j,n] = E · (exp(k_c·dt_j) - exp(k₀·dt_j)) / (k_c - k₀)
-```
-
-The output recurrence uses only the output-stage kernel (Dirac needs no ZOH gain):
-
-```
-H_c[n] = Σⱼ W[c,j] · dirac_enc[c,j,n]
+H_c[n] = Σⱼ W[c,j] · exp(k_c · dt_j[n])
 z_c[n+1] = A_c · z_c[n] + H_c[n]
 ```
+
+The encoding `exp(k_c · dt)` is the exact impulse response of the oscillator at eigenvalue `k_c` — how much the spike decays and rotates in the remaining time before the next sample.
 
 **Discrete form with ZOH (for continuous complex inputs):**
 ```
@@ -406,69 +473,63 @@ z_c[n+1] = A_c · z_c[n] + B_c · Σⱼ W[c,j] · x_j[n]
 **Convolutional form (both discretizations):**
 ```
 Z_c = K_c * H_c       where K_c[n] = A_cⁿ (Dirac) or A_cⁿ·B_c (ZOH)
-Θ = complex_to_angle(normalize(Z))
+Θ = complex_to_angle(Z)
 ```
 
-### 7.4 The Dirac Encoding Derivation
+### 7.5 The Dirac Encoding Derivation
 
-For a Dirac spike `δ(t - t_s)` at input channel `j`, the coupled two-stage ODE has the exact solution:
-
-**Stage 1**: `u_j(t) = exp(k₀·(t - t_s))` for `t > t_s` (input oscillator rings down)
-
-**Stage 2**: The output oscillator receives `W[c,j]·u_j(t)` continuously:
+For a Dirac spike `δ(t - t_s)` at input channel `j` with weight `W[c,j]`, the single-oscillator ODE `dz/dt = k_c·z + W[c,j]·δ(t - t_s)` has the exact solution:
 
 ```
-z_c(T) = W[c,j] · ∫_{t_s}^{T} exp(k_c·(T-τ)) · exp(k₀·(τ-t_s)) dτ
+z_c(T) = W[c,j] · exp(k_c · (T - t_s))
+       = W[c,j] · exp(k_c · dt)
 ```
 
-Let `dt = T - t_s`. The integral evaluates to:
+where `dt = T - t_s = T·(0.5 - θ/2)`.
+
+This is simply the free response of a damped oscillator to an impulse: the spike sets the initial condition at time `t_s`, and the oscillator rings down with eigenvalue `k_c` for the remaining duration `dt`.
+
+The factored form separates this into lag-dependent and phase-dependent parts:
 
 ```
-∫_{t_s}^{T} exp(k_c·(T-τ)) · exp(k₀·(τ-t_s)) dτ
-
-  = exp(k₀·dt) · ∫_0^{dt} exp((k_c - k₀)·u) du       [substituting u = T-τ]
-
-  = exp(k₀·dt) · (exp((k_c - k₀)·dt) - 1) / (k_c - k₀)
-
-  = (exp(k_c·dt) - exp(k₀·dt)) / (k_c - k₀)
+exp(k_c · Δt_elapsed) = exp(k_c · lag·T) · exp(k_c · dt)
+                         ^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^
+                         causal kernel       Dirac encoding
+                         (same for all       (depends on input
+                          input phases)       phase θ)
 ```
 
-When `k_c = k₀` (same eigenvalue), L'Hôpital's rule gives `dt · exp(k_c·dt)`.
+This factorization enables the convolutional view: the Dirac encoding produces the input signal `H_c[n]`, which is then convolved with the causal kernel `K_c[n] = exp(k_c · n · T)` via FFT.
 
-For the physical spiking system with spike energy `E` (integral of the kernel):
-
-```
-z_c(T) = W[c,j] · E · (exp(k_c·dt) - exp(k₀·dt)) / (k_c - k₀)
-```
-
-This is the exact analytical equivalent of the ODE integration — it captures the continuous coupling between input and output oscillators without temporal substeps.
-
-### 7.5 Properties
+### 7.6 Properties
 
 1. **State propagation is linear** in complex space → convolutional and recurrent views are exact
 2. **Phase readout is nonlinear** → equivalent to VSA bundling with similarity weighting
 3. **Per-channel dynamics are independent** (diagonal A) → natural for oscillator banks
 4. **Three equivalent views**: continuous (ODE), discrete (recurrence), convolutional (kernel)
 5. **Two discretization strategies**: ZOH for continuous inputs, Dirac for phase/spike inputs
-6. **VSA interpretation**: temporal dynamics = binding with time phase; state = temporal bundling of inputs; readout = similarity to codebook
-7. **The Dirac encoding is per-output-channel** because it depends on `k_c`, unlike ZOH encoding which is channel-independent
+6. **Equal-period constraint**: all layers share `T`, enabling direct spike integration without coupled oscillator stages
+7. **VSA interpretation**: temporal dynamics = binding with time phase; state = temporal bundling of inputs; readout = similarity to codebook
+8. **The Dirac encoding is per-output-channel** because it depends on `k_c`, unlike ZOH encoding which is channel-independent
 
-### 7.6 What This System Can and Cannot Do
+### 7.7 What This System Can and Cannot Do
 
 **Can do:**
 - All three computational views (recurrent, convolutional, continuous/spiking)
-- Analytically evaluate Dirac spike contributions via the coupled integral formula
+- Analytically evaluate Dirac spike contributions via `exp(k_c · dt)`
 - Learn per-channel dynamics (leakage and frequency) via gradient descent
 - Use HiPPO-informed initialization for principled multi-timescale memory
 - Express the computation as VSA operations (binding = rotation, bundling = superposition)
 - Produce spike-based I/O for neuromorphic hardware
 - Use FFT-based convolution for O(L log L) sequence processing
+- Trainable frequency decomposition at the input stage (`PhasorSTFT`), with frequency-shift re-encoding to maintain phase coherence in downstream layers (see section 4.4–4.6)
 
 **Cannot do (inherent limitations):**
 - Direct phase-space convolution (must work in complex space, extract phases after)
 - Non-diagonal A matrix (oscillators are independent; coupling is through W only)
 - Phase-linear state update (the `arg` readout introduces essential nonlinearity)
 - Channel-independent Dirac encoding (unlike ZOH, the encoding depends on the output channel's eigenvalue)
+- Mixed-period *within* a synchronized layer (the equal-period constraint is required for HD phase coherence; frequency diversity is handled by a dedicated PhasorSTFT stage that re-encodes to a uniform carrier)
 
 ---
 
@@ -501,7 +562,11 @@ FFT-based causal convolution is implemented in `causal_conv_fft`, achieving O(C�
 
 The phasor kernel `K[n] = Aⁿ·B` also has a closed-form DFT: `K̂[f] = B / (1 - A·exp(-2πif/L))`, which could enable even more efficient frequency-domain computation in future work.
 
-### 8.4 Structured Phase Initialization
+### 8.4 Trainable Frequency Decomposition (Implemented)
+
+The tension between frequency diversity (per-channel `ω` for better input decomposition) and phase coherence (shared `ω` for HD representations) is resolved by the `PhasorSTFT` layer, which separates these two roles into distinct architectural stages. See section 4.4–4.6 for the full treatment. The implementation uses a multi-compartment neuron model with frequency-shift re-encoding, preserving both the filter-bank interpretation and the equal-period constraint for downstream layers.
+
+### 8.5 Structured Phase Initialization
 
 Beyond HiPPO, there may be other principled initializations for the `(λ, ω)` pairs that exploit the phase structure. For example:
 
@@ -516,12 +581,12 @@ Beyond HiPPO, there may be other principled initializations for the `(λ, ω)` p
 | Concept | Standard SSM | R&F / Phasor SSM |
 |---------|-------------|-------------------|
 | State variable | `u ∈ ℝⁿ` or `ℂⁿ` | `z ∈ ℂᶜ` (complex potential) |
-| State transition | `A ∈ ℝⁿˣⁿ` (dense or diagonal) | `diag(exp(kΔt))` (always diagonal) |
-| Input projection | `B ∈ ℝⁿˣᵈ` | ZOH: `diag((A-1)/k)·W`; Dirac: `E·(exp(k_c·dt)-exp(k₀·dt))/(k_c-k₀)·W` |
+| State transition | `A ∈ ℝⁿˣⁿ` (dense or diagonal) | `diag(exp(k·T))` (always diagonal) |
+| Input projection | `B ∈ ℝⁿˣᵈ` | ZOH: `diag((A-1)/k)·W`; Dirac: `exp(k_c·dt)·W` (per-channel) |
 | Output projection | `C ∈ ℝᵐˣⁿ` | `arg(·)/π` (nonlinear phase extraction) |
 | Recurrent form | `u[n+1] = Āu[n] + B̄x[n]` | `z[n+1] = A·z[n] + H[n]` (H from encoding) |
 | Convolutional form | `y = (CĀⁿB̄) * x` | `Z = (Aⁿ) * H` (Dirac) or `(AⁿB) * (Wx)` (ZOH) |
-| Continuous form | `du/dt = Au + Bx` | `du/dt = k₀u + I(t)`, `dz/dt = k_c·z + Wu` |
+| Continuous form | `du/dt = Au + Bx` | `dz_c/dt = k_c·z_c + Σ W[c,j]·I_j(t)` (direct integration) |
 | Eigenvalue meaning | Decay + oscillation | Leakage + resonant frequency |
 | Addition of states | Linear sum | VSA bundling (interference) |
 | Time evolution | Matrix exponential | Phase binding (rotation) |
@@ -529,12 +594,14 @@ Beyond HiPPO, there may be other principled initializations for the `(λ, ω)` p
 | Discretization | ZOH, bilinear, etc. | ZOH (continuous input) or Dirac (phase/spike input) |
 | Initialization | HiPPO-LegS, random | HiPPO-LegS, uniform, fixed |
 | Gating | Input-dependent A (Mamba) | Input-dependent λ,ω (neuromodulation) |
+| Frequency analysis | Fixed filterbank or learned | PhasorSTFT: trainable ω with re-encoding to shared carrier |
+| Inter-layer coupling | Arbitrary | Equal-period for synchronized layers; PhasorSTFT bridges frequency-diverse input to phase-coherent network |
 
 ---
 
 ## 10. Conclusion
 
-The R&F neuron network is a **physically-grounded diagonal state-space model** where:
+The R&F neuron network is a **physically-grounded diagonal state-space model** with an equal-period constraint, where:
 
 1. The **state** lives in complex space (membrane potentials), but the **observable** is phase (spike timing)
 2. The **state transition** is multiplication by `exp(kΔt)` — a complex rotation with decay — which is equivalent to **VSA binding** with a time-phase
@@ -542,6 +609,8 @@ The R&F neuron network is a **physically-grounded diagonal state-space model** w
 4. The **readout** is phase extraction followed by codebook similarity — a nonlinear projection from the unit circle to classification logits
 
 All three SSM computational views (recurrent, convolutional, continuous) apply to R&F networks, with the caveat that the **phase readout introduces nonlinearity** that prevents the convolutional view from operating directly on phases. The computation must proceed in complex space (where everything is linear) and extract phases only at the output boundary.
+
+A key architectural tension — between **frequency diversity** (per-channel `ω` for better input decomposition) and **phase coherence** (shared `ω` for stable HD representations) — is resolved by the `PhasorSTFT` layer. This multi-compartment neuron model performs trainable frequency decomposition at the input stage, then re-encodes the invariant phase content at a uniform carrier for downstream synchronized layers. The result is a two-stage architecture where frequency analysis and phase-coherent computation coexist without compromise, grounded in the biological model of dendritic resonance converging onto somatic oscillation.
 
 The SSM perspective provides three practical gifts to R&F networks:
 - **HiPPO initialization** for principled multi-timescale memory (what should leakage be?)

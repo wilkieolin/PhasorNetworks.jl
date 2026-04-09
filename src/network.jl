@@ -217,9 +217,9 @@ Dispatches on input type AND dimensionality:
 - 2D complex `(C, B)` → linear transform + bias, no activation or temporal kernel
 - 3D complex `(C, L, B)` → weight + causal convolution with per-channel kernel + activation
 - 2D Phase → angle_to_complex → 2D complex → activation → complex_to_angle
-- 3D Phase → angle_to_complex → 3D complex → complex_to_angle (activation inside)
+- 3D Phase → Dirac discretization with causal convolution → complex_to_angle
 - SpikingCall → convert to CurrentCall, delegate
-- CurrentCall → 2D spiking (oscillator ODE) or 3D spiking (coupled oscillator ODE)
+- CurrentCall → single-stage ODE `dz/dt = k·z + W·I(t)`, sampled at period boundaries
 
 # Fields
 - `in_dims::Int`: Input feature dimension
@@ -245,7 +245,7 @@ Dispatches on input type AND dimensionality:
 
 # Init Modes
 - `:default` — `log_neg_lambda = fill(log(0.2), out)`, `omega = fill(2π, out)`.
-  All channels share same dynamics, degenerating to standard PhasorDense behavior.
+  All channels share identical initial dynamics.
 - `:uniform` — `log_neg_lambda` uniform, `omega` spread across `[omega_lo, omega_hi]`.
 - `:hippo` — HiPPO-LegS diagonal initialization for multi-timescale memory.
 
@@ -400,16 +400,7 @@ end
 # ---- 3D Phase dispatch ----
 
 function (a::PhasorDense)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
-    if a.init_mode != :default
-        # SSM mode: Dirac discretization for phase inputs — analytically
-        # accounts for sub-period spike timing per output channel
-        return _forward_3d_dirac(a, x, params, state)
-    else
-        # Standard mode: ZOH (backward compatible)
-        xz = angle_to_complex(x)
-        y, st_new = a(xz, params, state)
-        return complex_to_angle(y), st_new
-    end
+    return _forward_3d_dirac(a, x, params, state)
 end
 
 # ---- 3D Phase Dirac path ----
@@ -443,20 +434,26 @@ function (a::PhasorDense)(x::SpikingCall, params::LuxParams, state::NamedTuple)
     return a(current_call, params, state)
 end
 
-# ---- CurrentCall dispatch: 2D or 3D spiking ----
+# ---- CurrentCall dispatch: single-stage ODE ----
+#
+# Solves dz_c/dt = k_c · z_c + Σ_j W[c,j] · I_j(t) directly.
+# Each output oscillator integrates weighted spike currents at its own
+# eigenvalue k_c. No input oscillator stage is needed because all layers
+# share the same resonant period (equal-period constraint).
+#
+# For SSM-mode layers (init_mode != :default) with multi-period inputs,
+# the solution is sampled at period boundaries to produce a (C_out, L, B)
+# phase/spiking output. Default-mode layers always use the legacy
+# per-solver-step output (continuous ODE integration over the full tspan).
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     spk_args = x.spk_args
     tspan = x.t_span
     L = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
 
-    # Route to 3D spiking only for SSM-configured layers (non-default init).
-    # Default init layers always use 2D spiking for backward compatibility.
-    if L > 1 && a.init_mode != :default
-        return _forward_3d_spiking(a, x, params, state, L)
-    end
+    # SSM-mode: sample at period boundaries for sequential output
+    use_period_sampling = L > 1 && a.init_mode != :default
 
-    # 2D spiking: single-period ODE with per-channel dynamics
     sample_I = x.current.current_fn(Float32(tspan[1]))
     out_shape = ndims(sample_I) >= 2 ? (a.out_dims, size(sample_I)[2:end]...) : (a.out_dims,)
     u0 = similar(sample_I, ComplexF32, out_shape)
@@ -482,112 +479,227 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     prob = ODEProblem(dzdt, u0, tspan, params)
     sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
 
-    if a.return_type.type == :phase
-        u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
-        y = a.activation.(u)
-        phase = complex_to_angle.(y)
-        return phase, state
-        elseif a.return_type.type == :potential
-            return sol, state
+    if a.return_type.type == :potential
+        return sol, state
+    end
+
+    if use_period_sampling
+        # Multi-period SSM: sample at period boundaries → (C_out, L, B) output
+        T = spk_args.t_period
+        sample_times = Float32.([l * T for l in 1:L])
+        samples = [sol(t) for t in sample_times]
+
+        if ndims(samples[1]) >= 2
+            Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in samples]...; dims=2)
+        else
+            Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
+        end
+
+        Y = a.activation(Z)
+
+        if a.return_type.type == :phase
+            return complex_to_angle(Y), state
+        else  # :spiking
+            phases = complex_to_angle(Y)
+            train = ssm_phases_to_train(phases, spk_args=spk_args)
+            return SpikingCall(train, spk_args, tspan), state
+        end
+    else
+        # Single-period: legacy per-solver-step output
+        if a.return_type.type == :phase
+            u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
+            y = a.activation.(u)
+            phase = complex_to_angle.(y)
+            return phase, state
         elseif a.return_type.type == :current
             i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
             next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
                                     spk_args,
                                     tspan)
-        return next_call, state
-    else # :spiking
-        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
-        next_call = SpikingCall(train, spk_args, tspan)
-        return next_call, state
+            return next_call, state
+        else # :spiking
+            train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+            next_call = SpikingCall(train, spk_args, tspan)
+            return next_call, state
+        end
     end
 end
 
-# ---- 3D spiking: coupled oscillator ODE ----
+###
+### PhasorSTFT — Trainable Frequency Decomposition
+###
 
-function _forward_3d_spiking(a::PhasorDense, x::CurrentCall, params::LuxParams, state::NamedTuple, L::Int)
-    spk_args = x.spk_args
-    tspan = x.t_span
-    k₀ = neuron_constant(spk_args)
-    C_in = a.in_dims
-    C_out = a.out_dims
+"""
+    PhasorSTFT <: Lux.AbstractLuxLayer
 
-    # Infer shape from current function sample
-    sample_I = x.current.current_fn(Float32(tspan[1]))
-    if ndims(sample_I) >= 2
-        B = size(sample_I, 2)
-        u0 = zeros(ComplexF32, C_in + C_out, B)
-    else
-        u0 = zeros(ComplexF32, C_in + C_out)
+Multi-compartment neuron layer that performs trainable frequency decomposition
+(STFT) on complex phasor input sequences, then re-encodes the result at a
+uniform carrier frequency for downstream synchronized layers.
+
+Each frequency channel acts as a two-compartment neuron:
+- **Signal compartment**: driven by weighted input, evolves at trainable `(λ, ω)`
+- **Reference compartment**: free-running at the same `(λ, ω)`, analytically known
+
+The invariant phase — the difference between signal and reference — represents
+the input's spectral content at frequency `ω`. This is re-encoded at the
+downstream carrier `omega_out` via frequency-shift modulation:
+
+    z_out[n] = z_sig[n] * exp(i * (ω_out - ω_f) * n * Δt)
+
+Dispatches on input dimensionality (3D only — STFT is inherently temporal):
+- 3D complex `(C, L, B)` → weight + causal_conv + freq_shift + activation
+- 3D Phase `(C, L, B)` → causal_conv_dirac + freq_shift + complex_to_angle
+
+# Fields
+- `in_dims::Int`: Input feature dimension
+- `n_freqs::Int`: Number of frequency analysis channels (output dimension)
+- `activation::Function`: Normalization function (Complex → Complex)
+- `use_bias::Bool`: Whether to apply complex bias
+- `init_weight::Function`: Weight initializer `(rng, out, in) -> Matrix`
+- `init_bias::Function`: Bias initializer `(rng, dims) -> ComplexF32 array`
+- `omega_lo::Float32`: Lower bound for omega initialization
+- `omega_hi::Float32`: Upper bound for omega initialization
+- `omega_out::Float32`: Downstream carrier frequency (fixed in state)
+
+# Parameters (always present)
+- `weight` — `(n_freqs, in_dims)` Float32
+- `log_neg_lambda` — `(n_freqs,)` Float32, per-channel decay (trainable)
+- `omega` — `(n_freqs,)` Float32, per-channel frequency (always trainable)
+- `bias_real`, `bias_imag` — `(n_freqs,)` Float32 (when `use_bias=true`)
+
+# State
+- `omega_out` — Float32, downstream carrier frequency (fixed)
+
+See also: [`PhasorDense`](@ref)
+"""
+struct PhasorSTFT <: Lux.AbstractLuxLayer
+    in_dims::Int
+    n_freqs::Int
+    activation::Function
+    use_bias::Bool
+    init_weight::Function
+    init_bias::Function
+    omega_lo::Float32
+    omega_hi::Float32
+    omega_out::Float32
+end
+
+function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
+                    activation = normalize_to_unit_circle;
+                    use_bias::Bool = false,
+                    init_weight = nothing,
+                    init_bias = default_bias,
+                    omega_lo::Real = 0.2f0,
+                    omega_hi::Real = 2.5f0,
+                    omega_out::Real = Float32(2π))
+    if init_weight === nothing
+        init_weight = glorot_uniform
+    end
+    return PhasorSTFT(shape[1], shape[2],
+                      activation,
+                      use_bias,
+                      init_weight,
+                      init_bias,
+                      Float32(omega_lo),
+                      Float32(omega_hi),
+                      Float32(omega_out))
+end
+
+# Frequency-shift modulation: re-encode from per-channel omega to uniform omega_out
+function _freq_shift(Z::AbstractArray{<:Complex, 3},
+                     omega::AbstractVector,
+                     omega_out::Real,
+                     Δt::Real)
+    n_freqs, L, B = size(Z)
+    Δω = Float32(omega_out) .- omega                        # (n_freqs,)
+    ns_cpu = Float32.(0:L-1)
+    ns = reshape(typeof(omega)(ns_cpu), 1, L)               # (1, L), GPU-safe
+    shift = exp.(1.0f0im .* Δω .* Float32(Δt) .* ns)       # (n_freqs, L)
+    return Z .* reshape(shift, n_freqs, L, 1)               # (n_freqs, L, B)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorSTFT)
+    W = l.init_weight(rng, l.n_freqs, l.in_dims)
+    log_neg_lambda = fill(Float32(log(0.1)), l.n_freqs)
+    omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.n_freqs)))
+
+    parameters = (weight = W, log_neg_lambda = log_neg_lambda, omega = omega)
+
+    if l.use_bias
+        bias = l.init_bias(rng, (l.n_freqs,))
+        parameters = merge(parameters, (bias_real = Float32.(real.(bias)),
+                                         bias_imag = Float32.(imag.(bias))))
     end
 
-    # Combined ODE: [u_input; z_output]
-    # du/dt = k₀ · u + I(t)           (input oscillators decode spikes)
-    # dz/dt = k_c · z + W · u          (output oscillators with per-channel dynamics)
-    function dzdt(combined, p, t)
-        u_in = combined[1:C_in, :]
-        z_out = combined[C_in+1:end, :]
+    return parameters
+end
 
-        I_t = x.current.current_fn(t)
+function Lux.initialstates(rng::AbstractRNG, l::PhasorSTFT)
+    return (omega_out = l.omega_out,)
+end
 
-        # Input oscillator dynamics at global frequency
-        du = k₀ .* u_in .+ I_t
-
-        # Output oscillator dynamics with per-channel k_c
-        λ = -exp.(p.log_neg_lambda)
-        ω_val = a.trainable_omega ? p.omega : state.omega
-        k_c = ComplexF32.(λ .+ im .* ω_val)
-        dz = k_c .* z_out .+ p.weight * u_in
-
-        return vcat(du, dz)
+function Lux.parameterlength(l::PhasorSTFT)
+    n = l.n_freqs * l.in_dims + l.n_freqs + l.n_freqs  # weight + log_neg_lambda + omega
+    if l.use_bias
+        n += 2 * l.n_freqs
     end
+    return n
+end
 
-    # Handle 1D (unbatched) case
-    function dzdt_1d(combined, p, t)
-        u_in = combined[1:C_in]
-        z_out = combined[C_in+1:end]
+# ---- 3D Complex dispatch ----
 
-        I_t = x.current.current_fn(t)
+function (a::PhasorSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, state::NamedTuple)
+    C_in, L, B = size(x)
 
-        du = k₀ .* u_in .+ I_t
+    λ = -exp.(params.log_neg_lambda)
+    ω = params.omega
 
-        λ = -exp.(p.log_neg_lambda)
-        ω_val = a.trainable_omega ? p.omega : state.omega
-        k_c = ComplexF32.(λ .+ im .* ω_val)
-        dz = k_c .* z_out .+ p.weight * u_in
+    # Build impulse-response kernel for each frequency channel
+    K = phasor_kernel(λ, ω, 1f0, L)
 
-        return vcat(du, dz)
-    end
+    # Weight mixing: project input channels to frequency channels
+    xr = reshape(x, C_in, L * B)
+    Hr = complex.(params.weight * real.(xr), params.weight * imag.(xr))
+    H = reshape(Hr, a.n_freqs, L, B)
 
-    f = ndims(sample_I) >= 2 ? dzdt : dzdt_1d
-    prob = ODEProblem(f, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+    # Temporal integration via causal convolution
+    Z_sig = causal_conv(K, H)
 
-    if a.return_type.type == :potential
-        return sol, state
-    end
+    # Frequency shift: re-encode at downstream carrier omega_out
+    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
 
-    # Extract output oscillator portion at period boundaries
-    T = spk_args.t_period
-    sample_times = Float32.([l * T for l in 1:L])
-    samples = [sol(t) for t in sample_times]
-
-    # Extract z_out (output oscillator portion)
-    if ndims(samples[1]) >= 2
-        z_samples = [s[C_in+1:end, :] for s in samples]
-        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in z_samples]...; dims=2)
-    else
-        z_samples = [s[C_in+1:end] for s in samples]
-        Z = reduce(hcat, [reshape(s, :, 1) for s in z_samples])
+    # Apply bias (broadcast over time and batch)
+    if a.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        Z = Z .+ reshape(bias_val, :, 1, 1)
     end
 
     Y = a.activation(Z)
+    return Y, state
+end
 
-    if a.return_type.type == :phase
+# ---- 3D Phase dispatch ----
+
+function (a::PhasorSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
+    λ = -exp.(params.log_neg_lambda)
+    ω = params.omega
+
+    # Dirac discretization: causal convolution on phase inputs
+    Z_sig = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+
+    # Frequency shift: re-encode at downstream carrier omega_out
+    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
+
+    if a.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        Z = Z .+ reshape(bias_val, :, 1, 1)
+    end
+
+    if a.activation === normalize_to_unit_circle
+        return complex_to_angle(Z), state
+    else
+        Y = a.activation(Z)
         return complex_to_angle(Y), state
-    else  # :spiking
-        phases = complex_to_angle(Y)
-        train = ssm_phases_to_train(phases, spk_args=spk_args)
-        return SpikingCall(train, spk_args, tspan), state
     end
 end
 
