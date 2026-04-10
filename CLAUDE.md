@@ -123,9 +123,17 @@ In **ODE mode** (CurrentCall), bias can be injected as periodic current via `bia
 
 Uses `BacksolveAdjoint` with `ZygoteVJP` for sensitivity analysis through DifferentialEquations.jl. Default solver is `Tsit5()` with `dt=0.005, adaptive=false`.
 
-### GPU/CPU Parity
+### GPU Backend Abstraction
 
-Functions in `gpu.jl` must mirror CPU paths. Check both `Array` and `CuArray` code paths. Avoid scalar indexing on GPU arrays.
+GPU code uses KernelAbstractions.jl for vendor-neutral kernels and GPUArraysCore's `AbstractGPUArray` for dispatch. CUDA is the default backend; oneAPI is supported via a package extension.
+
+- GPU kernels in `gpu.jl` use `@kernel`/`@index` (KernelAbstractions), not `@cuda`/`blockIdx`/`threadIdx`
+- Atomic operations use `Atomix.@atomic`, not `CUDA.@atomic`
+- Dispatch on `AbstractGPUArray` instead of `CuArray` for backend-agnostic GPU paths
+- Use `gpu_zeros(ref_array, T, dims...)` or `KernelAbstractions.zeros(get_backend(ref), T, dims)` instead of `CUDA.zeros`
+- Use `select_device(backend)` instead of checking `CUDA.functional()` directly
+- `Args` has `backend::Symbol` (`:cuda`, `:cpu`, `:oneapi`). `use_cuda` kwarg and property still work for backward compat.
+- `on_gpu(args...)` checks `AbstractGPUArray`, not `CuArray`
 
 ### Exports
 

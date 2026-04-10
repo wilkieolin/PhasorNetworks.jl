@@ -551,7 +551,7 @@ Evaluate model loss and accuracy on a dataset.
 - `model`: Neural network model
 - `ps`: Model parameters
 - `st`: Model state
-- `args`: Configuration arguments (including use_cuda)
+- `args`: Configuration arguments (including backend)
 - `reduce_dim`: Dimension for reduction operations
 - `encoding`: Phase encoding scheme (:codebook or :quadrature)
 
@@ -559,16 +559,12 @@ Evaluate model loss and accuracy on a dataset.
 Tuple of (average_loss, accuracy)
 
 # Notes
-Automatically handles GPU/CPU device placement based on args.use_cuda
+Automatically handles GPU/CPU device placement based on args.backend
 """
 function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
     loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim)
 
-    if args.use_cuda && CUDA.functional()
-        dev = gdev
-    else
-        dev = cdev
-    end
+    dev = select_device(args.backend)
 
     num = 0
     correct = 0
@@ -614,11 +610,7 @@ Useful for assessing the reliability of spiking network performance.
 function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
     loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cdev
 
-    if args.use_cuda && CUDA.functional()
-        dev = gdev
-    else
-        dev = cdev
-    end
+    dev = select_device(args.backend)
 
     num = 0
     correct = []

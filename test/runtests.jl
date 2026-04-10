@@ -37,7 +37,7 @@ tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
     gc_interval::Int = 0     ## GC every N batches (0 = every batch)
     batchsize::Int = 256    ## batch size
     epochs::Int = 10        ## number of epochs
-    use_cuda::Bool = false   ## use gpu (if cuda available)
+    backend::Symbol = :cpu   ## GPU backend (:cuda, :cpu, :oneapi)
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 

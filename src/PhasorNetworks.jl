@@ -90,6 +90,9 @@ ssm_phases_to_train,
 ssm_extract_phases,
 reconstruct_from_current,
 
+#backend
+select_device,
+
 #network
 attend,
 variance_scaling,
@@ -131,6 +134,7 @@ interpolate_roc
 include("imports.jl")
 include("constants.jl")
 include("types.jl")
+include("backend.jl")
 include("domains.jl")
 include("gpu.jl")
 include("spiking.jl")

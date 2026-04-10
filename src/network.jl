@@ -1559,7 +1559,7 @@ Train a phase-based neural network using gradient descent.
 - `st`: Updated state
 - `gradients`: Sampled gradients (only when `sample_gradients > 0`)
 
-Automatically handles CPU/GPU device placement based on args.use_cuda.
+Automatically handles CPU/GPU device placement based on args.backend.
 
 # Training features
 - **Differential LR**: Set `args.lr_ssm` to use a lower learning rate for SSM dynamics
@@ -1577,14 +1577,8 @@ function train(model, ps, st, train_loader, loss, args;
                sample_gradients::Int = 0,
                early_stop::Bool = false,
                early_stop_window::Int = 5)
-    if CUDA.functional() && args.use_cuda
-       @info "Training on CUDA GPU"
-       #CUDA.allowscalar(false)
-       device = gpu_device()
-   else
-       @info "Training on CPU"
-       device = cpu_device()
-   end
+   device = select_device(args.backend)
+   @info "Training on $(args.backend)"
 
    ## Optimizer
    opt_state = Optimisers.setup(optimiser(args.lr), ps)
@@ -1662,7 +1656,7 @@ function train(model, ps, st, train_loader, loss, args;
            # large sol.u arrays (one per saveat point) accumulate on the host and GPU.
            if step_count % gc_every == 0
                GC.gc(false)
-               CUDA.functional() && CUDA.reclaim()
+               args.backend == :cuda && CUDA.functional() && CUDA.reclaim()
            end
        end
        stopped_early && break

@@ -1,258 +1,124 @@
-"""
-    on_gpu(args...) -> Bool
+# ================================================================
+# GPU Kernels (KernelAbstractions — backend-agnostic)
+# ================================================================
 
-Check if any of the provided arguments are CUDA arrays.
-
-Used to determine if computation should proceed on GPU or CPU path.
-Returns true if at least one argument is a CuArray.
-"""
-function on_gpu(args...)
-    locs = [typeof(x) <: CuArray for x in args]
-    return reduce(+, locs) > 0
+@kernel function gaussian_kernel_ka!(output, times, t::Float32, t_sigma::Float32)
+    i = @index(Global)
+    x = times[i]
+    output[i] = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
 end
 
-#Kernels 
-
-function threads_blks(l::Int, threads::Int = N_THREADS)
-    blocks = cld(l, threads)
-    return threads, blocks
-end
-
-"""
-    gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
-
-GPU-optimized version of the Gaussian kernel used in spike current calculations.
-All inputs are Float32 for CUDA compatibility.
-
-# Arguments
-- `x::Float32`: Time of the spike
-- `t::Float32`: Current time
-- `t_sigma::Float32`: Width of the Gaussian kernel
-
-Returns the spike current value at time t for a spike at time x.
-"""
-function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
-    i = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
-    return i
-end
-
-"""
-    gaussian_kernel_gpu!(output, times, t, t_sigma)
-
-CUDA kernel that computes Gaussian kernel values for all spike times in parallel.
-Avoids dynamic dispatch overhead from broadcasting on GPU arrays.
-"""
-function gaussian_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if i <= length(times)
-        x = times[i]
-        output[i] = exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
+@kernel function raised_cosine_kernel_ka!(output, times, t::Float32, t_sigma::Float32)
+    i = @index(Global)
+    x = times[i]
+    dt = t - x
+    half_width = 2.0f0 * t_sigma
+    if abs(dt) <= half_width
+        output[i] = 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+    else
+        output[i] = 0.0f0
     end
-    return nothing
 end
 
-"""
-    raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
+@kernel function periodic_raised_cosine_kernel_ka!(output, times, t::Float32, t_sigma::Float32, t_period::Float32)
+    i = @index(Global)
+    x = times[i]
+    dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
+    half_width = 2.0f0 * t_sigma
+    if abs(dt) <= half_width
+        output[i] = 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+    else
+        output[i] = 0.0f0
+    end
+end
 
-GPU-optimized version of the raised cosine kernel used in spike current calculations.
-Provides smoother gradients and better numerical stability than Gaussian kernels.
+@kernel function scatter_add_kernel_ka!(output, values, indices)
+    i = @index(Global)
+    index = indices[i]
+    value = values[i]
+    Atomix.@atomic output[index] += value
+end
 
-# Arguments
-- `x::Float32`: Time of the spike
-- `t::Float32`: Current time
-- `t_sigma::Float32`: Width parameter (support is ±2*t_sigma)
+# Scalar helper functions (plain Julia math, no GPU kernel dependency)
 
-Returns the spike current value at time t for a spike at time x.
-"""
+function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
+    return exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
+end
+
 function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     dt = t - x
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        return 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
+        return 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
     else
         return 0.0f0
     end
 end
 
-"""
-    raised_cosine_kernel_gpu!(output, times, t, t_sigma)
-
-CUDA kernel that computes raised cosine kernel values for all spike times in parallel.
-Provides better gradient stability for adjoint-based differentiation.
-"""
-function raised_cosine_kernel_gpu!(output, times, t::Float32, t_sigma::Float32)
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if i <= length(times)
-        x = times[i]
-        dt = t - x
-        half_width = 2.0f0 * t_sigma
-        if abs(dt) <= half_width
-            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
-        else
-            output[i] = 0.0f0
-        end
-    end
-    return nothing
-end
-
-"""
-    periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32) -> Float32
-
-GPU-optimized periodic raised cosine kernel for oscillatory systems.
-Computes the shortest distance on a periodic time domain before applying the raised cosine.
-"""
 function periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32)
-    # Compute shortest distance on ring of circumference t_period
     dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        return 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
+        return 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
     else
         return 0.0f0
     end
 end
 
-"""
-    periodic_raised_cosine_kernel_gpu!(output, times, t, t_sigma, t_period)
-
-CUDA kernel for periodic raised cosine kernel values.
-"""
-function periodic_raised_cosine_kernel_gpu!(output, times, t::Float32, t_sigma::Float32, t_period::Float32)
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if i <= length(times)
-        x = times[i]
-        # Compute shortest distance on ring of circumference t_period
-        dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
-        half_width = 2.0f0 * t_sigma
-        if abs(dt) <= half_width
-            output[i] = 0.5f0 * (1.0f0 + CUDA.cos(3.1415927f0 * dt / half_width))
-        else
-            output[i] = 0.0f0
-        end
-    end
-    return nothing
-end
-
-function scatter_add_kernel!(output, values, indices)
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    if i <= length(indices)
-        index = indices[i]
-        value = values[i]
-        CUDA.@atomic output[index] += value
-    end
-    return nothing
-end
+# ================================================================
+# Scatter-Add Operations
+# ================================================================
 
 """
-    parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_size::Int) where T -> CuArray{T}
+    parallel_scatter_add(indices, values, output_size) -> AbstractGPUArray
 
 Perform parallel scatter-add operation on GPU using atomic operations.
-Used for efficiently accumulating spike currents in the network.
-
-# Arguments
-- `indices::CuArray{Int}`: Target indices for the values
-- `values::CuArray{T}`: Values to be scattered and added
-- `output_size::Int`: Size of the output array
-
-# Implementation
-Uses CUDA atomic operations to safely accumulate values in parallel.
-Each thread processes one (index, value) pair and atomically adds
-to the corresponding location in the output array.
-
-Returns a CuArray of size `output_size` containing the accumulated values.
+Backend-agnostic via KernelAbstractions.
 """
-function parallel_scatter_add(indices::CuArray{Int}, values::CuArray{T}, output_size::Int) where T
+function parallel_scatter_add(indices::AbstractGPUArray{Int}, values::AbstractGPUArray{T}, output_size::Int) where T
     @assert length(indices) == length(values) "Length of indices and values must match"
-    
-    output = CUDA.zeros(T, output_size)
-    threads = 256
-    blocks = cld(length(indices), threads)
-    
-    @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
-    
+
+    backend = get_backend(values)
+    output = KernelAbstractions.zeros(backend, T, output_size)
+    scatter_add_kernel_ka!(backend)(output, values, indices; ndrange=length(indices))
+
     return output
 end
 
 """
-    parallel_scatter_add!(output::CuArray, indices::CuArray{Int}, values::CuArray)
+    parallel_scatter_add!(output, indices, values)
 
 In-place version of parallel_scatter_add that reuses a pre-allocated output buffer.
-The output array must be pre-zeroed before calling this function.
 """
-function parallel_scatter_add!(output::CuArray, indices::CuArray{Int}, values::CuArray)
+function parallel_scatter_add!(output::AbstractGPUArray, indices::AbstractGPUArray{Int}, values::AbstractGPUArray)
     @assert length(indices) == length(values) "Length of indices and values must match"
-    
-    threads = 256
-    blocks = cld(length(indices), threads)
-    
-    @cuda threads=threads blocks=blocks scatter_add_kernel!(output, values, indices)
-    
+
+    backend = get_backend(output)
+    scatter_add_kernel_ka!(backend)(output, values, indices; ndrange=length(indices))
+
     return nothing
 end
 
-function interference_kernel(A, B, output, X, M, N, D)
-    m = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    n = (blockIdx().y - 1) * blockDim().y + threadIdx().y
-    x = blockIdx().z
-
-    if x <= X && m <= M && n <= N
-        acc = 0.0f0
-        @inbounds for d in 1:D
-            a = A[d, m, x]
-            b = B[d, n, x]
-            
-            sum_real = real(a) + real(b)
-            sum_imag = imag(a) + imag(b)
-            interference = sqrt(sum_real^2 + sum_imag^2)
-            
-            magnitude = clamp(interference, 0.0f0, 2.0f0)
-            half_angle = acos(0.5f0 * magnitude)
-            sim = cos(2.0f0 * half_angle)
-            acc += sim
-        end
-        output[m, n, x] = acc / D
-    end
-    return
-end
-
-# Domains
+# ================================================================
+# Domain Conversions (GPU)
+# ================================================================
 
 """
-    potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false) -> CuArray
+    potential_to_phase(potential::AbstractGPUArray, ts::AbstractVector; ...) -> AbstractGPUArray
 
 GPU implementation of potential to phase conversion for neural states.
-Extends the CPU version in domains.jl with CUDA-optimized array operations.
-
-# Arguments
-- `potential::CuArray`: Complex-valued neural potentials on GPU
-- `ts::AbstractVector`: Time points corresponding to potential values
-- `spk_args::SpikingArgs`: Spiking neuron parameters
-- `offset::Real=0.0f0`: Time offset for phase calculation
-- `threshold::Bool=false`: Whether to apply threshold checks
-
-# Implementation
-1. Computes reference zero-phase potentials
-2. Calculates phase differences using complex angles
-3. Normalizes to [-1, 1] range
-4. Marks sub-threshold neurons with NaN
-
-See also: [`potential_to_phase`](@ref) for CPU version
 """
-function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
+function potential_to_phase(potential::AbstractGPUArray, ts::AbstractVector; spk_args::SpikingArgs, offset::Real=0.0f0, threshold::Bool=false)
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     dims = collect(1:ndims(potential))
 
-    #find the angle of a neuron representing 0 phase at the current moment in time
-    current_zeros = cu(phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args))
+    current_zeros = gdev(phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args))
 
-    #get the arc subtended in the complex plane between that reference and our neuron potentials
     potential = permutedims(potential, reverse(dims))
     arc = angle.(current_zeros) .- angle.(potential)
-    
-    #normalize by pi and shift to -1, 1
+
     phase = Phase.(mod.((arc ./ pi_f32 .+ 1.0f0), 2.0f0) .- 1.0f0)
 
-    #replace silent neurons with NaN (only if threshold=true)
     if threshold
         silent = abs.(potential) .< spk_args.threshold
         phase[silent] .= Phase(NaN)
@@ -262,14 +128,14 @@ function potential_to_phase(potential::CuArray, ts::AbstractVector; spk_args::Sp
     return phase
 end
 
-function phase_to_train(phases::CuArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
+function phase_to_train(phases::AbstractGPUArray; spk_args::SpikingArgs, repeats::Int = 1, offset::Real = 0.0f0)
     shape = phases |> size
     indices = collect(CartesianIndices(shape)) |> vec
     times = phase_to_time(phases, spk_args=spk_args, offset=offset) |> vec
 
     if repeats > 1
         n_t = times |> length
-        offsets = cu(repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t))
+        offsets = gdev(repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t))
         times = repeat(times, repeats) .+ offsets
         indices = repeat(indices, repeats)
     end
@@ -278,16 +144,16 @@ function phase_to_train(phases::CuArray; spk_args::SpikingArgs, repeats::Int = 1
     return train
 end
 
-#Spiking
+# ================================================================
+# Spiking (GPU)
+# ================================================================
 
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     n = length(stg.times)
-    currents = CUDA.zeros(Float32, n)
+    backend = get_backend(stg.times)
+    currents = KernelAbstractions.zeros(backend, Float32, n)
 
-    threads = N_THREADS
-    blocks = cld(n, threads)
-
-    @cuda threads=threads blocks=blocks raised_cosine_kernel_gpu!(currents, stg.times, t, Float32(spk_args.t_window))
+    raised_cosine_kernel_ka!(backend)(currents, stg.times, t, Float32(spk_args.t_window); ndrange=n)
 
     output = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
     return output
@@ -297,106 +163,70 @@ function spike_current(train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     scale = spk_args.spk_scale
     current = parallel_current(train, t, spk_args)
     current = reshape(current, train.shape)
-    
+
     return current
 end
 
 """
-    spike_current!(output::CuArray, train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs,
-                   currents_buffer::CuArray, scatter_buffer::CuArray)
+    spike_current!(output, train::SpikeTrainGPU, t, spk_args, currents_buffer, scatter_buffer)
 
-In-place version of spike_current that reuses pre-allocated buffers to avoid
-GPU memory allocations during ODE integration. This is critical for performance
-when spike_current is called many times per simulation.
-
-# Arguments
-- `output::CuArray`: Pre-allocated output array with shape matching train.shape
-- `train::SpikeTrainGPU`: Input spike train
-- `t::Float32`: Current time
-- `spk_args::SpikingArgs`: Spiking neuron parameters
-- `currents_buffer::CuArray`: Pre-allocated buffer for kernel values (size = n_spikes)
-- `scatter_buffer::CuArray`: Pre-allocated buffer for scatter-add (size = linear_shape)
+In-place version of spike_current that reuses pre-allocated buffers.
 """
-function spike_current!(output::CuArray{Float32}, train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs,
-                        currents_buffer::CuArray{Float32}, scatter_buffer::CuArray{Float32})
+function spike_current!(output::AbstractGPUArray{Float32}, train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs,
+                        currents_buffer::AbstractGPUArray{Float32}, scatter_buffer::AbstractGPUArray{Float32})
     scale = spk_args.spk_scale
     t_window = Float32(spk_args.t_window)
 
-    # Compute kernel values in-place using CUDA kernel
-    threads = N_THREADS
-    blocks = cld(length(train.times), threads)
-    @cuda threads=threads blocks=blocks raised_cosine_kernel_gpu!(currents_buffer, train.times, t, t_window)
+    backend = get_backend(currents_buffer)
+    raised_cosine_kernel_ka!(backend)(currents_buffer, train.times, t, t_window; ndrange=length(train.times))
     currents_buffer .*= scale
 
-    # Zero the scatter buffer and accumulate
     scatter_buffer .= 0.0f0
     parallel_scatter_add!(scatter_buffer, train.linear_indices, currents_buffer)
 
-    # Copy reshaped result to output
     output .= reshape(scatter_buffer, train.shape)
 
     return nothing
 end
 
-function bias_current(bias::CuArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
+function bias_current(bias::AbstractGPUArray{<:Complex}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     phase = complex_to_angle(bias)
     mag = abs.(bias)
     return bias_current(phase, mag, t, t_offset, spk_args)
 end
 
-function bias_current(phase::CuArray{<:Real}, mag::CuArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
-    #what times to the bias values correlate to?
+function bias_current(phase::AbstractGPUArray{<:Real}, mag::AbstractGPUArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
     times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
-    #determine the time within the cycle
     t_mod = Float32(mod(t, spk_args.t_period))
-    #compute kernel values using CUDA kernel (periodic version for bias)
     n = length(times)
-    kernel_vals = CUDA.zeros(Float32, n)
-    threads = N_THREADS
-    blocks = cld(n, threads)
-    @cuda threads=threads blocks=blocks periodic_raised_cosine_kernel_gpu!(kernel_vals, times, t_mod, Float32(spk_args.t_window), Float32(spk_args.t_period))
-    #scale by bias magnitude and reshape to match phase shape
+    backend = get_backend(times)
+    kernel_vals = KernelAbstractions.zeros(backend, Float32, n)
+    periodic_raised_cosine_kernel_ka!(backend)(kernel_vals, times, t_mod, Float32(spk_args.t_window), Float32(spk_args.t_period); ndrange=n)
     bias = reshape(mag .* kernel_vals, size(phase))
 
     return bias
 end
 
 function f32_tspan(tspan::Tuple{<:Real, <:Real})
-    tspan = (Float32(tspan[1]), Float32(tspan[2]))
-    return tspan
+    return (Float32(tspan[1]), Float32(tspan[2]))
 end
 
-function oscillator_bank(u0::CuArray, dzdt::Function; tspan::Tuple{<:Float32, <:Float32}, spk_args::SpikingArgs)
-    #solve the ODE
+function oscillator_bank(u0::AbstractGPUArray, dzdt::Function; tspan::Tuple{<:Float32, <:Float32}, spk_args::SpikingArgs)
     prob = ODEProblem(dzdt, u0, tspan)
     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-
     return sol
 end
 
 """
-    oscillator_bank(x::SpikeTrainGPU; tspan=(0.0f0, 10.0f0), spk_args::SpikingArgs) -> ODESolution
+    oscillator_bank(x::SpikeTrainGPU; tspan, spk_args) -> ODESolution
 
-GPU implementation of oscillator bank simulation for spiking neural networks.
-Simulates the dynamics of a bank of oscillators driven by spike inputs.
-
-# Arguments
-- `x::SpikeTrainGPU`: Input spike train on GPU
-- `tspan::Tuple{<:Real, <:Real}`: Time span for simulation
-- `spk_args::SpikingArgs`: Parameters for neuron dynamics
-
-# Implementation
-Sets up and solves the ODE system:
-dz/dt = k*z + spike_current(x, t), where k = leakage + i*(2pi/t_period)
-
-See also: [`oscillator_bank`](@ref) in spiking.jl for CPU version
+GPU oscillator bank simulation. Solves dz/dt = k*z + spike_current(x, t).
 """
 function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs)
-    tspan = tspan |> f32_tspan 
+    tspan = tspan |> f32_tspan
 
-    #set up compartments for each sample
-    u0 = CUDA.zeros(ComplexF32, x.shape)
-    #resonate in time with the input spikes
+    backend = get_backend(x.times)
+    u0 = KernelAbstractions.zeros(backend, ComplexF32, x.shape...)
     dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) .+ spike_current(x, t, spk_args)
 
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
@@ -405,14 +235,14 @@ function oscillator_bank(x::SpikeTrainGPU; tspan::Tuple{<:Real, <:Real} = (0.0f0
 end
 
 """
-    similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims=2) -> CuArray{Float32,3}
+    similarity_outer(A::AbstractGPUArray{ComplexF32,3}, B::AbstractGPUArray{ComplexF32,3}; dims=2)
 
 GPU-optimized pairwise similarity computation between sets of complex-valued vectors.
-Provides a vectorized implementation that is efficient on GPUs and compatible with automatic differentiation.
+Backend-agnostic via AbstractGPUArray. Compatible with automatic differentiation.
 
 # Arguments
-- `A::CuArray{ComplexF32,3}`: First set of vectors
-- `B::CuArray{ComplexF32,3}`: Second set of vectors
+- `A::AbstractGPUArray{ComplexF32,3}`: First set of vectors
+- `B::AbstractGPUArray{ComplexF32,3}`: Second set of vectors
 - `dims::Int=2`: Dimension along which to slice vectors for pairwise comparison
 
 For `dims=2` with shape `(features, n_vectors, batch)`:
@@ -427,7 +257,7 @@ Note: The 2D version returns `(n_vectors_B, n_vectors_A)` to match CPU's transpo
 
 See also: [`similarity_outer`](@ref) in vsa.jl for CPU version
 """
-function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims::Int=2)
+function similarity_outer(A::AbstractGPUArray{ComplexF32,3}, B::AbstractGPUArray{ComplexF32,3}; dims::Int=2)
     # Vectorized implementation that avoids custom CUDA kernels and uses
     # broadcasting + reductions. This form is much simpler for AD backends
     # (Zygote) to trace through on GPU arrays.
@@ -510,7 +340,7 @@ function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; di
     return sim_avg
 end
 
-function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; dims::Int=2)
+function similarity_outer(A::AbstractGPUArray{ComplexF32,2}, B::AbstractGPUArray{ComplexF32,2}; dims::Int=2)
     # Treat 2D inputs as 3D with a singleton batch dimension and delegate
     # to the vectorized 3D implementation.
     # 
@@ -539,9 +369,9 @@ function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; di
     return permutedims(out2, (2, 1))
 end
 
-# Support dispatch when inputs are real-valued CuArrays by converting to
-# ComplexF32 on the device and delegating to the complex-valued GPU kernels.
-function similarity_outer(A::CuArray{<:Real,3}, B::CuArray{<:Real,3}; dims::Int=2)
+# Support dispatch when inputs are real-valued GPU arrays by converting to
+# ComplexF32 on the device and delegating to the complex-valued implementation.
+function similarity_outer(A::AbstractGPUArray{<:Real,3}, B::AbstractGPUArray{<:Real,3}; dims::Int=2)
     # Convert phase angles to complex representation on GPU and delegate to
     # the complex-valued, vectorized implementation.
     A_c = angle_to_complex(A)
@@ -549,7 +379,7 @@ function similarity_outer(A::CuArray{<:Real,3}, B::CuArray{<:Real,3}; dims::Int=
     return similarity_outer(A_c, B_c; dims=dims)
 end
 
-function similarity_outer(A::CuArray{<:Real,2}, B::CuArray{<:Real,2}; dims::Int=2)
+function similarity_outer(A::AbstractGPUArray{<:Real,2}, B::AbstractGPUArray{<:Real,2}; dims::Int=2)
     A_c = angle_to_complex(A)
     B_c = angle_to_complex(B)
     return similarity_outer(A_c, B_c; dims=dims)

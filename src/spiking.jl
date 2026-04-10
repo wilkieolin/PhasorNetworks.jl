@@ -429,8 +429,8 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     #call the current function to find if we're on CPU or GPU
     sample = x.current_fn(tspan[1])
     #make the initial potential the bias value
-    if typeof(sample) <: CuArray
-        u0 = CUDA.zeros(ComplexF32, x.shape)
+    if sample isa AbstractGPUArray
+        u0 = KernelAbstractions.zeros(get_backend(sample), ComplexF32, x.shape...)
     else
         u0 = zeros(ComplexF32, x.shape)
     end

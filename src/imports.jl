@@ -1,4 +1,7 @@
 using CUDA, LuxCUDA
+using KernelAbstractions
+using GPUArraysCore: AbstractGPUArray
+using Atomix
 using ComponentArrays, Lux
 using SciMLSensitivity, DifferentialEquations, Optimisers
 
