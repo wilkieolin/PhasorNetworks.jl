@@ -49,6 +49,7 @@ include("metrics_tests.jl")
 include("network_layers_tests.jl")
 include("test_phase_type.jl")
 include("test_ssm.jl")
+include("test_hep.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
@@ -59,6 +60,7 @@ include("test_ssm.jl")
     network_layers_tests()
     phase_type_tests()
     ssm_tests()
+    hep_tests()
     #spiking_operations_tests()
 
     if CUDA.functional()

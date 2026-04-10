@@ -450,3 +450,21 @@ end
 function v_unbind(x::SpikingTypes, y::SpikingTypes; kwargs...)
     return v_bind(x, y, unbind=true; kwargs...)
 end
+
+"""
+    codebook_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1) -> AbstractArray
+
+Compute loss for codebook-based classification from similarity scores.
+
+Wraps [`similarity_loss`](@ref) for use with [`Codebook`](@ref) layer outputs.
+
+# Arguments
+- `similarities`: Similarity scores from codebook (e.g. output of `similarity_outer`)
+- `truth`: Target values (one-hot encoded)
+- `dim`: Dimension along which to compute loss (default: 1)
+
+Returns per-sample loss values.
+"""
+function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1)
+    return similarity_loss(similarities, truth; dim=dim)
+end

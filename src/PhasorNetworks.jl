@@ -109,6 +109,21 @@ soft_angle,
 default_bias,
 zero_bias,
 
+#hep
+holotanh,
+holotanh_deriv,
+hep_energy,
+hep_equilibrium,
+hep_gradient,
+hep_train,
+hep_cost_xent,
+hep_cost_xent_grad,
+HolomorphicReadout,
+hep_interference_cost,
+hep_interference_cost_grad,
+extract_hep_params,
+pack_hep_gradients,
+
 #metrics
 arc_error,
 angular_mean,
@@ -139,5 +154,6 @@ include("kernels.jl")
 include("network.jl")
 include("ssm.jl")
 include("metrics.jl")
+include("hep.jl")
 
 end
