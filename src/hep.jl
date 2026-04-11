@@ -172,13 +172,18 @@ end
 
 Compute phasor kernel matrices A = exp(k*dt), B = (A-1)/k
 where k = -exp(log_neg_lambda) + i*omega.
+
+Also returns |k| per channel for DC gain compensation.
+The oscillator's steady-state gain is 1/|k|, so multiplying
+the input by |k| restores unit gain.
 """
 function _phasor_AB(log_neg_lambda, omega, dt::Float32)
     lambda = -exp.(log_neg_lambda)
     k = ComplexF32.(lambda .+ im .* omega)
     A = exp.(k .* dt)
     B = (A .- 1) ./ k
-    return A, B
+    k_mag = Float32.(abs.(k))
+    return A, B, k_mag
 end
 
 # ================================================================
@@ -240,13 +245,13 @@ function hep_equilibrium(weights, biases, k_arrays, x, beta, y;
     n_layers = length(weights)
     ET = _state_eltype(beta, x)
 
-    # Extract omega per layer and compute A, B
+    # Extract omega per layer and compute A, B, |k|
     omegas = [ComplexF32.(ka[2]) for ka in k_arrays]
-    AB = [_phasor_AB(ka[1], ka[2], dt) for ka in k_arrays]
+    ABK = [_phasor_AB(ka[1], ka[2], dt) for ka in k_arrays]
 
-    # Initialize states
+    # Initialize states (always complex for consistency)
     if init !== nothing
-        states = [ET.(copy(s)) for s in init]
+        states = [ComplexF32.(copy(s)) for s in init]
     else
         states = _forward_init_demod(weights, biases, x, ET)
     end
@@ -255,15 +260,16 @@ function hep_equilibrium(weights, biases, k_arrays, x, beta, y;
     for n in 1:T
         new_states = Vector{Any}(undef, n_layers)
 
-        # Demodulate all states at current step
-        phis = [_demodulate(states[l], omegas[l], n-1, dt) for l in 1:n_layers]
-        # Demodulate input (input has no carrier, so phi_0 = x)
-        phi_inputs = (x, phis[1:end-1]...)
+        # Demodulate all states and apply holotanh activation
+        phis = [holotanh(_demodulate(states[l], omegas[l], n-1, dt))
+                for l in 1:n_layers]
+        # Input has no carrier — apply holotanh for consistency
+        phi_inputs = (holotanh(x), phis[1:end-1]...)
 
         for l in 1:n_layers
-            A_l, B_l = AB[l]
+            A_l, B_l, k_mag_l = ABK[l]
 
-            # --- Inter-layer coupling on demodulated states ---
+            # --- Inter-layer coupling on demodulated, activated states ---
 
             # Feedforward: W_l * phi_{l-1}
             I_l = weights[l] * phi_inputs[l]
@@ -288,6 +294,10 @@ function hep_equilibrium(weights, biases, k_arrays, x, beta, y;
                 end
                 I_l = I_l .- beta .* dC_dphi
             end
+
+            # DC gain compensation: multiply by |k| so steady-state
+            # gain is 1 instead of 1/|k|
+            I_l = k_mag_l .* I_l
 
             # Phasor recurrence: z[n+1] = A .* z[n] + B .* I
             new_states[l] = A_l .* states[l] .+ B_l .* I_l
@@ -347,9 +357,10 @@ function hep_energy(states, weights, biases, omegas, x, y, beta;
                     readout_conj = nothing)
     phi = zero(ComplexF32)
 
-    # Demodulate states
-    phis = [_demodulate(states[l], omegas[l], n, dt) for l in 1:length(weights)]
-    phi_inputs = (x, phis[1:end-1]...)
+    # Demodulate + activate
+    phis = [holotanh(_demodulate(states[l], omegas[l], n, dt))
+            for l in 1:length(weights)]
+    phi_inputs = (holotanh(x), phis[1:end-1]...)
 
     for l in 1:length(weights)
         pre = weights[l] * phi_inputs[l]
@@ -388,14 +399,16 @@ function _energy_param_gradients(states, weights, biases, omegas, x;
                                  n::Int = 0, dt::Float32 = 0.1f0)
     n_layers = length(weights)
 
-    phis = [_demodulate(states[l], omegas[l], n, dt) for l in 1:n_layers]
-    phi_inputs = (x, phis[1:end-1]...)
+    # Demodulate + activate, matching the equilibrium dynamics
+    phis = [holotanh(_demodulate(states[l], omegas[l], n, dt))
+            for l in 1:n_layers]
+    phi_inputs = (holotanh(x), phis[1:end-1]...)
 
     weight_grads = []
     bias_grads = []
 
     for l in 1:n_layers
-        # ∂Φ/∂W_l = phi_l * phi_{l-1}^T
+        # ∂Φ/∂W_l = phi_l * phi_{l-1}^T  (Hebbian on activated demod states)
         w_grad = phis[l] * transpose(phi_inputs[l])
         push!(weight_grads, w_grad)
 
@@ -608,21 +621,32 @@ function hep_train(model, ps, st, train_loader, args;
     for epoch in 1:args.epochs
         for (x, y) in train_loader
             weights, biases, k_arrays, layer_keys, readout_conj = extract_hep_params(ps, st)
+            rc = readout_conj !== nothing ? ComplexF32.(readout_conj) : nothing
+            omegas = [ComplexF32.(ka[2]) for ka in k_arrays]
 
             w_grads, b_grads = hep_gradient(weights, biases, k_arrays, x, y;
                                             N=N, r=r, dt=dt,
                                             T_free=T_free, T_nudge=T_nudge,
-                                            readout_conj=readout_conj !== nothing ? ComplexF32.(readout_conj) : nothing)
+                                            readout_conj=rc)
 
             grad_nt = pack_hep_gradients(w_grads, b_grads, layer_keys, ps)
             opt_state, ps = Optimisers.update(opt_state, ps, grad_nt)
 
-            # Track loss via model forward pass
-            y_pred, _ = model(x, ps, st)
-            lossval = if y_pred isa AbstractArray{<:Complex}
-                real(hep_interference_cost(y_pred, y))
+            # Track loss from hEP free-phase equilibrium (aligned with training)
+            weights_new, biases_new, k_arrays_new, _, rc_new = extract_hep_params(ps, st)
+            rc_eval = rc_new !== nothing ? ComplexF32.(rc_new) : nothing
+            omegas_new = [ComplexF32.(ka[2]) for ka in k_arrays_new]
+            states_eval = hep_equilibrium(weights_new, biases_new, k_arrays_new,
+                                          ComplexF32.(x), 0.0f0, y;
+                                          T=T_free, dt=dt, readout_conj=rc_eval)
+            phi_out = holotanh(_demodulate(states_eval[end], omegas_new[end], T_free, dt))
+
+            lossval = if rc_eval !== nothing
+                d = size(rc_eval, 1)
+                logits = transpose(rc_eval) * phi_out ./ Float32(d)
+                real(hep_interference_cost(logits, y))
             else
-                mean(evaluate_loss(y_pred, y, :quadrature))
+                real(hep_cost_xent(phi_out, y))
             end
             push!(losses, Float32(lossval))
 
