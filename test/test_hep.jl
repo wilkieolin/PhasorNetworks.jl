@@ -267,28 +267,34 @@ end
 
 function hep_aligned_training_tests()
     @testset "hep_train aligned (HolomorphicReadout)" begin
-        args = Args(lr=1e-3, epochs=3, batchsize=64)
+        args = Args(lr=1.0, epochs=10, batchsize=64)
 
         model = Chain(
             x -> ComplexF32.(x),
-            PhasorDense(2 => 32, holotanh, use_bias=false),
-            PhasorDense(32 => 3, holotanh, use_bias=false),
-            HolomorphicReadout(3 => 2)
+            PhasorDense(2 => 16, holotanh, use_bias=false),
+            PhasorDense(16 => 2, holotanh, use_bias=false),
+            HolomorphicReadout(2 => 2)
         )
         ps, st = Lux.setup(args.rng, model)
+        # Use omega=0 for EP settling (no carrier oscillation)
+        st = merge(st, (
+            layer_2 = (omega = zeros(Float32, 16),),
+            layer_3 = (omega = zeros(Float32, 2),),
+            layer_4 = st.layer_4
+        ))
 
         x_test = Float32.(randn(args.rng, 2, 4))
         y_pred, _ = model(x_test, ps, st)
         @test size(y_pred) == (2, 4)
 
-        train_loader = [bullseye_data(args.batchsize, args.rng) for _ in 1:20]
+        train_loader = [bullseye_data(args.batchsize, args.rng) for _ in 1:30]
 
         losses, ps_trained, _ = hep_train(
             model, ps, st, train_loader, args;
-            N=4, r=0.3f0, dt=0.1f0,
-            T_free=60, T_nudge=20)
+            N=16, r=0.3f0, dt=0.1f0,
+            T_free=200, T_nudge=50)
 
-        @test length(losses) == 3 * 20
+        @test length(losses) == 10 * 30
         @test all(isfinite, losses)
 
         n = length(losses)
@@ -296,6 +302,7 @@ function hep_aligned_training_tests()
         early_avg = mean(losses[1:q])
         late_avg = mean(losses[end-q+1:end])
         @info "hEP aligned training: early_loss=$early_avg, late_loss=$late_avg"
-        @test late_avg < early_avg + 0.5f0
+        # Loss should decrease (learning signal confirmed)
+        @test late_avg < early_avg
     end
 end
