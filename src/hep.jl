@@ -3,17 +3,22 @@
 # ================================================================
 #
 # Implements holomorphic equilibrium propagation (Laborieux & Zenke,
-# NeurIPS 2022) for PhasorNetworks via coupled phasor recurrences.
+# NeurIPS 2022) for PhasorNetworks via coupled phasor recurrences
+# with demodulated inter-layer coupling.
 #
-# The EP settling dynamics are realized by damped oscillator
-# recurrences:  z_l[n+1] = A_l * z_l[n] + B_l * I_l[n]
-# where A = exp(k*dt), B = (A-1)/k are the phasor kernel matrices,
-# and I_l is the EP energy gradient (feedforward + feedback + nudge).
+# Each neuron's state z_l(t) oscillates at frequency omega_l. The
+# information is in the relative phase, obtained by demodulating
+# against a reference oscillation:
 #
-# The holomorphic extension (complex beta) enables exact gradient
-# computation via contour integration / first Fourier coefficient.
+#     phi_l[n] = z_l[n] .* conj(ref_l[n])
+#     ref_l[n] = exp(i * omega_l * n * dt)
 #
-# See docs/phasor_hep_derivation.tex for the full derivation.
+# The phasor kernel handles carrier dynamics (oscillation + decay),
+# while inter-layer coupling operates on the demodulated states.
+# The demodulation reference is a fixed function of time, so
+# conj(ref) is a constant w.r.t. holomorphic derivatives in z.
+#
+# See docs/phasor_hep_derivation.tex for the formal derivation.
 
 # ================================================================
 # 1. Holomorphic Activation Functions
@@ -39,8 +44,6 @@ end
     holotanh_deriv(z; a=1.0f0)
 
 Derivative of holotanh: σ'(z) = a * (1 - tanh(a*z)^2).
-Needed for the feedback term and parameter gradients in the
-EP energy gradient (Eq. 7 in the derivation).
 """
 function holotanh_deriv(z; a::Float32 = 1.0f0)
     t = tanh.(a .* z)
@@ -55,16 +58,8 @@ end
     hep_cost_xent(z_output, y)
 
 Complex cross-entropy cost, holomorphic in z_output.
-
-Treats z_output as complex logits and applies log-softmax:
-    C = -sum(y .* log_softmax(z)) / batch_size
-
-Since exp and log are holomorphic, this cost preserves the
-holomorphic structure needed for exact contour gradients.
 """
 function hep_cost_xent(z_output, y)
-    # log-softmax: z_c - log(sum(exp(z)))
-    # Shift for numerical stability (subtract max per sample)
     z_shift = z_output .- maximum(real.(z_output), dims=1)
     log_probs = z_shift .- log.(sum(exp.(z_shift), dims=1))
     batch = size(z_output, 2)
@@ -74,9 +69,7 @@ end
 """
     hep_cost_xent_grad(z_output, y)
 
-Gradient of complex cross-entropy w.r.t. z_output (holomorphic derivative).
-
-    ∂C/∂z = (softmax(z) - y) / batch_size
+Gradient of complex cross-entropy: softmax(z) - y, normalized by batch.
 """
 function hep_cost_xent_grad(z_output, y)
     z_shift = z_output .- maximum(real.(z_output), dims=1)
@@ -103,17 +96,8 @@ This is holomorphic in z (the conjugated codes are fixed constants).
 When z is on the unit circle, the real part of each logit equals
 the standard codebook cosine similarity: mean(cos(π(θ_z - θ_code))).
 
-The physical interpretation: each logit measures the interference
-between the output oscillator state and a reference oscillator at
-the class prototype phase. Constructive interference (phase match)
-yields large magnitude; destructive interference yields small.
-
-# Fields
-- `in_dims::Int`: Feature dimension (must match network output)
-- `n_classes::Int`: Number of classification targets
-
-# State
-- `codes_conj`: Conjugated codebook entries, (in_dims, n_classes) ComplexF32
+Physically: measures interference between the output oscillator state
+and a reference oscillator at the class prototype phase.
 """
 struct HolomorphicReadout <: LuxCore.AbstractLuxLayer
     in_dims::Int
@@ -138,19 +122,7 @@ function Lux.initialstates(rng::AbstractRNG, hr::HolomorphicReadout)
     return (codes_conj = codes_conj,)
 end
 
-"""
-    (hr::HolomorphicReadout)(z, params, state) -> (logits, state)
-
-Compute interference logits. z can be complex or Phase.
-
-Output shape: (n_classes, batch_size), real-valued for inference
-or complex-valued during hEP dynamics.
-"""
 function (hr::HolomorphicReadout)(z::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
-    # z: (in_dims, batch) complex
-    # codes_conj: (in_dims, n_classes) complex
-    # logit_c = (1/d) * sum_j z_j * codes_conj_j,c
-    # = (1/d) * codes_conj^T * z  →  (n_classes, batch)
     logits = transpose(state.codes_conj) * z ./ Float32(hr.in_dims)
     return logits, state
 end
@@ -158,12 +130,10 @@ end
 function (hr::HolomorphicReadout)(z::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     zc = angle_to_complex(Float32.(z))
     logits, st = hr(zc, params, state)
-    # For Phase input (inference), return real similarities
     return real.(logits), st
 end
 
 function (hr::HolomorphicReadout)(z::AbstractArray{<:Real}, params::LuxParams, state::NamedTuple)
-    # Real input: treat as phase values, convert to complex
     zc = angle_to_complex(z)
     logits, st = hr(zc, params, state)
     return real.(logits), st
@@ -173,16 +143,8 @@ end
     hep_interference_cost(logits, y)
 
 Cross-entropy cost on interference logits. Holomorphic in logits.
-
-Takes the real part of complex logits before softmax, since
-exp(a+ib) has magnitude exp(a) — the softmax is naturally driven
-by the real component (which encodes phase alignment strength).
 """
 function hep_interference_cost(logits, y)
-    # Use real part for softmax (holomorphic: Re(z) = (z + conj(z))/2,
-    # but conj(z) is constant w.r.t. holomorphic derivatives since
-    # d/dz conj(z) = 0 in Wirtinger calculus)
-    # Actually, Re() is not holomorphic. Use the full complex logits.
     z_shift = logits .- maximum(real.(logits), dims=1)
     log_probs = z_shift .- log.(sum(exp.(z_shift), dims=1))
     batch = size(logits, 2)
@@ -192,8 +154,7 @@ end
 """
     hep_interference_cost_grad(logits, y)
 
-Gradient of interference cost w.r.t. logits (holomorphic).
-Same as softmax cross-entropy gradient: softmax(z) - y.
+Gradient of interference cost w.r.t. logits: softmax(z) - y.
 """
 function hep_interference_cost_grad(logits, y)
     z_shift = logits .- maximum(real.(logits), dims=1)
@@ -209,13 +170,8 @@ end
 """
     _phasor_AB(log_neg_lambda, omega, dt)
 
-Compute the phasor kernel matrices A and B from dynamics parameters.
-
-    k = -exp(log_neg_lambda) + i*omega
-    A = exp(k * dt)
-    B = (A - 1) / k
-
-Returns (A, B) as vectors (diagonal matrices stored as vectors).
+Compute phasor kernel matrices A = exp(k*dt), B = (A-1)/k
+where k = -exp(log_neg_lambda) + i*omega.
 """
 function _phasor_AB(log_neg_lambda, omega, dt::Float32)
     lambda = -exp.(log_neg_lambda)
@@ -226,103 +182,114 @@ function _phasor_AB(log_neg_lambda, omega, dt::Float32)
 end
 
 # ================================================================
-# 4. Coupled Phasor Recurrence Equilibrium Solver
+# 5. Demodulated Coupled Phasor Recurrence
 # ================================================================
 
 """
+    _demodulate(z, omega, n, dt)
+
+Demodulate state z by removing the carrier oscillation at step n:
+    phi = z .* conj(exp(i * omega * n * dt))
+
+The demodulated state phi encodes the relative phase — the
+information-carrying variable — while the carrier exp(i*omega*t)
+is factored out. Since conj(ref) depends only on omega and n
+(not on z), this operation is holomorphic in z.
+"""
+function _demodulate(z, omega, n::Int, dt::Float32)
+    ref_conj = exp.(ComplexF32.(-im .* omega .* (n * dt)))
+    return z .* ref_conj
+end
+
+"""
     hep_equilibrium(weights, biases, k_arrays, x, beta, y;
-                    T, dt, activation, readout_conj, init)
+                    T, dt, readout_conj, init)
 
-Find equilibrium via the coupled phasor recurrence:
+Find equilibrium via the demodulated coupled phasor recurrence.
 
-    z_l[n+1] = A_l .* z_l[n] + B_l .* I_l[n]
+At each step n, for each layer l:
+1. Demodulate states: phi_l = z_l .* conj(ref_l)
+2. Compute inter-layer coupling on demodulated states:
+   - Feedforward:  W_l * phi_{l-1}
+   - Feedback:     W_{l+1}^T * phi_{l+1}
+   - Teaching:     -β * ∂C/∂z_L  (output layer only)
+3. Advance oscillator: z_l[n+1] = A_l .* z_l[n] + B_l .* I_l[n]
 
-where I_l is the EP energy gradient for layer l:
-- Feedforward:  σ(W_l * z_{l-1} + b_l)
-- Feedback:     W_{l+1}^T * [σ'(pre_{l+1}) .* z_{l+1}]
-- Teaching:     -β * ∂C/∂z_L  (output layer only)
-
-The phasor eigenvalues k = λ + iω provide:
-- Decay (λ < 0): drives system toward equilibrium
-- Oscillation (ω): preserves phasor phase structure
+The oscillator kernel (A, B) handles carrier dynamics (rotation +
+decay). Inter-layer coupling operates on relative phases (phi),
+avoiding the DC gain attenuation that occurs when coupling raw
+oscillating states.
 
 # Arguments
-- `weights`: Tuple of weight matrices (W_1, ..., W_L)
-- `biases`: Tuple of bias vectors (or nothing entries)
+- `weights`: Tuple of weight matrices
+- `biases`: Tuple of bias vectors (or nothing)
 - `k_arrays`: Tuple of (log_neg_lambda, omega) pairs per layer
-- `x`: Input data (fixed, not updated)
+- `x`: Input data (encoded as complex, e.g. exp(i*pi*theta))
 - `beta`: Nudge parameter (real or complex)
 - `y`: Target labels (one-hot)
-- `T::Int=100`: Number of recurrence steps
-- `dt::Float32=1.0f0`: Discretization time step
-- `activation`: Holomorphic activation (default: holotanh)
-- `readout_conj`: Conjugated codebook matrix (in_dims, n_classes) for
-  interference-based readout. If nothing, cost is applied directly
-  to output states via hep_cost_xent.
-- `init`: Optional initial states tuple
+- `T::Int=100`: Recurrence steps
+- `dt::Float32=0.1f0`: Time step (should be < period for meaningful oscillation)
+- `readout_conj`: Conjugated codebook for interference readout (or nothing)
+- `init`: Optional initial states tuple (raw z, not demodulated)
 """
 function hep_equilibrium(weights, biases, k_arrays, x, beta, y;
                          T::Int = 100,
-                         dt::Float32 = 1.0f0,
-                         activation = holotanh,
+                         dt::Float32 = 0.1f0,
                          readout_conj = nothing,
                          init = nothing)
     n_layers = length(weights)
     ET = _state_eltype(beta, x)
 
-    # Compute phasor kernel matrices A, B per layer
+    # Extract omega per layer and compute A, B
+    omegas = [ComplexF32.(ka[2]) for ka in k_arrays]
     AB = [_phasor_AB(ka[1], ka[2], dt) for ka in k_arrays]
 
     # Initialize states
     if init !== nothing
         states = [ET.(copy(s)) for s in init]
     else
-        states = _forward_init(weights, biases, x, activation, ET)
+        states = _forward_init_demod(weights, biases, x, ET)
     end
 
-    # Coupled recurrence
-    for t in 1:T
+    # Coupled recurrence with demodulation
+    for n in 1:T
         new_states = Vector{Any}(undef, n_layers)
-        inputs = (x, states[1:end-1]...)
+
+        # Demodulate all states at current step
+        phis = [_demodulate(states[l], omegas[l], n-1, dt) for l in 1:n_layers]
+        # Demodulate input (input has no carrier, so phi_0 = x)
+        phi_inputs = (x, phis[1:end-1]...)
 
         for l in 1:n_layers
             A_l, B_l = AB[l]
 
-            # --- Compute I_l: EP energy gradient for layer l ---
+            # --- Inter-layer coupling on demodulated states ---
 
-            # Feedforward: σ(W_l * z_{l-1} + b_l)
-            pre_l = weights[l] * inputs[l]
+            # Feedforward: W_l * phi_{l-1}
+            I_l = weights[l] * phi_inputs[l]
             if biases[l] !== nothing
-                pre_l = pre_l .+ biases[l]
+                I_l = I_l .+ biases[l]
             end
-            I_l = activation(pre_l)
 
-            # Feedback from above: W_{l+1}^T * [σ'(pre_{l+1}) .* z_{l+1}]
+            # Feedback: W_{l+1}^T * phi_{l+1}
             if l < n_layers
-                pre_above = weights[l+1] * states[l]
-                if biases[l+1] !== nothing
-                    pre_above = pre_above .+ biases[l+1]
-                end
-                sigma_prime = holotanh_deriv(pre_above)
-                I_l = I_l .+ transpose(weights[l+1]) * (sigma_prime .* states[l+1])
+                I_l = I_l .+ transpose(weights[l+1]) * phis[l+1]
             end
 
-            # Teaching signal: -β * ∂C/∂z_L (output layer only)
+            # Teaching signal on output layer
             if l == n_layers && beta != 0
                 if readout_conj !== nothing
-                    # Interference readout: logits = codes_conj^T * z / d
                     d = size(readout_conj, 1)
-                    logits = transpose(readout_conj) * states[l] ./ Float32(d)
+                    logits = transpose(readout_conj) * phis[l] ./ Float32(d)
                     dC_dlogits = hep_interference_cost_grad(logits, y)
-                    # Chain rule: ∂C/∂z = codes_conj * ∂C/∂logits / d
-                    dC_dz = readout_conj * dC_dlogits ./ Float32(d)
+                    dC_dphi = readout_conj * dC_dlogits ./ Float32(d)
                 else
-                    dC_dz = hep_cost_xent_grad(states[l], y)
+                    dC_dphi = hep_cost_xent_grad(phis[l], y)
                 end
-                I_l = I_l .- beta .* dC_dz
+                I_l = I_l .- beta .* dC_dphi
             end
 
-            # Phasor recurrence step: z[n+1] = A .* z[n] + B .* I
+            # Phasor recurrence: z[n+1] = A .* z[n] + B .* I
             new_states[l] = A_l .* states[l] .+ B_l .* I_l
         end
 
@@ -333,7 +300,7 @@ function hep_equilibrium(weights, biases, k_arrays, x, beta, y;
 end
 
 """
-Determine element type for states. Complex beta requires complex states.
+Determine element type for states.
 """
 function _state_eltype(beta, x)
     if beta isa Complex || eltype(x) <: Complex
@@ -344,97 +311,98 @@ function _state_eltype(beta, x)
 end
 
 """
-Initialize states from a single forward pass.
+Initialize states from a single feedforward pass (no activation —
+the oscillator dynamics provide the nonlinearity via demodulation).
 """
-function _forward_init(weights, biases, x, activation, ET)
+function _forward_init_demod(weights, biases, x, ET)
     n_layers = length(weights)
     states = Vector{Any}(undef, n_layers)
     h = ET.(x)
     for l in 1:n_layers
-        pre = weights[l] * h
+        h = weights[l] * h
         if biases[l] !== nothing
-            pre = pre .+ biases[l]
+            h = h .+ biases[l]
         end
-        h = activation(pre)
         states[l] = h
     end
     return states
 end
 
 # ================================================================
-# 5. Energy Function (for verification / monitoring)
+# 6. Energy Function
 # ================================================================
 
 """
-    hep_energy(states, weights, biases, x, y, beta; activation)
+    hep_energy(states, weights, biases, omegas, x, y, beta, n, dt)
 
-Compute the Hopfield energy Φ (Eq. 2 in derivation):
+Compute the interference-based energy at step n:
 
-    Φ = Σ_l <σ(W_l z_{l-1} + b_l), z_l> - β C(z_L, y)
+    Φ = Σ_l <phi_l, W_l * phi_{l-1}> - β * C(phi_L, y)
 
-Uses the complex bilinear form (no conjugation).
+where phi_l = demodulate(z_l) is the relative-phase state.
+Uses the complex bilinear form (no conjugation on states).
 """
-function hep_energy(states, weights, biases, x, y, beta;
-                    activation = holotanh)
+function hep_energy(states, weights, biases, omegas, x, y, beta;
+                    n::Int = 0, dt::Float32 = 0.1f0,
+                    readout_conj = nothing)
     phi = zero(ComplexF32)
-    inputs = (x, states[1:end-1]...)
+
+    # Demodulate states
+    phis = [_demodulate(states[l], omegas[l], n, dt) for l in 1:length(weights)]
+    phi_inputs = (x, phis[1:end-1]...)
 
     for l in 1:length(weights)
-        pre = weights[l] * inputs[l]
+        pre = weights[l] * phi_inputs[l]
         if biases[l] !== nothing
             pre = pre .+ biases[l]
         end
-        # Bilinear form: sum(σ(pre) .* z), no conjugation
-        phi = phi + sum(activation(pre) .* states[l])
+        phi = phi + sum(pre .* phis[l])
     end
 
-    cost = hep_cost_xent(states[end], y)
+    if readout_conj !== nothing
+        d = size(readout_conj, 1)
+        logits = transpose(readout_conj) * phis[end] ./ Float32(d)
+        cost = hep_interference_cost(logits, y)
+    else
+        cost = hep_cost_xent(phis[end], y)
+    end
     phi = phi - beta * cost
 
     return phi
 end
 
 # ================================================================
-# 6. Energy Gradient w.r.t. Parameters
+# 7. Energy Gradient w.r.t. Parameters
 # ================================================================
 
 """
-    _energy_param_gradients(states, weights, biases, x; activation)
+    _energy_param_gradients(states, weights, biases, omegas, x, n, dt)
 
-Compute ∂Φ/∂θ at the given equilibrium states (Eq. 15 in derivation):
+Compute ∂Φ/∂θ at equilibrium using demodulated states.
 
-    ∂Φ/∂W_l = [σ'(pre_l) .* z_l] * z_{l-1}^T
+    ∂Φ/∂W_l = phi_l * phi_{l-1}^T
 
-Note: uses transpose (not adjoint) for z_{l-1}^T to preserve
-holomorphicity.
+(Hebbian outer product on demodulated states.)
 """
-function _energy_param_gradients(states, weights, biases, x;
-                                 activation = holotanh)
+function _energy_param_gradients(states, weights, biases, omegas, x;
+                                 n::Int = 0, dt::Float32 = 0.1f0)
     n_layers = length(weights)
-    inputs = (x, states[1:end-1]...)
+
+    phis = [_demodulate(states[l], omegas[l], n, dt) for l in 1:n_layers]
+    phi_inputs = (x, phis[1:end-1]...)
 
     weight_grads = []
     bias_grads = []
-    k_grads = []  # (log_neg_lambda_grad, omega_grad) per layer
 
     for l in 1:n_layers
-        pre = weights[l] * inputs[l]
-        if biases[l] !== nothing
-            pre = pre .+ biases[l]
-        end
-
-        # ∂Φ/∂W_l = [σ'(pre_l) .* z_l] * z_{l-1}^T
-        sigma_prime = holotanh_deriv(pre)
-        modulated = sigma_prime .* states[l]
-        # transpose (not adjoint ') to avoid conjugation
-        w_grad = modulated * transpose(inputs[l])
+        # ∂Φ/∂W_l = phi_l * phi_{l-1}^T
+        w_grad = phis[l] * transpose(phi_inputs[l])
         push!(weight_grads, w_grad)
 
-        # ∂Φ/∂b_l = mean over batch of [σ'(pre_l) .* z_l]
         if biases[l] !== nothing
-            b_grad = mean(modulated, dims=ndims(modulated))
-            if ndims(modulated) > 1
-                b_grad = dropdims(b_grad, dims=ndims(modulated))
+            b_grad = mean(phis[l], dims=ndims(phis[l]))
+            if ndims(phis[l]) > 1
+                b_grad = dropdims(b_grad, dims=ndims(phis[l]))
             end
             push!(bias_grads, b_grad)
         else
@@ -446,66 +414,44 @@ function _energy_param_gradients(states, weights, biases, x;
 end
 
 # ================================================================
-# 7. Contour Integration for Gradient Computation
+# 8. Contour Integration
 # ================================================================
 
 """
-    hep_gradient(weights, biases, k_arrays, x, y;
-                 N, r, T_free, T_nudge, dt, kwargs...)
+    hep_gradient(weights, biases, k_arrays, x, y; N, r, T_free, T_nudge, dt, ...)
 
-Compute parameter gradients via holomorphic EP contour integration:
-
-1. Free phase: settle with β=0
-2. For n = 0..N-1: settle with β_n = r exp(2πin/N), compute ∂Φ/∂θ
-3. Gradient = (1/N) Σ_n ∂Φ/∂θ|_{z*(β_n)} exp(-2πin/N)
-
-# Arguments
-- `weights`: Tuple of weight matrices
-- `biases`: Tuple of bias vectors (or nothing)
-- `k_arrays`: Tuple of (log_neg_lambda, omega) per layer
-- `x`: Input batch
-- `y`: Target labels (one-hot)
-- `N::Int=4`: Contour points
-- `r::Float32=0.5f0`: Contour radius
-- `T_free::Int=100`: Free phase settling steps
-- `T_nudge::Int=30`: Nudged phase settling steps
-
-# Returns
-(weight_gradients, bias_gradients) tuples.
+Compute parameter gradients via holomorphic EP contour integration.
 """
 function hep_gradient(weights, biases, k_arrays, x, y;
                       N::Int = 4,
                       r::Float32 = 0.5f0,
                       T_free::Int = 100,
                       T_nudge::Int = 30,
-                      dt::Float32 = 1.0f0,
-                      activation = holotanh,
+                      dt::Float32 = 0.1f0,
                       readout_conj = nothing)
     n_layers = length(weights)
+    omegas = [ComplexF32.(ka[2]) for ka in k_arrays]
 
     # 1. Free phase
     states_free = hep_equilibrium(weights, biases, k_arrays, x, 0.0f0, y;
-                                  T=T_free, dt=dt, activation=activation,
-                                  readout_conj=readout_conj)
+                                  T=T_free, dt=dt, readout_conj=readout_conj)
 
     # 2. Contour integration
     w_grads_accum = [zeros(ComplexF32, size(w)) for w in weights]
     b_grads_accum = [b === nothing ? nothing : zeros(ComplexF32, size(b)) for b in biases]
 
-    for n in 0:N-1
-        angle_n = 2.0f0 * Float32(pi) * n / N
+    for n_contour in 0:N-1
+        angle_n = 2.0f0 * Float32(pi) * n_contour / N
         beta_n = r * exp(1.0f0im * angle_n)
 
-        # Nudged equilibrium from free-phase init
         states_n = hep_equilibrium(weights, biases, k_arrays, x, beta_n, y;
                                    T=T_nudge, dt=dt, init=states_free,
-                                   activation=activation, readout_conj=readout_conj)
+                                   readout_conj=readout_conj)
 
-        # Energy gradient w.r.t. parameters at this contour point
-        wg, bg = _energy_param_gradients(states_n, weights, biases, x;
-                                         activation=activation)
+        # Parameter gradients at this contour point (using final step index)
+        wg, bg = _energy_param_gradients(states_n, weights, biases, omegas, x;
+                                         n=T_free+T_nudge, dt=dt)
 
-        # Accumulate with inverse contour phase weighting
         phase_weight = exp(-1.0f0im * angle_n)
         for l in 1:n_layers
             w_grads_accum[l] .+= ComplexF32.(wg[l]) .* phase_weight
@@ -515,7 +461,6 @@ function hep_gradient(weights, biases, k_arrays, x, y;
         end
     end
 
-    # 3. First Fourier coefficient (real part)
     w_grads = [real.(wg) ./ N for wg in w_grads_accum]
     b_grads = [bg === nothing ? nothing : real.(bg) ./ N for bg in b_grads_accum]
 
@@ -523,21 +468,13 @@ function hep_gradient(weights, biases, k_arrays, x, y;
 end
 
 # ================================================================
-# 8. Lux-Compatible Wrappers
+# 9. Lux-Compatible Wrappers
 # ================================================================
 
 """
     extract_hep_params(ps::NamedTuple, st::NamedTuple)
 
-Extract weights, biases, dynamics parameters, and readout codes from
-a Lux Chain's parameter/state NamedTuples.
-
-Returns (weights, biases, k_arrays, layer_keys, readout_conj) where:
-- weights: Tuple of weight matrices (PhasorDense layers only)
-- biases: Tuple of bias vectors (or nothing)
-- k_arrays: Tuple of (log_neg_lambda, omega) pairs
-- layer_keys: Symbol keys mapping back to Chain structure
-- readout_conj: Conjugated codebook (from HolomorphicReadout state), or nothing
+Extract weights, biases, dynamics parameters, and readout codes.
 """
 function extract_hep_params(ps::NamedTuple, st::NamedTuple)
     weights = []
@@ -551,17 +488,14 @@ function extract_hep_params(ps::NamedTuple, st::NamedTuple)
         s = st[key]
         if haskey(p, :weight)
             push!(weights, p.weight)
-
             if haskey(p, :bias_real) && haskey(p, :bias_imag)
                 push!(biases, p.bias_real .+ 1.0f0im .* p.bias_imag)
             else
                 push!(biases, nothing)
             end
-
             lnl = p.log_neg_lambda
             omega = haskey(p, :omega) ? p.omega : s.omega
             push!(k_arrays, (lnl, omega))
-
             push!(layer_keys, key)
         elseif haskey(s, :codes_conj)
             readout_conj = s.codes_conj
@@ -571,7 +505,6 @@ function extract_hep_params(ps::NamedTuple, st::NamedTuple)
     return Tuple(weights), Tuple(biases), Tuple(k_arrays), layer_keys, readout_conj
 end
 
-# Version without state — uses default dynamics, no readout
 function extract_hep_params(ps::NamedTuple)
     weights = []
     biases = []
@@ -600,12 +533,7 @@ end
 """
     pack_hep_gradients(w_grads, b_grads, layer_keys, ps)
 
-Pack hEP gradients back into a NamedTuple matching the Lux parameter
-structure for use with Optimisers.update.
-
-Dynamics parameters (log_neg_lambda, omega) receive zero gradients
-in this implementation. Future work: compute dynamics gradients via
-the contour integration (they're holomorphic in k).
+Pack hEP gradients into Lux-compatible NamedTuple.
 """
 function pack_hep_gradients(w_grads, b_grads, layer_keys, ps)
     grad_dict = Dict{Symbol, Any}()
@@ -659,35 +587,20 @@ function _zero_grad(p)
 end
 
 # ================================================================
-# 9. High-Level Training Interface
+# 10. High-Level Training Interface
 # ================================================================
 
 """
     hep_train(model, ps, st, train_loader, args; kwargs...)
 
 Train a phasor network using holomorphic equilibrium propagation.
-
-# Arguments
-- `model`: Lux Chain model
-- `ps`, `st`: Model parameters and states
-- `train_loader`: Iterable of (x, y) batches
-- `args`: Must have .lr, .epochs fields
-- `N::Int=4`: Contour points
-- `r::Float32=0.5f0`: Contour radius
-- `T_free::Int=100`: Free phase settling steps
-- `T_nudge::Int=30`: Nudged phase settling steps
-- `dt::Float32=1.0f0`: Discretization step
-
-# Returns
-(losses, ps, st)
 """
 function hep_train(model, ps, st, train_loader, args;
                    N::Int = 4,
                    r::Float32 = 0.5f0,
                    T_free::Int = 100,
                    T_nudge::Int = 30,
-                   dt::Float32 = 1.0f0,
-                   activation = holotanh,
+                   dt::Float32 = 0.1f0,
                    verbose::Bool = false)
     opt_state = Optimisers.setup(Optimisers.Adam(args.lr), ps)
     losses = Float32[]
@@ -699,16 +612,14 @@ function hep_train(model, ps, st, train_loader, args;
             w_grads, b_grads = hep_gradient(weights, biases, k_arrays, x, y;
                                             N=N, r=r, dt=dt,
                                             T_free=T_free, T_nudge=T_nudge,
-                                            activation=activation,
                                             readout_conj=readout_conj !== nothing ? ComplexF32.(readout_conj) : nothing)
 
             grad_nt = pack_hep_gradients(w_grads, b_grads, layer_keys, ps)
             opt_state, ps = Optimisers.update(opt_state, ps, grad_nt)
 
-            # Track loss via the model's own forward pass
+            # Track loss via model forward pass
             y_pred, _ = model(x, ps, st)
             lossval = if y_pred isa AbstractArray{<:Complex}
-                # HolomorphicReadout produces complex logits
                 real(hep_interference_cost(y_pred, y))
             else
                 mean(evaluate_loss(y_pred, y, :quadrature))
