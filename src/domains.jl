@@ -103,28 +103,56 @@ falling back to `1 + 0im` when `|z| ≤ threshold`.
 - Complex array with each element of unit magnitude (or `1 + 0im` for sub-threshold inputs)
 
 # Implementation
-The division uses `safe_r = max(|z|, threshold)` so the broadcast pullback is
-finite even for elements with `|z| = 0` — without the floor, Zygote evaluates
-`1.0f0 ./ r` in the not-taken branch of the `ifelse` and produces `0 · Inf =
-NaN` cotangents that contaminate the rest of the gradient. Same pattern as
-[`soft_normalize_to_unit_circle`](@ref).
+Forward uses `safe_r = max(|z|, threshold)` so the in-band division is finite.
+A custom `rrule` (see below) handles the backward in closed form: it returns
+zero cotangent for sub-threshold elements, bypassing the chain rule on
+`abs(z)` which would otherwise produce `0 · NaN = NaN` at exact `z = 0`
+inputs (a real symptom on sparse audio where `causal_conv` lands on exact
+zero in silent regions).
 
 For a soft, magnitude-aware variant that preserves a smooth gradient as the
 input transitions through the threshold, see [`soft_normalize_to_unit_circle`](@ref).
 """
 function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
     r = abs.(z)
-    # Divide through max(r, threshold) so the broadcast pullback never sees a
-    # 1/0. Without the floor, Zygote's broadcast rrule for ifelse evaluates
-    # 1.0f0 ./ r in the not-taken branch as well, producing Inf at r=0 that
-    # combines with the selected 0 to yield NaN gradients (e.g.
-    # PhasorSTFT/PhasorConv at long L, where phasor_kernel underflow makes
-    # near-zero |z| common). Same pattern already used by
-    # soft_normalize_to_unit_circle below.
     safe_r = max.(r, Float32(threshold))
     unit_z = z ./ safe_r
     default_value = ComplexF32(1.0f0 + 0.0f0im)
     return ifelse.(r .> Float32(threshold), unit_z, default_value)
+end
+
+# Closed-form pullback for normalize_to_unit_circle.
+#
+# Derivation: write z = a + ib, r = √(a²+b²). For y = z/r the real-pair
+# Jacobian collapses, in ChainRules tangent convention `ȳ = ∂L/∂(re y) +
+# i·∂L/∂(im y)`, to
+#
+#     dz = -i · z · imag(z · conj(ȳ)) / r³
+#
+# Verified element-wise against Zygote's broadcast-traced backward for both
+# real and complex ȳ. The win on active elements is just structure; the win
+# at sub-threshold elements is correctness: returning a hard zero stops the
+# upstream `abs(z)` chain rule from contributing `(z̄ / |z|) · dr = NaN` at
+# z = 0 and poisoning the rest of the gradient via `0 · NaN = NaN` (IEEE 754).
+function ChainRulesCore.rrule(::typeof(normalize_to_unit_circle),
+                              z::AbstractArray{<:Complex};
+                              threshold::Real = 1.0f-10)
+    th = Float32(threshold)
+    r = abs.(z)
+    safe_r = max.(r, th)
+    unit_z = z ./ safe_r
+    default_value = ComplexF32(1.0f0 + 0.0f0im)
+    y = ifelse.(r .> th, unit_z, default_value)
+
+    function normalize_to_unit_circle_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        active = r .> th
+        # safe_r ≥ th, so safe_r^3 is bounded away from 0 — no Inf/NaN.
+        dz_active = (-1.0f0im) .* z .* imag.(z .* conj.(ȳ)) ./ (safe_r .^ 3)
+        dz = ifelse.(active, dz_active, zero(eltype(z)))
+        return (NoTangent(), dz)
+    end
+    return y, normalize_to_unit_circle_pullback
 end
 
 """
@@ -179,6 +207,51 @@ function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real =
     # Interpolate phase from 0 toward angle(z) — no complex addition, no cancellation
     θ = atan.(imag.(unit_z), real.(unit_z))
     return cos.(blend .* θ) .+ im .* sin.(blend .* θ)
+end
+
+# Closed-form pullback for soft_normalize_to_unit_circle.
+#
+# Forward: y = exp(i · φ),  φ = blend(r) · θ(z),
+#   blend = σ(k · (r − m)),  k = 6/(r_hi − r_lo),  m = (r_lo + r_hi)/2
+#   θ     = atan(imag(z), real(z))
+#
+# Real-cost cotangent in ChainRules convention (`ȳ = ∂L/∂(re y) + i·∂L/∂(im y)`):
+#   ∂L/∂φ = imag(ȳ · conj(y))
+#   ∂φ/∂a + i·∂φ/∂b = z · (θ · blend' · r + i · blend) / r²,  blend' = k · blend · (1 − blend)
+# Hence:
+#   dz = imag(ȳ · conj(y)) · z · (θ · blend' · r + i · blend) / r²    for r > th
+#   dz = 0                                                           for r ≤ th
+#
+# The sub-threshold zero short-circuits the upstream `abs(z)` and `atan(b,a)`
+# chain rules, both of which produce NaN at z = 0 and would otherwise poison
+# the rest of the gradient via `0 · NaN = NaN`.
+function ChainRulesCore.rrule(::typeof(soft_normalize_to_unit_circle),
+                              z::AbstractArray{<:Complex};
+                              r_lo::Real = 0.1f0, r_hi::Real = 0.6f0)
+    rl = Float32(r_lo); rh = Float32(r_hi)
+    midpoint = (rl + rh) / 2f0
+    k = 6f0 / (rh - rl)
+    th = 1f-10                        # safe-divisor floor (matches forward)
+
+    r = abs.(z)
+    safe_r = max.(r, th)
+    blend = sigmoid_fast.(k .* (r .- midpoint))
+    unit_z = z ./ safe_r
+    θ = atan.(imag.(unit_z), real.(unit_z))
+    y = cos.(blend .* θ) .+ im .* sin.(blend .* θ)
+
+    function soft_normalize_to_unit_circle_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        active = r .> th
+        dLdφ = imag.(ȳ .* conj.(y))                          # real
+        blend_deriv = k .* blend .* (1f0 .- blend)           # real
+        # coeff bounded everywhere because we use safe_r (≥ th)
+        coeff = (θ .* blend_deriv .* safe_r .+ 1f0im .* blend) ./ (safe_r .^ 2)
+        dz_active = dLdφ .* z .* coeff
+        dz = ifelse.(active, dz_active, zero(eltype(z)))
+        return (NoTangent(), dz)
+    end
+    return y, soft_normalize_to_unit_circle_pullback
 end
 
 """

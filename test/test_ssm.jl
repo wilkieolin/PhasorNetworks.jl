@@ -29,6 +29,9 @@ function ssm_tests()
         phasor_stft_tests()
         phasor_stft_long_L_tests()
         phasor_stft_init_kwarg_tests()
+        normalize_to_unit_circle_zero_tests()
+        soft_normalize_to_unit_circle_zero_tests()
+        phasor_stft_sparse_input_tests()
     end
 end
 
@@ -1118,5 +1121,131 @@ function phasor_stft_init_kwarg_tests()
         d_def = PhasorDense(4 => 4)
         ps_d_def, _ = Lux.setup(rng, d_def)
         @test all(ps_d_def.log_neg_lambda .≈ Float32(log(0.2)))
+    end
+end
+
+"""
+Regression: `normalize_to_unit_circle` must produce finite gradients on
+inputs that contain exact-zero elements. The safe-divisor fix in the
+forward is necessary but not sufficient; the upstream `abs(z)` chain rule
+returns `z̄/|z| = 0/0 = NaN` at z=0 and `0 · NaN = NaN` propagates back
+through the otherwise-zero gradient on the sub-threshold branch.
+
+The custom rrule (src/domains.jl) shortcuts that path.
+"""
+function normalize_to_unit_circle_zero_tests()
+    @testset "normalize_to_unit_circle backward at z=0" begin
+        # Doc reproducer.
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        gs = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs)
+        # Sub-threshold elements get a hard zero cotangent.
+        @test gs[3] == ComplexF32(0)
+        @test gs[4] == ComplexF32(0)
+
+        # Active elements unchanged vs. analytic closed form
+        # dz = -i · z · imag(z · conj(ȳ)) / |z|³ with ȳ = 1 (real cost).
+        for i in (1, 2, 5)
+            z_i = z[i]; r_i = abs(z_i)
+            expected = (-1.0f0im) * z_i * imag(z_i * conj(ComplexF32(1))) / r_i^3
+            @test gs[i] ≈ expected atol=1f-6
+        end
+
+        # Complex cotangent path (cost passes through a complex coefficient).
+        z3 = ComplexF32[1.0+0.5im, 0.0+0.0im, 1.5+0im]
+        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im]
+        gs3 = Zygote.gradient(z -> sum(real, c .* normalize_to_unit_circle(z)), z3)[1]
+        @test all(isfinite, gs3)
+        @test gs3[2] == ComplexF32(0)   # zero element gets zero cotangent
+
+        # Threshold respect: elements at or below the threshold are zeroed.
+        z4 = ComplexF32[1f-12 + 0im, 1.0+0im]   # |z[1]| ≪ default threshold
+        gs4 = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z)), z4)[1]
+        @test all(isfinite, gs4)
+        @test gs4[1] == ComplexF32(0)
+    end
+end
+
+"""
+Regression: `soft_normalize_to_unit_circle` must produce finite gradients
+on inputs containing exact zeros (same root cause as
+`normalize_to_unit_circle`: the upstream `abs(z)` and `atan(b,a)` chain
+rules return NaN at z=0 and `0 · NaN = NaN` propagates).
+
+The custom rrule (src/domains.jl) returns zero cotangent for
+sub-threshold elements and the analytic closed form
+`dz = imag(ȳ·conj(y)) · z · (θ·blend'·r + i·blend) / r²` for active
+elements.
+"""
+function soft_normalize_to_unit_circle_zero_tests()
+    @testset "soft_normalize_to_unit_circle backward at z=0" begin
+        # Same shape as the doc reproducer for normalize_to_unit_circle.
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        gs = Zygote.gradient(z -> sum(real, soft_normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs)
+        @test gs[3] == ComplexF32(0)
+        @test gs[4] == ComplexF32(0)
+
+        # Complex cotangent (cost passes through a complex coefficient).
+        z3 = ComplexF32[1.0+0.5im, 0.0+0.0im, 1.5+0im]
+        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im]
+        gs3 = Zygote.gradient(z -> sum(real, c .* soft_normalize_to_unit_circle(z)), z3)[1]
+        @test all(isfinite, gs3)
+        @test gs3[2] == ComplexF32(0)
+
+        # Active-region finite-difference cross-check (loose tolerance for
+        # Float32 + central diff at eps=1e-3).
+        zR = ComplexF32[0.3+0.2im, 0.7-0.4im, 0.15+0.05im]
+        gsR = Zygote.gradient(z -> sum(real, soft_normalize_to_unit_circle(z)), zR)[1]
+        eps = 1f-3
+        fd = zeros(ComplexF32, length(zR))
+        f = z_ -> sum(real, soft_normalize_to_unit_circle(z_))
+        for i in eachindex(zR)
+            z_work = copy(zR)
+            z0 = z_work[i]
+            z_work[i] = z0 + eps;     fpr = f(z_work)
+            z_work[i] = z0 - eps;     fmr = f(z_work)
+            z_work[i] = z0 + eps*im;  fpi = f(z_work)
+            z_work[i] = z0 - eps*im;  fmi = f(z_work)
+            fd[i] = (fpr - fmr)/(2*eps) + im*(fpi - fmi)/(2*eps)
+        end
+        @test maximum(abs.(gsR .- fd)) < 5f-3
+
+        # Custom r_lo / r_hi: kwarg path still hits the rrule.
+        zK = ComplexF32[0+0im, 0.05+0.05im, 0.4+0.3im]
+        gsK = Zygote.gradient(
+            z -> sum(real, soft_normalize_to_unit_circle(z; r_lo=0.05f0, r_hi=0.3f0)),
+            zK)[1]
+        @test all(isfinite, gsK)
+        @test gsK[1] == ComplexF32(0)
+    end
+end
+
+"""
+Regression: PhasorSTFT backward must stay finite on sparse audio-like input
+where the convolution lands on exact-zero elements (the failure mode
+observed in mos2_oscillators that the random-input long_L test missed).
+"""
+function phasor_stft_sparse_input_tests()
+    @testset "PhasorSTFT sparse-input backward at L=16000" begin
+        rng = Xoshiro(7)
+        layer = PhasorSTFT(1 => 64)
+        ps, st = Lux.setup(rng, layer)
+
+        # Audio-like input: silence almost everywhere, brief active region.
+        L, B = 16000, 2
+        x = zeros(ComplexF32, 1, L, B)
+        x[:, 6000:8000, :] .= ComplexF32.(randn(rng, Float32, 1, 2001, B))
+
+        l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+        @test isfinite(l)
+        @test sum(isnan, gs[1].weight)         == 0
+        @test sum(isnan, gs[1].omega)          == 0
+        @test sum(isnan, gs[1].log_neg_lambda) == 0
+        @test sum(isinf, gs[1].weight)         == 0
+        @test sum(isinf, gs[1].omega)          == 0
+        @test sum(isinf, gs[1].log_neg_lambda) == 0
+        # Gradient should still carry signal (non-zero where active region drove output).
+        @test sum(abs, gs[1].weight) > 0
     end
 end
