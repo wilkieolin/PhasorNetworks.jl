@@ -428,86 +428,32 @@ Note: The 2D version returns `(n_vectors_B, n_vectors_A)` to match CPU's transpo
 See also: [`similarity_outer`](@ref) in vsa.jl for CPU version
 """
 function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims::Int=2)
-    # Vectorized implementation that avoids custom CUDA kernels and uses
-    # broadcasting + reductions. This form is much simpler for AD backends
-    # (Zygote) to trace through on GPU arrays.
-    #
-    # To match CPU behavior: we slice along `dims`, compute pairwise interference
-    # similarity, and return (n_slices_A, n_slices_B, batch).
-    
-    ndA = ndims(A)
-    @assert size(A, dims) > 0 "dims=$dims out of range for array with $(ndA) dimensions"
-    
-    # Determine which dimensions are: slice_dim (dims), feature_dim, batch_dim
-    # For 3D arrays, we have 3 dims. `dims` is the slice dimension.
-    # The remaining two are feature and batch. We assume:
-    # - The dimension before `dims` (or dim 1 if dims=1) is features
-    # - The dimension after `dims` (or last dim if dims=last) is batch
-    # Following CPU convention for dims=2: (features, vectors, batch)
-    
+    # Permute to canonical (D, M, X) / (D, N, X) layout, then delegate to the
+    # shared kernel in vsa.jl which carries a closed-form rrule for the
+    # backward pass (avoiding the (D,M,N,X) intermediates Zygote would
+    # otherwise pin in the tape).
+
+    @assert size(A, dims) > 0 "dims=$dims out of range for array with $(ndims(A)) dimensions"
+
     if dims == 2
-        # Standard case: (features, vectors, batch)
-        feature_dim = 1
-        batch_dim = 3
+        feature_dim, batch_dim = 1, 3
     elseif dims == 1
-        # (vectors, features, batch) - slice along first dim
-        feature_dim = 2
-        batch_dim = 3
+        feature_dim, batch_dim = 2, 3
     elseif dims == 3
-        # (features, batch, vectors) - slice along last dim
-        feature_dim = 1
-        batch_dim = 2
+        feature_dim, batch_dim = 1, 2
     else
         error("dims must be 1, 2, or 3 for 3D arrays")
     end
-    
-    # Get sizes
-    sz_A = size(A)
-    sz_B = size(B)
-    M = sz_A[dims]  # number of slices in A
-    N = sz_B[dims]  # number of slices in B
-    D = sz_A[feature_dim]  # feature dimension
-    X = sz_A[batch_dim]  # batch dimension
-    
-    @assert sz_B[batch_dim] == X "Batch size mismatch"
-    @assert sz_B[feature_dim] == D "Feature dimension mismatch"
-    
-    # Permute arrays to canonical (D, M, X) and (D, N, X) layout for computation
+
+    sz_A = size(A); sz_B = size(B)
+    @assert sz_B[batch_dim]   == sz_A[batch_dim]   "Batch size mismatch"
+    @assert sz_B[feature_dim] == sz_A[feature_dim] "Feature dimension mismatch"
+
     perm_to_canonical = (feature_dim, dims, batch_dim)
-    
-    A_canonical = permutedims(A, perm_to_canonical)  # -> (D, M, X)
-    B_canonical = permutedims(B, perm_to_canonical)  # -> (D, N, X)
-    
-    # Separate into real and imaginary parts
-    realA = real.(A_canonical)  # (D, M, X)
-    imagA = imag.(A_canonical)
-    realB = real.(B_canonical)  # (D, N, X)
-    imagB = imag.(B_canonical)
+    A_canonical = permutedims(A, perm_to_canonical)
+    B_canonical = permutedims(B, perm_to_canonical)
 
-    # Reshape for broadcasting to (D, M, N, X)
-    realA4 = reshape(realA, D, M, 1, X)
-    realB4 = reshape(realB, D, 1, N, X)
-    imagA4 = reshape(imagA, D, M, 1, X)
-    imagB4 = reshape(imagB, D, 1, N, X)
-
-    # Compute pairwise sums across vectors for each feature d and batch x
-    sum_real = realA4 .+ realB4
-    sum_imag = imagA4 .+ imagB4
-
-    # Instead of sqrt -> acos -> cos, simplify using trig identity:
-    # sim = cos(2 * acos(0.5 * mag)) == 0.5 * mag^2 - 1
-    # where mag = clamp(|u+v|, 0, 2). So mag^2 = clamp(|u+v|^2, 0, 4).
-    sq = sum_real .^ 2 .+ sum_imag .^ 2
-    sq_clamped = clamp.(sq, 0.0f0, 4.0f0)
-    sim_per_d = 0.5f0 .* sq_clamped .- 1.0f0  # (D, M, N, X)
-
-    # Average over the D (feature) dimension
-    sim_avg = mean(sim_per_d, dims=1)  # (1, M, N, X)
-    sim_avg = dropdims(sim_avg, dims=1) # (M, N, X)
-
-    # CPU returns (M, N, X) = (n_slices_A, n_slices_B, batch)
-    # Our sim_avg is already (M, N, X), so no permutation needed
-    return sim_avg
+    return _similarity_outer_canonical_complex(A_canonical, B_canonical)
 end
 
 function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; dims::Int=2)

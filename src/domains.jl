@@ -15,6 +15,20 @@ function angle_to_complex(x::AbstractArray)
     return exp.(k .* x)
 end
 
+# Closed-form pullback for angle_to_complex. For z = exp(iπx) with real x and
+# real-valued cost L, the cotangent is dx = π · imag(dz · conj(z)). Saving
+# only the output z (one (...) ComplexF32) avoids tape Zygote would
+# otherwise hold for the broadcast → exp chain.
+function ChainRulesCore.rrule(::typeof(angle_to_complex), x::AbstractArray)
+    z = angle_to_complex(x)
+    function angle_to_complex_pullback(dz_)
+        dz = unthunk(dz_)
+        dx = pi_f32 .* imag.(dz .* conj.(z))
+        return (NoTangent(), dx)
+    end
+    return z, angle_to_complex_pullback
+end
+
 """
     complex_to_angle(x::AbstractArray)
 

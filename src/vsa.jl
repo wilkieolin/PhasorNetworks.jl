@@ -419,6 +419,88 @@ function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Comple
     return s
 end
 
+"""
+    _similarity_outer_canonical_complex(A, B) -> AbstractArray{Float32,3}
+
+Vectorized pairwise interference similarity for complex inputs in canonical
+layout: `A :: (D, M, X)` and `B :: (D, N, X)`, returning `(M, N, X)` with
+
+    sim[m,n,x] = (1/D) * Σ_d (½ |A[d,m,x] + B[d,n,x]|² − 1)
+
+Used as the shared compute kernel for both the GPU 3-D `similarity_outer`
+dispatch (after permutation) and the rrule that gives it a memory-efficient
+backward pass.
+
+The clamp `max(|A+B|², 4)` from the original GPU formulation is dropped
+because every production caller passes unit-modulus inputs (output of
+`angle_to_complex`), for which `|A+B|² ≤ 4` holds exactly. Removing it
+preserves the bilinear structure required for a closed-form backward.
+"""
+function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
+                                             B::AbstractArray{ComplexF32,3})
+    D, M, X = size(A)
+    N = size(B, 2)
+    @assert size(B, 1) == D "feature dim mismatch: size(A,1)=$D vs size(B,1)=$(size(B,1))"
+    @assert size(B, 3) == X "batch dim mismatch: size(A,3)=$X vs size(B,3)=$(size(B,3))"
+    invD = inv(Float32(D))
+
+    A4 = reshape(A, D, M, 1, X)
+    B4 = reshape(B, D, 1, N, X)
+
+    sr = real.(A4) .+ real.(B4)
+    si = imag.(A4) .+ imag.(B4)
+    sq = sr .^ 2 .+ si .^ 2
+    sim_per_d = 0.5f0 .* sq .- 1.0f0
+
+    sim = dropdims(sum(sim_per_d, dims=1), dims=1) .* invD
+    return sim
+end
+
+"""
+    rrule(_similarity_outer_canonical_complex, A, B)
+
+Closed-form pullback that avoids materializing the `(D, M, N, X)`
+intermediates the broadcast chain would otherwise pin in the tape.
+
+Given output cotangent `ḡ :: (M, N, X)`:
+
+    dA[d,m,x] = (1/D) [ A[d,m,x] · Σ_n ḡ[m,n,x]  +  Σ_n B[d,n,x] · ḡ[m,n,x] ]
+    dB[d,n,x] = (1/D) [ B[d,n,x] · Σ_m ḡ[m,n,x]  +  Σ_m A[d,m,x] · ḡ[m,n,x] ]
+
+Each contraction is one batched complex GEMM. Saved tape is just `A` and
+`B` (the function inputs). Memory ratio versus the broadcast-traced
+backward is ≈ `(M+N) / (k · M · N)`; for `M=N=L` and ~5 saved
+intermediates this is `4/(5L)` (≈ 1/160 at `L = 128`).
+"""
+function ChainRulesCore.rrule(::typeof(_similarity_outer_canonical_complex),
+                              A::AbstractArray{ComplexF32,3},
+                              B::AbstractArray{ComplexF32,3})
+    out = _similarity_outer_canonical_complex(A, B)
+    D, M, X = size(A)
+    N = size(B, 2)
+    invD = inv(Float32(D))
+
+    function _similarity_outer_canonical_complex_pullback(ḡ_)
+        ḡ = unthunk(ḡ_)
+        # Lift ḡ to ComplexF32 once so batched_mul can contract against the
+        # complex inputs; the (M,N,X) transient is freed at the end of bwd.
+        ḡc = ComplexF32.(ḡ)
+
+        g_row = reshape(sum(ḡ, dims=2), 1, M, X)   # Σ_n ḡ
+        g_col = reshape(sum(ḡ, dims=1), 1, N, X)   # Σ_m ḡ
+
+        # Σ_n B[d,n,x] · ḡ[m,n,x]  → (D, M, X)
+        AB_term = batched_mul(B, permutedims(ḡc, (2, 1, 3)))
+        # Σ_m A[d,m,x] · ḡ[m,n,x]  → (D, N, X)
+        BA_term = batched_mul(A, ḡc)
+
+        dA = invD .* (A .* g_row .+ AB_term)
+        dB = invD .* (B .* g_col .+ BA_term)
+        return (NoTangent(), dA, dB)
+    end
+    return out, _similarity_outer_canonical_complex_pullback
+end
+
 #Note - additional definitions for similarity_outer included in gpu.jl
 
 """

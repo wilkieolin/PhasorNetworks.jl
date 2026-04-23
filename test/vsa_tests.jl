@@ -12,6 +12,8 @@ function vsa_tests()
         test_outer()
         test_binding()
         test_bundling()
+        test_similarity_outer_rrule()
+        test_angle_to_complex_rrule()
     end
 end
 
@@ -135,6 +137,99 @@ function test_binding()
         ub_enc_error = remove_nan(vec(ub2d[:,:,:,5]) .- vec(ub)) |> mean
         ub_enc_check = in_tolerance(ub_enc_error)
         @test ub_enc_check 
+    end
+end
+
+"""
+Central-difference Jacobian for a complex array argument, ChainRules
+convention (real-valued cost L; tangent stored as ∂L/∂real + i·∂L/∂imag).
+"""
+function _fd_complex_grad(f, A::AbstractArray{ComplexF32}; ε::Float32=1f-3)
+    g = zeros(ComplexF32, size(A))
+    for I in eachindex(A)
+        z0 = A[I]
+        A[I] = z0 + ε;     fpr = f(A)
+        A[I] = z0 - ε;     fmr = f(A)
+        A[I] = z0 + ε*im;  fpi = f(A)
+        A[I] = z0 - ε*im;  fmi = f(A)
+        A[I] = z0
+        g[I] = (fpr - fmr) / (2ε) + im * (fpi - fmi) / (2ε)
+    end
+    return g
+end
+
+"""
+Verify the closed-form rrule for `_similarity_outer_canonical_complex`
+against finite-difference gradients and against the broadcast-traced
+reference (Zygote on the forward kernel). Runs on CPU.
+"""
+function test_similarity_outer_rrule()
+    @testset "similarity_outer rrule" begin
+        rng = Xoshiro(0)
+        D, M, N, X = 3, 4, 5, 2
+        A = ComplexF32.(randn(rng, ComplexF64, D, M, X))
+        B = ComplexF32.(randn(rng, ComplexF64, D, N, X))
+
+        # Forward agrees with a naive scalar reference.
+        out = PhasorNetworks._similarity_outer_canonical_complex(A, B)
+        ref = zeros(Float32, M, N, X)
+        invD = inv(Float32(D))
+        for x in 1:X, n in 1:N, m in 1:M, d in 1:D
+            ref[m, n, x] += invD * (0.5f0 * abs2(A[d,m,x] + B[d,n,x]) - 1f0)
+        end
+        @test maximum(abs.(out .- ref)) < 1f-5
+
+        # Pullback w.r.t. a random output cotangent.
+        ḡ = Float32.(randn(rng, M, N, X))
+        _, pb = ChainRulesCore.rrule(
+            PhasorNetworks._similarity_outer_canonical_complex, A, B)
+        _, dA, dB = pb(ḡ)
+
+        # Finite-difference reference.
+        fA = A_ -> sum(ḡ .* PhasorNetworks._similarity_outer_canonical_complex(A_, B))
+        fB = B_ -> sum(ḡ .* PhasorNetworks._similarity_outer_canonical_complex(A, B_))
+        fdA = _fd_complex_grad(fA, copy(A))
+        fdB = _fd_complex_grad(fB, copy(B))
+
+        @test maximum(abs.(dA .- fdA)) < 5f-3
+        @test maximum(abs.(dB .- fdB)) < 5f-3
+
+        # Zygote.gradient(...) routes through our rrule; should match the
+        # direct pullback bit-for-bit.
+        gA, gB = Zygote.gradient(
+            (a, b) -> sum(ḡ .* PhasorNetworks._similarity_outer_canonical_complex(a, b)),
+            A, B)
+        @test maximum(abs.(gA .- dA)) < 1f-5
+        @test maximum(abs.(gB .- dB)) < 1f-5
+    end
+end
+
+function test_angle_to_complex_rrule()
+    @testset "angle_to_complex rrule" begin
+        rng = Xoshiro(0)
+        x = Float32.(2 .* rand(rng, Float32, 3, 4) .- 1)  # phases in [-1,1]
+        z = angle_to_complex(x)
+
+        # Random complex cotangent for output.
+        dz = ComplexF32.(randn(rng, ComplexF64, size(z)))
+
+        _, pb = ChainRulesCore.rrule(angle_to_complex, x)
+        _, dx = pb(dz)
+
+        # Finite-difference reference: real input, real-valued contraction
+        # against complex cotangent uses the same `real(conj(dz)·δz)`
+        # convention, which for real δx reduces to summing real parts.
+        ε = 1f-3
+        fdx = zeros(Float32, size(x))
+        f = x_ -> sum(real.(conj.(dz) .* angle_to_complex(x_)))
+        for I in eachindex(x)
+            x0 = x[I]
+            x[I] = x0 + ε; fp = f(x)
+            x[I] = x0 - ε; fm = f(x)
+            x[I] = x0
+            fdx[I] = (fp - fm) / (2ε)
+        end
+        @test maximum(abs.(dx .- fdx)) < 5f-3
     end
 end
 
