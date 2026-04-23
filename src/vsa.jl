@@ -412,11 +412,54 @@ function similarity_outer(x::AbstractArray{<:Real,2}, y::AbstractArray{<:Real,2}
     return s
 end
 
-function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Complex}; dims=2)
-    s = [interference_similarity(abs.(xs .+ ys), dim=dims) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
-    #stack and reshape to batch-last
-    s = permutedims(stack(s), (2,3,1))
-    return s
+"""
+    similarity_outer(x::AbstractArray{<:Complex,3}, y::AbstractArray{<:Complex,3}; dims=2)
+
+Pairwise interference-similarity for 3-D complex arrays on CPU. Permutes to
+canonical `(features, n_vectors, batch)` layout and delegates to
+[`_similarity_outer_canonical_complex`](@ref) — the same kernel used by the
+GPU dispatch — so CPU and GPU paths agree on output shape `(M, N, X)` and
+share the closed-form rrule.
+
+(Previous comprehension-based implementation averaged over the batch
+dimension instead of features, returning shape `(M, N, D)`. That was
+inconsistent with the GPU and CPU real-valued dispatches and is replaced
+here.)
+"""
+function similarity_outer(x::AbstractArray{<:Complex,3}, y::AbstractArray{<:Complex,3}; dims=2)
+    if dims == 2
+        feature_dim, batch_dim = 1, 3
+    elseif dims == 1
+        feature_dim, batch_dim = 2, 3
+    elseif dims == 3
+        feature_dim, batch_dim = 1, 2
+    else
+        error("dims must be 1, 2, or 3 for 3D arrays")
+    end
+
+    sz_x = size(x); sz_y = size(y)
+    @assert sz_y[batch_dim]   == sz_x[batch_dim]   "Batch size mismatch"
+    @assert sz_y[feature_dim] == sz_x[feature_dim] "Feature dimension mismatch"
+
+    perm = (feature_dim, dims, batch_dim)
+    A = permutedims(ComplexF32.(x), perm)
+    B = permutedims(ComplexF32.(y), perm)
+    return _similarity_outer_canonical_complex(A, B)
+end
+
+"""
+    similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
+
+2-D complex variant: wraps as 3-D with a singleton batch axis, delegates to
+the 3-D path, then squeezes and transposes to match the CPU real-valued 2-D
+convention `(N, M)` (see [`similarity_outer(::AbstractArray{<:Real,2}, ...)`](@ref)).
+"""
+function similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
+    dims in (1, 2) || error("dims must be 1 or 2 for 2D arrays")
+    x3 = reshape(x, size(x, 1), size(x, 2), 1)
+    y3 = reshape(y, size(y, 1), size(y, 2), 1)
+    out3 = similarity_outer(x3, y3; dims=dims)
+    return permutedims(dropdims(out3, dims=3), (2, 1))
 end
 
 """

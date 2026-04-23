@@ -12,6 +12,7 @@ function vsa_tests()
         test_outer()
         test_binding()
         test_bundling()
+        test_similarity_outer_complex_cpu_shape()
         test_similarity_outer_rrule()
         test_angle_to_complex_rrule()
     end
@@ -156,6 +157,31 @@ function _fd_complex_grad(f, A::AbstractArray{ComplexF32}; ε::Float32=1f-3)
         g[I] = (fpr - fmr) / (2ε) + im * (fpi - fmi) / (2ε)
     end
     return g
+end
+
+"""
+Lock in the canonical-shape semantics of the CPU complex dispatch
+`similarity_outer(::AbstractArray{<:Complex,3}, ...)`. Returns
+`(M, N, X)` and agrees with the helper. The previous comprehension-based
+implementation averaged over the batch dim and returned `(M, N, D)`.
+"""
+function test_similarity_outer_complex_cpu_shape()
+    @testset "similarity_outer CPU complex 3D shape" begin
+        rng = Xoshiro(11)
+        D, M, N, X = 4, 5, 6, 3
+        A = ComplexF32.(randn(rng, ComplexF64, D, M, X))
+        B = ComplexF32.(randn(rng, ComplexF64, D, N, X))
+
+        out = similarity_outer(A, B; dims=2)
+        @test size(out) == (M, N, X)
+        @test out ≈ PhasorNetworks._similarity_outer_canonical_complex(A, B)
+
+        # 2D variant matches the CPU real 2-D convention (transposed).
+        A2 = ComplexF32.(randn(rng, ComplexF64, D, M))
+        B2 = ComplexF32.(randn(rng, ComplexF64, D, N))
+        out2 = similarity_outer(A2, B2; dims=2)
+        @test size(out2) == (N, M)
+    end
 end
 
 """

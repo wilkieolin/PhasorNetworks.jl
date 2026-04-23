@@ -407,25 +407,24 @@ end
 """
     similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims=2) -> CuArray{Float32,3}
 
-GPU-optimized pairwise similarity computation between sets of complex-valued vectors.
-Provides a vectorized implementation that is efficient on GPUs and compatible with automatic differentiation.
+GPU pairwise interference-similarity between two batches of complex vectors.
+Permutes inputs to canonical `(features, n_vectors, batch)` layout and delegates
+to [`_similarity_outer_canonical_complex`](@ref) — the shared kernel that
+carries a closed-form `rrule` so the backward pass avoids the
+`(features, M, N, batch)` tape Zygote would otherwise hold.
 
 # Arguments
 - `A::CuArray{ComplexF32,3}`: First set of vectors
 - `B::CuArray{ComplexF32,3}`: Second set of vectors
-- `dims::Int=2`: Dimension along which to slice vectors for pairwise comparison
+- `dims::Int=2`: Dimension along which to slice for pairwise comparison
+  (the other two dims are inferred as features and batch)
 
-For `dims=2` with shape `(features, n_vectors, batch)`:
-- Returns shape `(n_vectors_A, n_vectors_B, batch)` matching CPU real-valued implementation
+# Returns
+Output shape `(n_vectors_A, n_vectors_B, batch)`; for `dims=2` inputs of shape
+`(features, n_vectors, batch)` this is the natural attention-score layout.
 
-Note: The 2D version returns `(n_vectors_B, n_vectors_A)` to match CPU's transposed output.
-
-# Implementation Details
-- Uses broadcasting for vectorized operations
-- Avoids custom CUDA kernels for AD compatibility (e.g., with Zygote)
-- Optimizes similarity calculation using trigonometric identities
-
-See also: [`similarity_outer`](@ref) in vsa.jl for CPU version
+See also: [`similarity_outer`](@ref) for CPU dispatches in `vsa.jl`,
+and [`_similarity_outer_canonical_complex`](@ref) for the shared kernel.
 """
 function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; dims::Int=2)
     # Permute to canonical (D, M, X) / (D, N, X) layout, then delegate to the
@@ -457,32 +456,13 @@ function similarity_outer(A::CuArray{ComplexF32,3}, B::CuArray{ComplexF32,3}; di
 end
 
 function similarity_outer(A::CuArray{ComplexF32,2}, B::CuArray{ComplexF32,2}; dims::Int=2)
-    # Treat 2D inputs as 3D with a singleton batch dimension and delegate
-    # to the vectorized 3D implementation.
-    # 
-    # For dims=2 (default): input is (features, vectors)
-    # We add singleton batch dim at the end -> (features, vectors, 1)
-    # Output from 3D version is (M, N, 1), we squeeze to (M, N)
-    
-    if dims == 2
-        # (features, vectors) -> (features, vectors, 1)
-        A3 = reshape(A, size(A, 1), size(A, 2), 1)
-        B3 = reshape(B, size(B, 1), size(B, 2), 1)
-        out3 = similarity_outer(A3, B3; dims=2)
-    elseif dims == 1
-        # (vectors, features) -> (vectors, features, 1) 
-        # then slice along dim 1
-        A3 = reshape(A, size(A, 1), size(A, 2), 1)
-        B3 = reshape(B, size(B, 1), size(B, 2), 1)
-        out3 = similarity_outer(A3, B3; dims=1)
-    else
-        error("dims must be 1 or 2 for 2D arrays")
-    end
-    
-    # out3 has shape (M, N, 1), squeeze the batch dimension
-    out2 = dropdims(out3, dims=3)
-    # CPU 2D version returns (N, M) due to permutedims(..., (2,1)), so transpose to match
-    return permutedims(out2, (2, 1))
+    # Reuse the 3D path with a singleton batch axis. Final transpose matches
+    # the CPU 2D real convention (vsa.jl:408), which returns (N, M).
+    dims in (1, 2) || error("dims must be 1 or 2 for 2D arrays")
+    A3 = reshape(A, size(A, 1), size(A, 2), 1)
+    B3 = reshape(B, size(B, 1), size(B, 2), 1)
+    out3 = similarity_outer(A3, B3; dims=dims)
+    return permutedims(dropdims(out3, dims=3), (2, 1))
 end
 
 # Support dispatch when inputs are real-valued CuArrays by converting to

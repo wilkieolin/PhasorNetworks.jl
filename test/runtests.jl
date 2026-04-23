@@ -1,5 +1,5 @@
 using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test
-using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA
+using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient

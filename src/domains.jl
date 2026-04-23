@@ -91,36 +91,40 @@ end
 """
     normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
 
-Hard normalization: project complex numbers to the unit circle, then rotate by −π/2 to
-convert from potential representation to current representation.
+Project complex numbers to the unit circle: returns `z / |z|` for each element,
+falling back to `1 + 0im` when `|z| ≤ threshold`.
 
 # Arguments
 - `z::AbstractArray{<:Complex}`: Array of complex numbers
-- `threshold::Real`: Minimum magnitude to avoid division by zero (default: 1.0f-10)
+- `threshold::Real`: Magnitudes at or below this value are mapped to `1 + 0im`
+  rather than divided through (default: `1.0f-10`)
 
 # Returns
-- Complex array with unit magnitude, rotated by −π/2 relative to the input phase
+- Complex array with each element of unit magnitude (or `1 + 0im` for sub-threshold inputs)
 
-# Details
-For each complex number z = r*exp(iθ), returns exp(i(θ − π/2)) = −i·z/|z|.
-Values with magnitude below threshold are mapped to −i (the rotation of the 1+0im fallback).
+# Implementation
+The division uses `safe_r = max(|z|, threshold)` so the broadcast pullback is
+finite even for elements with `|z| = 0` — without the floor, Zygote evaluates
+`1.0f0 ./ r` in the not-taken branch of the `ifelse` and produces `0 · Inf =
+NaN` cotangents that contaminate the rest of the gradient. Same pattern as
+[`soft_normalize_to_unit_circle`](@ref).
 
-The −π/2 rotation aligns the normalization output with the current convention used in
-Resonate-and-Fire spiking networks: a neuron fires at maximum imaginary value (potential
-angle π/2), and its spike is received as a positive real current (angle 0) at postsynaptic
-neurons. This rotation ensures that a "firing" neuron (potential at +i) outputs a maximum
-excitatory current (+1), making this function a faithful continuous-time analog of sparse
-spiking activation.
+For a soft, magnitude-aware variant that preserves a smooth gradient as the
+input transitions through the threshold, see [`soft_normalize_to_unit_circle`](@ref).
 """
 function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
     r = abs.(z)
-    # Use ifelse for Zygote compatibility
-    # For very small magnitudes, map to 1+0im before rotation to avoid numerical issues
-    scale_factor = ifelse.(r .> Float32(threshold), 1.0f0 ./ r, 0.0f0)
+    # Divide through max(r, threshold) so the broadcast pullback never sees a
+    # 1/0. Without the floor, Zygote's broadcast rrule for ifelse evaluates
+    # 1.0f0 ./ r in the not-taken branch as well, producing Inf at r=0 that
+    # combines with the selected 0 to yield NaN gradients (e.g.
+    # PhasorSTFT/PhasorConv at long L, where phasor_kernel underflow makes
+    # near-zero |z| common). Same pattern already used by
+    # soft_normalize_to_unit_circle below.
+    safe_r = max.(r, Float32(threshold))
+    unit_z = z ./ safe_r
     default_value = ComplexF32(1.0f0 + 0.0f0im)
-
-    normalized = ifelse.(r .> Float32(threshold), z .* scale_factor, default_value)
-    return normalized
+    return ifelse.(r .> Float32(threshold), unit_z, default_value)
 end
 
 """

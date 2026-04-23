@@ -233,6 +233,11 @@ Dispatches on input type AND dimensionality:
 - `omega_hi::Float32`: Upper bound for uniform omega init
 - `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
+- `init_log_neg_lambda::Union{Float32, Nothing}`: Optional uniform override for the
+  initial value of `log_neg_lambda`. When `nothing` (default), each `init_mode`
+  uses its own preset (see *Init Modes* below). Useful at long sequence lengths
+  `L` where the per-mode default produces `λ·L < log(eps(Float32))` and the
+  kernel underflows.
 
 # Parameters (always present)
 - `weight` — `(out, in)` Float32
@@ -246,8 +251,12 @@ Dispatches on input type AND dimensionality:
 # Init Modes
 - `:default` — `log_neg_lambda = fill(log(0.2), out)`, `omega = fill(2π, out)`.
   All channels share identical initial dynamics.
-- `:uniform` — `log_neg_lambda` uniform, `omega` spread across `[omega_lo, omega_hi]`.
+- `:uniform` — `log_neg_lambda = fill(log(0.1), out)`, `omega` spread across `[omega_lo, omega_hi]`.
 - `:hippo` — HiPPO-LegS diagonal initialization for multi-timescale memory.
+
+When `init_log_neg_lambda` is set, it replaces the per-channel value uniformly
+across `out` for `:default` and `:uniform`, and overrides the multi-timescale
+HiPPO spread for `:hippo`.
 
 See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref)
 """
@@ -263,6 +272,7 @@ struct PhasorDense <: Lux.AbstractLuxLayer
     omega_hi::Float32
     trainable_omega::Bool
     return_type::SolutionType
+    init_log_neg_lambda::Union{Float32, Nothing}  # nothing → use init_mode default
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer},
@@ -276,6 +286,7 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
                     trainable_omega::Bool = false,
+                    init_log_neg_lambda::Union{Real, Nothing} = nothing,
                     kwargs...)
     # Handle backward compatibility: 'init' kwarg maps to init_weight
     if init_weight === nothing && init !== nothing
@@ -292,20 +303,27 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                         Float32(omega_lo),
                         Float32(omega_hi),
                         trainable_omega,
-                        return_type)
+                        return_type,
+                        init_log_neg_lambda === nothing ? nothing : Float32(init_log_neg_lambda))
 end
 
-# Helper to initialize (log_neg_lambda, omega) based on init_mode
+# Helper to initialize (log_neg_lambda, omega) based on init_mode.
+# If init_log_neg_lambda is set, it overrides the per-mode default and is
+# applied uniformly across channels (modes :default and :uniform); for :hippo
+# the multi-timescale spread is preserved unless the override is given.
 function _init_dynamics(l::PhasorDense)
     if l.init_mode == :hippo
         λ_init, ω_init = hippo_legs_diagonal(l.out_dims)
-        log_neg_lambda = log.(-λ_init)
+        log_neg_lambda = l.init_log_neg_lambda === nothing ?
+            log.(-λ_init) : fill(l.init_log_neg_lambda, l.out_dims)
         omega = ω_init
     elseif l.init_mode == :uniform
-        log_neg_lambda = fill(Float32(log(0.1)), l.out_dims)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.1)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, l.out_dims)
         omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.out_dims)))
     else  # :default — match standard spk_args defaults (leakage=-0.2, period=1.0)
-        log_neg_lambda = fill(Float32(log(0.2)), l.out_dims)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.2)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, l.out_dims)
         omega = fill(Float32(2π), l.out_dims)
     end
     return log_neg_lambda, omega
@@ -559,12 +577,10 @@ Dispatches on input dimensionality (3D only — STFT is inherently temporal):
 - `omega_lo::Float32`: Lower bound for omega initialization
 - `omega_hi::Float32`: Upper bound for omega initialization
 - `omega_out::Float32`: Downstream carrier frequency (fixed in state)
-
-# Parameters (always present)
-- `weight` — `(n_freqs, in_dims)` Float32
-- `log_neg_lambda` — `(n_freqs,)` Float32, per-channel decay (trainable)
-- `omega` — `(n_freqs,)` Float32, per-channel frequency (always trainable)
-- `bias_real`, `bias_imag` — `(n_freqs,)` Float32 (when `use_bias=true`)
+- `init_log_neg_lambda::Float32`: Initial value used to fill `log_neg_lambda`
+  for every channel (default `log(0.1)` ⇒ `λ = -0.1`). Override at long
+  sequence lengths `L` where `λ · L < log(eps(Float32)) ≈ -88` would cause
+  `phasor_kernel` to underflow.
 
 # State
 - `omega_out` — Float32, downstream carrier frequency (fixed)
@@ -581,6 +597,7 @@ struct PhasorSTFT <: Lux.AbstractLuxLayer
     omega_lo::Float32
     omega_hi::Float32
     omega_out::Float32
+    init_log_neg_lambda::Float32
 end
 
 function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
@@ -590,7 +607,8 @@ function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
                     init_bias = default_bias,
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
-                    omega_out::Real = Float32(2π))
+                    omega_out::Real = Float32(2π),
+                    init_log_neg_lambda::Real = log(0.1))
     if init_weight === nothing
         init_weight = glorot_uniform
     end
@@ -601,7 +619,8 @@ function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
                       init_bias,
                       Float32(omega_lo),
                       Float32(omega_hi),
-                      Float32(omega_out))
+                      Float32(omega_out),
+                      Float32(init_log_neg_lambda))
 end
 
 # Frequency-shift modulation: re-encode from per-channel omega to uniform omega_out
@@ -619,7 +638,7 @@ end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorSTFT)
     W = l.init_weight(rng, l.n_freqs, l.in_dims)
-    log_neg_lambda = fill(Float32(log(0.1)), l.n_freqs)
+    log_neg_lambda = fill(l.init_log_neg_lambda, l.n_freqs)
     omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.n_freqs)))
 
     parameters = (weight = W, log_neg_lambda = log_neg_lambda, omega = omega)
@@ -721,6 +740,9 @@ Flat structure with per-channel oscillator dynamics, matching PhasorDense.
 - `omega_lo::Float32`, `omega_hi::Float32`: For `:uniform` init
 - `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
+- `init_log_neg_lambda::Union{Float32, Nothing}`: Optional uniform override for
+  the initial value of `log_neg_lambda`; semantics match
+  [`PhasorDense`](@ref). Use to avoid `phasor_kernel` underflow at long L.
 
 # Parameters
 - `weight` — Conv weight tensor
@@ -738,6 +760,7 @@ struct PhasorConv <: Lux.AbstractLuxLayer
     omega_hi::Float32
     trainable_omega::Bool
     return_type::SolutionType
+    init_log_neg_lambda::Union{Float32, Nothing}
 end
 
 function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
@@ -748,6 +771,7 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
                     trainable_omega::Bool = false,
+                    init_log_neg_lambda::Union{Real, Nothing} = nothing,
                     kwargs...)
     conv = Conv(k, chs, identity; use_bias=false, kwargs...)
     return PhasorConv(conv,
@@ -758,7 +782,8 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
                       Float32(omega_lo),
                       Float32(omega_hi),
                       trainable_omega,
-                      return_type)
+                      return_type,
+                      init_log_neg_lambda === nothing ? nothing : Float32(init_log_neg_lambda))
 end
 
 # Helper to get output channels
@@ -768,13 +793,16 @@ function _init_conv_dynamics(l::PhasorConv)
     n = _out_chs(l)
     if l.init_mode == :hippo
         λ_init, ω_init = hippo_legs_diagonal(n)
-        log_neg_lambda = log.(-λ_init)
+        log_neg_lambda = l.init_log_neg_lambda === nothing ?
+            log.(-λ_init) : fill(l.init_log_neg_lambda, n)
         omega = ω_init
     elseif l.init_mode == :uniform
-        log_neg_lambda = fill(Float32(log(0.1)), n)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.1)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, n)
         omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=n)))
     else  # :default — match standard spk_args defaults
-        log_neg_lambda = fill(Float32(log(0.2)), n)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.2)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, n)
         omega = fill(Float32(2π), n)
     end
     return log_neg_lambda, omega

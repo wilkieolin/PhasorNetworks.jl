@@ -27,6 +27,8 @@ function ssm_tests()
         ssm_spiking_correlation_tests()
         ssm_spiking_chain_tests()
         phasor_stft_tests()
+        phasor_stft_long_L_tests()
+        phasor_stft_init_kwarg_tests()
     end
 end
 
@@ -1021,5 +1023,100 @@ function phasor_stft_tests()
         y_b, _ = layer_bias(x, ps_b, st_b)
         @test size(y_b) == (n_freqs, L, B)
         @test all(isfinite, y_b)
+    end
+end
+
+"""
+Regression: PhasorSTFT backward must produce finite gradients at long L
+even with the default `log_neg_lambda = log(0.1)` (λ = -0.1), where
+phasor_kernel underflows past L ≈ 880 and the post-conv normalization
+sees near-zero magnitudes. Pre-fix: every parameter gradient came back
+NaN, training silently failed. The fix lives in `normalize_to_unit_circle`
+in src/domains.jl (safe_r = max(r, threshold) pattern).
+"""
+function phasor_stft_long_L_tests()
+    @testset "PhasorSTFT long-L finite gradient" begin
+        rng = Xoshiro(42)
+        in_dim, n_freqs, B = 1, 8, 2
+
+        # Lengths spanning the underflow boundary (~880 samples for λ=-0.1).
+        for L in (1024, 4096, 16000)
+            layer = PhasorSTFT(in_dim => n_freqs)
+            ps, st = Lux.setup(rng, layer)
+            x = randn(rng, ComplexF32, in_dim, L, B)
+
+            y, _ = layer(x, ps, st)
+            @test all(isfinite, y)
+            @test mean(abs.(y)) ≈ 1.0f0 atol=1f-3   # unit-circle activation
+
+            l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+            @test isfinite(l)
+            @test sum(isnan, gs[1].weight)         == 0
+            @test sum(isnan, gs[1].omega)          == 0
+            @test sum(isnan, gs[1].log_neg_lambda) == 0
+            @test sum(isinf, gs[1].weight)         == 0
+            @test sum(isinf, gs[1].omega)          == 0
+            @test sum(isinf, gs[1].log_neg_lambda) == 0
+            # Non-zero (gradients should actually carry information).
+            @test sum(abs, gs[1].weight)         > 0
+            @test sum(abs, gs[1].omega)          > 0
+            @test sum(abs, gs[1].log_neg_lambda) > 0
+        end
+
+        # λ-sweep at L=16000, demonstrating fix is independent of the
+        # underflow regime: stable across the full range from -1 (heavily
+        # damped) to -0.001 (effectively non-decaying over L=16000).
+        L = 16000
+        x = randn(rng, ComplexF32, in_dim, L, B)
+        for λ_val in (-1f0, -0.1f0, -0.01f0, -0.001f0)
+            layer = PhasorSTFT(in_dim => n_freqs;
+                               init_log_neg_lambda = log(-λ_val))
+            ps, st = Lux.setup(rng, layer)
+            l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+            @test isfinite(l)
+            @test sum(isnan, gs[1].weight)         == 0
+            @test sum(isnan, gs[1].omega)          == 0
+            @test sum(isnan, gs[1].log_neg_lambda) == 0
+        end
+    end
+end
+
+"""
+Verify the new `init_log_neg_lambda` kwarg actually plumbs through to the
+parameter init for PhasorSTFT, PhasorDense, PhasorConv. Replaces the
+post-init `ps.layer_N.log_neg_lambda .= log(0.001f0)` workaround pattern
+used by downstream callers.
+"""
+function phasor_stft_init_kwarg_tests()
+    @testset "init_log_neg_lambda kwarg" begin
+        rng = Xoshiro(0)
+        target = log(0.001f0)
+
+        # PhasorSTFT
+        s = PhasorSTFT(1 => 8; init_log_neg_lambda = target)
+        ps, _ = Lux.setup(rng, s)
+        @test all(ps.log_neg_lambda .≈ Float32(target))
+
+        # PhasorSTFT default still log(0.1) when kwarg omitted.
+        s_def = PhasorSTFT(1 => 8)
+        ps_def, _ = Lux.setup(rng, s_def)
+        @test all(ps_def.log_neg_lambda .≈ Float32(log(0.1)))
+
+        # PhasorDense — overrides per-mode default uniformly.
+        for mode in (:default, :uniform)
+            d = PhasorDense(4 => 4; init_mode=mode, init_log_neg_lambda=target)
+            ps_d, _ = Lux.setup(rng, d)
+            @test all(ps_d.log_neg_lambda .≈ Float32(target))
+        end
+
+        # PhasorConv — same.
+        c = PhasorConv((3,), 1 => 4; init_log_neg_lambda=target)
+        ps_c, _ = Lux.setup(rng, c)
+        @test all(ps_c.log_neg_lambda .≈ Float32(target))
+
+        # Default behavior preserved for callers that don't set the kwarg.
+        d_def = PhasorDense(4 => 4)
+        ps_d_def, _ = Lux.setup(rng, d_def)
+        @test all(ps_d_def.log_neg_lambda .≈ Float32(log(0.2)))
     end
 end
