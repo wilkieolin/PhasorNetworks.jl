@@ -31,6 +31,7 @@ function ssm_tests()
         phasor_stft_init_kwarg_tests()
         normalize_to_unit_circle_zero_tests()
         soft_normalize_to_unit_circle_zero_tests()
+        safe_normalize_to_unit_circle_tests()
         phasor_stft_sparse_input_tests()
     end
 end
@@ -1218,6 +1219,53 @@ function soft_normalize_to_unit_circle_zero_tests()
             zK)[1]
         @test all(isfinite, gsK)
         @test gsK[1] == ComplexF32(0)
+    end
+end
+
+"""
+Coverage for `safe_normalize_to_unit_circle`: the smooth ε-regularized
+variant of `normalize_to_unit_circle` that needs no custom rrule, so any
+pipeline passing complex zeros through it (e.g. attention on sparse audio
+where the convolution lands on `0+0im`) gets finite gradients without
+relying on the rrule's hard zero short-circuit.
+"""
+function safe_normalize_to_unit_circle_tests()
+    @testset "safe_normalize_to_unit_circle" begin
+        # Forward at and around zero
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        y = safe_normalize_to_unit_circle(z)
+        @test all(isfinite, y)
+        @test y[3] == ComplexF32(0)        # zero in → zero out (no fallback)
+        @test y[4] == ComplexF32(0)
+        @test abs(abs(y[1]) - 1f0) < 1f-5  # |z| = 1 ⇒ |y| ≈ 1
+        @test abs(abs(y[2]) - 1f0) < 1f-5
+
+        # Forward agrees with the hard variant for unit-modulus inputs.
+        z_unit = ComplexF32[1.0+0im, 0.7071+0.7071im, 0.5-0.866im]
+        @test maximum(abs.(safe_normalize_to_unit_circle(z_unit)
+                           .- normalize_to_unit_circle(z_unit))) < 1f-5
+
+        # Backward at z = 0: finite (no NaN/Inf), no rrule needed.
+        gs = Zygote.gradient(z -> sum(real, safe_normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs)
+
+        # Backward via complex cotangent (the production path runs the
+        # output through downstream complex ops).
+        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im, 0.8-0.6im, 1.2+0.1im]
+        gs2 = Zygote.gradient(z -> sum(real, c .* safe_normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs2)
+
+        # Custom ε kwarg propagates through.
+        y_eps = safe_normalize_to_unit_circle(z; ε = 1f-2)
+        # |z| = 1 with larger ε → magnitude noticeably below 1
+        @test abs(y_eps[1]) < 1f0
+        @test abs(y_eps[1]) > 0.99f0
+
+        # Behavior consistency at the documented transition |z| ≈ √ε
+        zr = ComplexF32[1f-3+0im, 1f-4+0im, 1f-5+0im]
+        # ε = 1e-8 ⇒ √ε = 1e-4 transition; at |z|=1e-4 we expect |y| ≈ 1/√2
+        ymag = abs.(safe_normalize_to_unit_circle(zr))
+        @test abs(ymag[2] - 1f0/sqrt(2f0)) < 1f-3
     end
 end
 

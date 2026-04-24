@@ -156,6 +156,45 @@ function ChainRulesCore.rrule(::typeof(normalize_to_unit_circle),
 end
 
 """
+    safe_normalize_to_unit_circle(z::AbstractArray{<:Complex}; ε::Real = 1.0f-8)
+
+Numerically-safe approximation of `normalize_to_unit_circle`: returns
+`z ./ sqrt(real(z)^2 + imag(z)^2 + ε)` instead of `z ./ |z|`.
+
+The added `ε` keeps the denominator strictly positive for every input —
+including exact `z = 0` — so both forward and backward are smooth
+everywhere and no custom `rrule` is required to suppress NaNs from the
+`abs(z)` chain rule at the origin.
+
+Differences from [`normalize_to_unit_circle`](@ref):
+
+| `|z|`               | `normalize_to_unit_circle` | `safe_normalize_to_unit_circle` |
+|---------------------|---------------------------|---------------------------------|
+| `≫ √ε` (typical)    | `z / |z|`,  magnitude 1   | `≈ z / |z|`,  magnitude `≈ 1`   |
+| `= √ε`              | `1 + 0im` (fallback)      | `z / √(2ε)`,  magnitude `1/√2`  |
+| `= 0`               | `1 + 0im` (fallback)      | `0 + 0im`                       |
+
+That is, silent inputs (`z ≈ 0`) produce silent outputs rather than the
+hard `1 + 0im` fallback. This is more physically meaningful for phasor
+networks (no input ⇒ no output) and avoids the bookkeeping needed to
+short-circuit the abs-chain-rule NaN at the origin.
+
+# Arguments
+- `z::AbstractArray{<:Complex}`: complex input array
+- `ε::Real = 1.0f-8`: regularization. The transition from `magnitude ≈ 1`
+  to `magnitude ≈ |z|/√ε` happens around `|z| ≈ √ε ≈ 1e-4`. The
+  Jacobian magnitude near `z = 0` scales as `1/√ε`; reduce ε if the
+  layer is sensitive to that magnitude.
+
+See also: [`normalize_to_unit_circle`](@ref) (hard variant with rrule),
+[`soft_normalize_to_unit_circle`](@ref) (SLERP-based magnitude-preserving
+variant).
+"""
+function safe_normalize_to_unit_circle(z::AbstractArray{<:Complex}; ε::Real = 1.0f-8)
+    return z ./ sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ Float32(ε))
+end
+
+"""
     soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.6f0, steepness::Float32 = 10.0f0)
 
 Soft normalization: smoothly map complex numbers onto the unit circle via phase interpolation
