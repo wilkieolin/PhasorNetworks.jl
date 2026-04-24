@@ -226,6 +226,64 @@ function random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}})
 end
 
 """
+    orthogonal_codes([rng,] d::Int, n::Int) -> Array{Phase, 2}
+
+Construct `n` mutually (near-)orthogonal `d`-dimensional phasor codes for use
+as a `Codebook` (or other VSA classifier) initial state. Output shape is
+`(d, n)` — one column per code.
+
+# Construction
+The construction is exactly the binding-based one used in phasor VSA: a
+single random base symbol `b` is bundled with `n` integer multiples of a
+DFT shift symbol `s`,
+
+    code_i = remap_phase( b + (i − 1) · s ),    s[k] = 2 · ((k−1) mod n) / n
+
+Pairwise differences are `(i − j) · s mod 2`, whose per-dimension cosines
+sum to zero by DFT orthogonality:
+
+    sim(code_i, code_j) = (1/d) · Σ_k cos(2π · (i − j) · ((k−1) mod n) / n)
+
+This is **exactly zero** when `n` divides `d` (each n-period block
+contributes 0). When it does not, the sum has a bounded residual
+`≤ 1 / sin(π/n)` from the partial trailing block, giving similarity
+`O(n / d)` — still strictly better than the `O(1/√d)` standard deviation
+of random codes for small `d`. Diagonal entries (self-similarity) are
+exactly 1.
+
+# Errors
+Throws when `n > d`: at most `d` mutually orthogonal vectors fit in
+`d`-dimensional space.
+
+# Notes
+- The base symbol `b` injects per-dimension randomness without changing
+  the orthogonality property — useful for breaking symmetry in downstream
+  layers.
+- For `n = 1` the orthogonality condition is vacuous; returns a single
+  random symbol.
+
+See also: [`Codebook`](@ref), [`random_symbols`](@ref), [`v_bind`](@ref).
+"""
+function orthogonal_codes(rng::AbstractRNG, d::Int, n::Int)
+    n > d && throw(ArgumentError(
+        "orthogonal_codes requires d ≥ n (cannot fit $n orthogonal vectors in $d dims)"))
+    if n == 1
+        return random_symbols(rng, (d, 1))
+    end
+    # Random base offset — does not change pairwise similarity.
+    base = 2.0f0 .* rand(rng, Float32, d) .- 1.0f0
+    # DFT shift pattern: tile (k mod n)/n across d dimensions.
+    shift = Float32[2 * ((k - 1) % n) / n for k in 1:d]
+    codes = Matrix{Float32}(undef, d, n)
+    for i in 1:n
+        @views codes[:, i] .= mod.(Float32(i - 1) .* shift .+ base .+ 1.0f0, 2.0f0) .- 1.0f0
+    end
+    return Phase.(codes)
+end
+
+orthogonal_codes(d::Int, n::Int) = orthogonal_codes(GLOBAL_RNG, d, n)
+
+"""
     remap_phase(x::Real) -> Float32
     remap_phase(x::AbstractArray) -> AbstractArray
 

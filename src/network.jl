@@ -939,36 +939,52 @@ end
 ###
 
 """
-    Codebook <: LuxCore.AbstractLuxLayer
+    Codebook(d => n; init_mode = :random) <: LuxCore.AbstractLuxLayer
 
-Layer that accesses a fixed set of phase codes and computes similarities with inputs.
-Used for discrete embedding or classification tasks in phase-based networks.
+Layer that holds `n` fixed `d`-dimensional phase codes and returns
+similarities with its input.
+
+# Arguments
+- `d => n`: input feature dimension `d` paired with number of codes `n`.
+- `init_mode::Symbol`: how the codebook is initialized.
+    - `:random` (default) — i.i.d. uniform phases via [`random_symbols`](@ref).
+      Pairwise similarities have standard deviation `O(1/√d)`; reliable
+      separation only when `d` is large relative to `n`.
+    - `:orthogonal` — DFT-shifted codes via [`orthogonal_codes`](@ref).
+      Pairwise similarities are exactly zero when `d` is divisible by `n`,
+      and bounded by `O(n/d)` otherwise. Requires `n ≤ d`. Useful when
+      `d` is small enough that random initialization may not give enough
+      separation between classes.
 
 # Fields
-- `dims::Pair{<:Int, <:Int}`: Input dimension => Number of codes
+- `dims::Pair{Int,Int}`: `d => n`.
+- `init_mode::Symbol`: `:random` or `:orthogonal`.
 
 # State
-- `codes`: Random phase symbols initialized as the codebook
-- Codes are fixed after initialization (non-trainable)
+- `codes::Array{Phase, 2}` of shape `(d, n)` — fixed after initialization
+  (non-trainable).
 
 # Forward Pass
-1. For phase inputs: Computes similarity with all codes
-2. For spiking inputs: Converts codes to currents and computes temporal similarity
+- Phase inputs: returns `similarity_outer(input, codes)`.
+- Spiking inputs: converts codes to currents and returns temporal
+  similarity.
 
-# Use Cases
-- Discrete symbol encoding in Vector Symbolic Architectures
-- Classification by similarity to learned phase patterns
-- Phase-based memory or lookup mechanisms
-
-See also: [`similarity_outer`](@ref) for similarity computation
+See also: [`similarity_outer`](@ref), [`orthogonal_codes`](@ref),
+[`random_symbols`](@ref).
 """
 struct Codebook <: LuxCore.AbstractLuxLayer
     dims
-    Codebook(x::Pair{<:Int, <:Int}) = new(x)
+    init_mode::Symbol
+end
+
+function Codebook(x::Pair{<:Int, <:Int}; init_mode::Symbol = :random)
+    init_mode in (:random, :orthogonal) || throw(ArgumentError(
+        "Codebook init_mode must be :random or :orthogonal, got :$init_mode"))
+    return Codebook(x, init_mode)
 end
 
 function Base.show(io::IO, cb::Codebook)
-    print(io, "Codebook($(cb.dims))")
+    print(io, "Codebook($(cb.dims); init_mode=:$(cb.init_mode))")
 end
 
 function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
@@ -976,8 +992,11 @@ function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
 end
 
 function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
-    state = (codes = random_symbols(rng, (cb.dims[1], cb.dims[2])),)
-    return state
+    d, n = cb.dims
+    codes = cb.init_mode === :orthogonal ?
+        orthogonal_codes(rng, d, n) :
+        random_symbols(rng, (d, n))
+    return (codes = codes,)
 end
 
 function (cb::Codebook)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
