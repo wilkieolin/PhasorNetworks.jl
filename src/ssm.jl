@@ -29,7 +29,7 @@ with `init_mode=:uniform` or `init_mode=:hippo`.
 # Returns
 A `PhasorDense` layer configured for SSM use (no bias, uniform/hippo init).
 """
-function PhasorSSM(dims::Pair{Int,Int}, act=safe_normalize_to_unit_circle;
+function PhasorSSM(dims::Pair{Int,Int}, act=normalize_to_unit_circle;
                    init_omega_range=(0.2f0, 2.5f0), init=:uniform,
                    return_type::SolutionType=SolutionType(:phase))
     @assert init in (:uniform, :hippo) "init must be :uniform or :hippo"
@@ -109,7 +109,7 @@ function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::Name
 
     # Extract phase at each timestep in the readout window
     z_window = z[:, t0:L, :]                         # C × W × B
-    z_norm = safe_normalize_to_unit_circle(z_window)
+    z_norm = normalize_to_unit_circle(z_window)
     phases = complex_to_angle(z_norm)                 # C × W × B  Phase
 
     # Broadcast similarity: cos(π·(phase - code)) averaged over features
@@ -281,7 +281,7 @@ struct SSMCrossAttention <: Lux.AbstractLuxLayer
 end
 
 function SSMCrossAttention(dims::Pair{Int,Int}, n_keys::Int,
-                           act=safe_normalize_to_unit_circle)
+                           act=normalize_to_unit_circle)
     return SSMCrossAttention(dims.first, dims.second, n_keys, act)
 end
 
@@ -308,7 +308,7 @@ function (l::SSMCrossAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, s
                 l.d_model, L, B)
 
     # Convert Q to phase for similarity computation
-    Q_phase = complex_to_angle(safe_normalize_to_unit_circle(Q))  # d_model × L × B Phase
+    Q_phase = complex_to_angle(normalize_to_unit_circle(Q))  # d_model × L × B Phase
 
     # Expand stored keys to 3D for similarity_outer
     K_phase = repeat(reshape(ps.keys, l.d_model, l.n_keys, 1), 1, 1, B)
@@ -363,7 +363,7 @@ struct SSMSelfAttention <: Lux.AbstractLuxLayer
     activation::Function
 end
 
-function SSMSelfAttention(dims::Pair{Int,Int}, act=safe_normalize_to_unit_circle)
+function SSMSelfAttention(dims::Pair{Int,Int}, act=normalize_to_unit_circle)
     return SSMSelfAttention(dims.first, dims.second, act)
 end
 
@@ -392,8 +392,8 @@ function (l::SSMSelfAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st
                 l.d_model, L, B)
 
     # Convert Q, K to phase for similarity
-    Q_phase = complex_to_angle(safe_normalize_to_unit_circle(Q))
-    K_phase = complex_to_angle(safe_normalize_to_unit_circle(K))
+    Q_phase = complex_to_angle(normalize_to_unit_circle(Q))
+    K_phase = complex_to_angle(normalize_to_unit_circle(K))
 
     # Compute attention scores and weight values
     scores = score_scale(similarity_outer(Q_phase, K_phase, dims=2),
@@ -474,7 +474,7 @@ Lux.initialstates(::AbstractRNG, ::MakeSpikingSSM) = NamedTuple()
 
 function (m::MakeSpikingSSM)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
     C, L, B = size(x)
-    phases = complex_to_angle(safe_normalize_to_unit_circle(x))
+    phases = complex_to_angle(normalize_to_unit_circle(x))
     train = ssm_phases_to_train(phases, spk_args=m.spk_args)
     tspan = (0.0f0, Float32(L) * m.spk_args.t_period)
     call = SpikingCall(train, m.spk_args, tspan)
@@ -569,7 +569,7 @@ function reconstruct_from_current(x::CurrentCall, L::Int, spk_args::SpikingArgs)
     Z_prev = cat(zero(Z[:, 1:1, :]), Z[:, 1:end-1, :]; dims=2)
     Z_deconv = Z .- decay .* Z_prev
 
-    return safe_normalize_to_unit_circle(Z_deconv)
+    return normalize_to_unit_circle(Z_deconv)
 end
 
 # ---- SSMSelfAttention Spiking Dispatch ----

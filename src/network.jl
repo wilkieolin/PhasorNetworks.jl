@@ -276,7 +276,7 @@ struct PhasorDense <: Lux.AbstractLuxLayer
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer},
-                    activation = safe_normalize_to_unit_circle;
+                    activation = normalize_to_unit_circle;
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
@@ -435,12 +435,12 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
         Z = Z .+ reshape(bias_val, :, 1, 1)
     end
 
-    # Skip normalization when the activation is one of the
-    # angle-preserving unit-circle maps. complex_to_angle ∘ (z/|z|) and
-    # complex_to_angle ∘ (z/√(|z|²+ε)) both reduce to complex_to_angle on
-    # nonzero inputs, and both yield 0 angle for z=0.
-    if a.activation === normalize_to_unit_circle ||
-       a.activation === safe_normalize_to_unit_circle
+    # Skip normalization when the activation is normalize_to_unit_circle:
+    # the function divides through a positive real (whether |z| or
+    # √(|z|² + ε)), so complex_to_angle ∘ normalize_to_unit_circle
+    # reduces to complex_to_angle on nonzero inputs, and both return 0
+    # angle at z = 0.
+    if a.activation === normalize_to_unit_circle
         return complex_to_angle(Z), state
     else
         Y = a.activation(Z)
@@ -604,7 +604,7 @@ struct PhasorSTFT <: Lux.AbstractLuxLayer
 end
 
 function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
-                    activation = safe_normalize_to_unit_circle;
+                    activation = normalize_to_unit_circle;
                     use_bias::Bool = false,
                     init_weight = nothing,
                     init_bias = default_bias,
@@ -766,7 +766,7 @@ struct PhasorConv <: Lux.AbstractLuxLayer
     init_log_neg_lambda::Union{Float32, Nothing}
 end
 
-function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = safe_normalize_to_unit_circle;
+function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
                     return_type::SolutionType = SolutionType(:spiking),
                     init_bias = default_bias,
                     use_bias::Bool = true,
@@ -1058,7 +1058,7 @@ struct PhasorFixed <: Lux.AbstractLuxLayer
     return_type::SolutionType
 end
 
-function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = safe_normalize_to_unit_circle;
+function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
                      return_type::SolutionType = SolutionType(:spiking),
                      init_bias = default_bias,
                      use_bias::Bool = false,

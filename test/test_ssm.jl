@@ -30,8 +30,8 @@ function ssm_tests()
         phasor_stft_long_L_tests()
         phasor_stft_init_kwarg_tests()
         normalize_to_unit_circle_zero_tests()
+        normalize_to_unit_circle_hard_mode_tests()
         soft_normalize_to_unit_circle_zero_tests()
-        safe_normalize_to_unit_circle_tests()
         phasor_stft_sparse_input_tests()
     end
 end
@@ -1126,42 +1126,85 @@ function phasor_stft_init_kwarg_tests()
 end
 
 """
-Regression: `normalize_to_unit_circle` must produce finite gradients on
-inputs that contain exact-zero elements. The safe-divisor fix in the
-forward is necessary but not sufficient; the upstream `abs(z)` chain rule
-returns `z̄/|z| = 0/0 = NaN` at z=0 and `0 · NaN = NaN` propagates back
-through the otherwise-zero gradient on the sub-threshold branch.
-
-The custom rrule (src/domains.jl) shortcuts that path.
+Default behavior (ε = 1e-8): `normalize_to_unit_circle` is the smooth
+`z / sqrt(|z|² + ε)` form — no fallback, no rrule. Forward at z = 0
+returns 0+0im and backward is finite (no NaN) for both real and complex
+cotangents.
 """
 function normalize_to_unit_circle_zero_tests()
-    @testset "normalize_to_unit_circle backward at z=0" begin
+    @testset "normalize_to_unit_circle default (safe) at z=0" begin
         # Doc reproducer.
         z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        y = normalize_to_unit_circle(z)
+        @test all(isfinite, y)
+        @test y[3] == ComplexF32(0)            # zero in → zero out
+        @test y[4] == ComplexF32(0)
+        @test abs(abs(y[1]) - 1f0) < 1f-5      # |z| = 1 ⇒ |y| ≈ 1
+        @test abs(abs(y[2]) - 1f0) < 1f-5
+
+        # Forward agrees with the hard variant for unit-modulus inputs.
+        z_unit = ComplexF32[1.0+0im, 0.7071+0.7071im, 0.5-0.866im]
+        @test maximum(abs.(normalize_to_unit_circle(z_unit)
+                           .- normalize_to_unit_circle(z_unit; ε = 0))) < 1f-5
+
+        # Backward at z = 0 is finite (no NaN, no Inf).
         gs = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z)), z)[1]
         @test all(isfinite, gs)
-        # Sub-threshold elements get a hard zero cotangent.
+
+        # Same for complex cotangent (production path passes y through
+        # downstream complex ops).
+        c   = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im, 0.8-0.6im, 1.2+0.1im]
+        gs2 = Zygote.gradient(z -> sum(real, c .* normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs2)
+
+        # Custom ε kwarg propagates through.
+        y_eps = normalize_to_unit_circle(z; ε = 1f-2)
+        @test abs(y_eps[1]) < 1f0
+        @test abs(y_eps[1]) > 0.99f0
+
+        # |z| = √ε transition: magnitude collapses to 1/√2.
+        zr = ComplexF32[1f-3+0im, 1f-4+0im, 1f-5+0im]
+        ymag = abs.(normalize_to_unit_circle(zr))   # ε = 1e-8 ⇒ √ε = 1e-4
+        @test abs(ymag[2] - 1f0 / sqrt(2f0)) < 1f-3
+    end
+end
+
+"""
+ε = 0 mode: the old hard `z/|z|` projection with `1+0im` sub-threshold
+fallback. Backward must still be NaN-free here, supplied by the rrule on
+`_normalize_to_unit_circle_hard`.
+"""
+function normalize_to_unit_circle_hard_mode_tests()
+    @testset "normalize_to_unit_circle ε=0 (hard) at z=0" begin
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+
+        # Forward: in-band elements get unit modulus; sub-threshold get 1+0im.
+        y = normalize_to_unit_circle(z; ε = 0)
+        @test y[3] == ComplexF32(1)
+        @test y[4] == ComplexF32(1)
+        for i in (1, 2, 5)
+            @test abs(abs(y[i]) - 1f0) < 1f-6
+        end
+
+        # Backward at z = 0: sub-threshold cotangent is exactly zero (rrule
+        # short-circuit — bypasses the abs(0) chain rule NaN).
+        gs = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z; ε = 0)), z)[1]
+        @test all(isfinite, gs)
         @test gs[3] == ComplexF32(0)
         @test gs[4] == ComplexF32(0)
 
-        # Active elements unchanged vs. analytic closed form
-        # dz = -i · z · imag(z · conj(ȳ)) / |z|³ with ȳ = 1 (real cost).
+        # Active elements match the closed form
+        # dz = -i · z · imag(z · conj(ȳ)) / |z|³ with ȳ = 1.
         for i in (1, 2, 5)
             z_i = z[i]; r_i = abs(z_i)
             expected = (-1.0f0im) * z_i * imag(z_i * conj(ComplexF32(1))) / r_i^3
-            @test gs[i] ≈ expected atol=1f-6
+            @test gs[i] ≈ expected atol = 1f-6
         end
 
-        # Complex cotangent path (cost passes through a complex coefficient).
-        z3 = ComplexF32[1.0+0.5im, 0.0+0.0im, 1.5+0im]
-        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im]
-        gs3 = Zygote.gradient(z -> sum(real, c .* normalize_to_unit_circle(z)), z3)[1]
-        @test all(isfinite, gs3)
-        @test gs3[2] == ComplexF32(0)   # zero element gets zero cotangent
-
-        # Threshold respect: elements at or below the threshold are zeroed.
-        z4 = ComplexF32[1f-12 + 0im, 1.0+0im]   # |z[1]| ≪ default threshold
-        gs4 = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z)), z4)[1]
+        # Custom threshold: sub-threshold elements are still zeroed in the
+        # backward.
+        z4  = ComplexF32[1f-12 + 0im, 1.0 + 0im]   # |z[1]| ≪ default threshold
+        gs4 = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z; ε = 0)), z4)[1]
         @test all(isfinite, gs4)
         @test gs4[1] == ComplexF32(0)
     end
@@ -1219,53 +1262,6 @@ function soft_normalize_to_unit_circle_zero_tests()
             zK)[1]
         @test all(isfinite, gsK)
         @test gsK[1] == ComplexF32(0)
-    end
-end
-
-"""
-Coverage for `safe_normalize_to_unit_circle`: the smooth ε-regularized
-variant of `normalize_to_unit_circle` that needs no custom rrule, so any
-pipeline passing complex zeros through it (e.g. attention on sparse audio
-where the convolution lands on `0+0im`) gets finite gradients without
-relying on the rrule's hard zero short-circuit.
-"""
-function safe_normalize_to_unit_circle_tests()
-    @testset "safe_normalize_to_unit_circle" begin
-        # Forward at and around zero
-        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
-        y = safe_normalize_to_unit_circle(z)
-        @test all(isfinite, y)
-        @test y[3] == ComplexF32(0)        # zero in → zero out (no fallback)
-        @test y[4] == ComplexF32(0)
-        @test abs(abs(y[1]) - 1f0) < 1f-5  # |z| = 1 ⇒ |y| ≈ 1
-        @test abs(abs(y[2]) - 1f0) < 1f-5
-
-        # Forward agrees with the hard variant for unit-modulus inputs.
-        z_unit = ComplexF32[1.0+0im, 0.7071+0.7071im, 0.5-0.866im]
-        @test maximum(abs.(safe_normalize_to_unit_circle(z_unit)
-                           .- normalize_to_unit_circle(z_unit))) < 1f-5
-
-        # Backward at z = 0: finite (no NaN/Inf), no rrule needed.
-        gs = Zygote.gradient(z -> sum(real, safe_normalize_to_unit_circle(z)), z)[1]
-        @test all(isfinite, gs)
-
-        # Backward via complex cotangent (the production path runs the
-        # output through downstream complex ops).
-        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im, 0.8-0.6im, 1.2+0.1im]
-        gs2 = Zygote.gradient(z -> sum(real, c .* safe_normalize_to_unit_circle(z)), z)[1]
-        @test all(isfinite, gs2)
-
-        # Custom ε kwarg propagates through.
-        y_eps = safe_normalize_to_unit_circle(z; ε = 1f-2)
-        # |z| = 1 with larger ε → magnitude noticeably below 1
-        @test abs(y_eps[1]) < 1f0
-        @test abs(y_eps[1]) > 0.99f0
-
-        # Behavior consistency at the documented transition |z| ≈ √ε
-        zr = ComplexF32[1f-3+0im, 1f-4+0im, 1f-5+0im]
-        # ε = 1e-8 ⇒ √ε = 1e-4 transition; at |z|=1e-4 we expect |y| ≈ 1/√2
-        ymag = abs.(safe_normalize_to_unit_circle(zr))
-        @test abs(ymag[2] - 1f0/sqrt(2f0)) < 1f-3
     end
 end
 

@@ -89,52 +89,77 @@ end
 
 
 """
-    normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
+    normalize_to_unit_circle(z::AbstractArray{<:Complex}; ε = 1f-8, threshold = 1f-10)
 
-Project complex numbers to the unit circle: returns `z / |z|` for each element,
-falling back to `1 + 0im` when `|z| ≤ threshold`.
+Project complex numbers (approximately) onto the unit circle. Two modes,
+selected by `ε`:
+
+- `ε > 0` (default, **safe**): `y = z ./ sqrt(real(z)^2 + imag(z)^2 + ε)`.
+  The denominator is bounded below by `√ε`, so both forward and backward
+  are smooth everywhere — no custom `rrule` needed, no NaN from the
+  `abs(z)` chain rule at exact `z = 0`. Output magnitude is `≈ 1` for
+  `|z| ≫ √ε` and approaches `0` for `|z| ≪ √ε` (silent input ⇒ silent
+  output).
+- `ε = 0` (**hard**): `y = z ./ |z|` with a `1 + 0im` fallback for
+  `|z| ≤ threshold`. Output magnitude is exactly 1 for in-band inputs.
+  This branch dispatches into a separate kernel that carries a
+  closed-form `rrule` returning zero cotangent for sub-threshold
+  elements (so `abs(0)` chain rule cannot produce `0·NaN = NaN`).
 
 # Arguments
-- `z::AbstractArray{<:Complex}`: Array of complex numbers
-- `threshold::Real`: Magnitudes at or below this value are mapped to `1 + 0im`
-  rather than divided through (default: `1.0f-10`)
+- `z::AbstractArray{<:Complex}`: complex input array.
+- `ε::Real = 1.0f-8`: safe-mode regularization. Set `ε = 0` to recover
+  the hard `z/|z|` projection. The transition from `magnitude ≈ 1` to
+  `magnitude ≈ |z|/√ε` happens around `|z| ≈ √ε ≈ 1e-4`. The Jacobian
+  magnitude near `z = 0` scales as `1/√ε`.
+- `threshold::Real = 1.0f-10`: only used when `ε = 0`; sub-threshold
+  inputs map to `1 + 0im` and receive zero cotangent.
 
-# Returns
-- Complex array with each element of unit magnitude (or `1 + 0im` for sub-threshold inputs)
+# Comparison
 
-# Implementation
-Forward uses `safe_r = max(|z|, threshold)` so the in-band division is finite.
-A custom `rrule` (see below) handles the backward in closed form: it returns
-zero cotangent for sub-threshold elements, bypassing the chain rule on
-`abs(z)` which would otherwise produce `0 · NaN = NaN` at exact `z = 0`
-inputs (a real symptom on sparse audio where `causal_conv` lands on exact
-zero in silent regions).
+| `|z|`            | `ε = 1f-8` (default)            | `ε = 0` (hard)              |
+|------------------|---------------------------------|-----------------------------|
+| `≫ √ε` (typical) | `≈ z / |z|`, magnitude `≈ 1`    | `z / |z|`, magnitude 1      |
+| `= √ε`           | `z / √(2ε)`, magnitude `1/√2`   | `z / |z|`, magnitude 1      |
+| `= 0`            | `0 + 0im`                       | `1 + 0im` (fallback)        |
 
-For a soft, magnitude-aware variant that preserves a smooth gradient as the
-input transitions through the threshold, see [`soft_normalize_to_unit_circle`](@ref).
+For a soft, magnitude-preserving variant that smoothly interpolates the
+*phase* between sub-threshold and supra-threshold regions, see
+[`soft_normalize_to_unit_circle`](@ref).
 """
-function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
-    r = abs.(z)
-    safe_r = max.(r, Float32(threshold))
-    unit_z = z ./ safe_r
-    default_value = ComplexF32(1.0f0 + 0.0f0im)
-    return ifelse.(r .> Float32(threshold), unit_z, default_value)
+function normalize_to_unit_circle(z::AbstractArray{<:Complex};
+                                   ε::Real = 1.0f-8,
+                                   threshold::Real = 1.0f-10)
+    if Float32(ε) == 0.0f0
+        return _normalize_to_unit_circle_hard(z; threshold = threshold)
+    else
+        return z ./ sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ Float32(ε))
+    end
 end
 
-# Closed-form pullback for normalize_to_unit_circle.
-#
-# Derivation: write z = a + ib, r = √(a²+b²). For y = z/r the real-pair
+# Hard projection helper: z/|z| with a `1+0im` sub-threshold fallback.
+# Carries a closed-form rrule (below) so the backward at z=0 is finite.
+# Not exported — reach it via `normalize_to_unit_circle(z; ε = 0)`.
+function _normalize_to_unit_circle_hard(z::AbstractArray{<:Complex};
+                                         threshold::Real = 1.0f-10)
+    th = Float32(threshold)
+    r = abs.(z)
+    safe_r = max.(r, th)
+    unit_z = z ./ safe_r
+    default_value = ComplexF32(1.0f0 + 0.0f0im)
+    return ifelse.(r .> th, unit_z, default_value)
+end
+
+# Closed-form pullback for the hard branch. For y = z/r the real-pair
 # Jacobian collapses, in ChainRules tangent convention `ȳ = ∂L/∂(re y) +
 # i·∂L/∂(im y)`, to
 #
 #     dz = -i · z · imag(z · conj(ȳ)) / r³
 #
-# Verified element-wise against Zygote's broadcast-traced backward for both
-# real and complex ȳ. The win on active elements is just structure; the win
-# at sub-threshold elements is correctness: returning a hard zero stops the
-# upstream `abs(z)` chain rule from contributing `(z̄ / |z|) · dr = NaN` at
-# z = 0 and poisoning the rest of the gradient via `0 · NaN = NaN` (IEEE 754).
-function ChainRulesCore.rrule(::typeof(normalize_to_unit_circle),
+# Returning a hard zero on sub-threshold elements stops the upstream
+# `abs(z)` chain rule from contributing `(z̄ / |z|) · dr = NaN` at z = 0
+# and poisoning the rest of the gradient via `0 · NaN = NaN` (IEEE 754).
+function ChainRulesCore.rrule(::typeof(_normalize_to_unit_circle_hard),
                               z::AbstractArray{<:Complex};
                               threshold::Real = 1.0f-10)
     th = Float32(threshold)
@@ -144,54 +169,14 @@ function ChainRulesCore.rrule(::typeof(normalize_to_unit_circle),
     default_value = ComplexF32(1.0f0 + 0.0f0im)
     y = ifelse.(r .> th, unit_z, default_value)
 
-    function normalize_to_unit_circle_pullback(ȳ_)
+    function _normalize_to_unit_circle_hard_pullback(ȳ_)
         ȳ = unthunk(ȳ_)
         active = r .> th
-        # safe_r ≥ th, so safe_r^3 is bounded away from 0 — no Inf/NaN.
         dz_active = (-1.0f0im) .* z .* imag.(z .* conj.(ȳ)) ./ (safe_r .^ 3)
         dz = ifelse.(active, dz_active, zero(eltype(z)))
         return (NoTangent(), dz)
     end
-    return y, normalize_to_unit_circle_pullback
-end
-
-"""
-    safe_normalize_to_unit_circle(z::AbstractArray{<:Complex}; ε::Real = 1.0f-8)
-
-Numerically-safe approximation of `normalize_to_unit_circle`: returns
-`z ./ sqrt(real(z)^2 + imag(z)^2 + ε)` instead of `z ./ |z|`.
-
-The added `ε` keeps the denominator strictly positive for every input —
-including exact `z = 0` — so both forward and backward are smooth
-everywhere and no custom `rrule` is required to suppress NaNs from the
-`abs(z)` chain rule at the origin.
-
-Differences from [`normalize_to_unit_circle`](@ref):
-
-| `|z|`               | `normalize_to_unit_circle` | `safe_normalize_to_unit_circle` |
-|---------------------|---------------------------|---------------------------------|
-| `≫ √ε` (typical)    | `z / |z|`,  magnitude 1   | `≈ z / |z|`,  magnitude `≈ 1`   |
-| `= √ε`              | `1 + 0im` (fallback)      | `z / √(2ε)`,  magnitude `1/√2`  |
-| `= 0`               | `1 + 0im` (fallback)      | `0 + 0im`                       |
-
-That is, silent inputs (`z ≈ 0`) produce silent outputs rather than the
-hard `1 + 0im` fallback. This is more physically meaningful for phasor
-networks (no input ⇒ no output) and avoids the bookkeeping needed to
-short-circuit the abs-chain-rule NaN at the origin.
-
-# Arguments
-- `z::AbstractArray{<:Complex}`: complex input array
-- `ε::Real = 1.0f-8`: regularization. The transition from `magnitude ≈ 1`
-  to `magnitude ≈ |z|/√ε` happens around `|z| ≈ √ε ≈ 1e-4`. The
-  Jacobian magnitude near `z = 0` scales as `1/√ε`; reduce ε if the
-  layer is sensitive to that magnitude.
-
-See also: [`normalize_to_unit_circle`](@ref) (hard variant with rrule),
-[`soft_normalize_to_unit_circle`](@ref) (SLERP-based magnitude-preserving
-variant).
-"""
-function safe_normalize_to_unit_circle(z::AbstractArray{<:Complex}; ε::Real = 1.0f-8)
-    return z ./ sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ Float32(ε))
+    return y, _normalize_to_unit_circle_hard_pullback
 end
 
 """
