@@ -27,6 +27,12 @@ function ssm_tests()
         ssm_spiking_correlation_tests()
         ssm_spiking_chain_tests()
         phasor_stft_tests()
+        phasor_stft_long_L_tests()
+        phasor_stft_init_kwarg_tests()
+        normalize_to_unit_circle_zero_tests()
+        normalize_to_unit_circle_hard_mode_tests()
+        soft_normalize_to_unit_circle_zero_tests()
+        phasor_stft_sparse_input_tests()
     end
 end
 
@@ -178,7 +184,7 @@ function dirac_discretization_tests()
 
         @testset "causal_conv_dirac shape and finiteness" begin
             C_in, C_out, L, B = 4, 8, 16, 3
-            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             W = randn(rng, Float32, C_out, C_in)
             λ = fill(-0.1f0, C_out)
             ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
@@ -191,7 +197,7 @@ function dirac_discretization_tests()
 
         @testset "gradient flow through Dirac path" begin
             C_in, C_out, L, B = 4, 8, 10, 2
-            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             W = randn(rng, Float32, C_out, C_in)
             λ = fill(-0.1f0, C_out)
             ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
@@ -216,7 +222,7 @@ function dirac_discretization_tests()
             @test eltype(y_dirac) <: Phase
             @test all(isfinite, Float32.(y_dirac))
 
-            # Default layer should use ZOH (backward compat)
+            # Default layer should also work with the Dirac path
             layer_default = PhasorDense(C_in => C_out, normalize_to_unit_circle;
                                         init_mode=:default, use_bias=false)
             ps_d, st_d = Lux.setup(rng, layer_default)
@@ -224,11 +230,17 @@ function dirac_discretization_tests()
             @test size(y_zoh) == (C_out, L, B)
             @test eltype(y_zoh) <: Phase
 
-            # Complex 3D input always uses ZOH regardless of init_mode
+            # The complex-3D ZOH path now lives in PhasorResonant; verify it
+            # produces a same-shape Phase output from the same phase data
+            # lifted to the unit circle.
             x_cmpx = angle_to_complex(phases)
-            y_cmpx, _ = layer_ssm(x_cmpx, ps, st)
+            resonant = PhasorResonant(C_in => C_out, normalize_to_unit_circle;
+                                      omega = st.omega,
+                                      init_log_neg_lambda = ps.log_neg_lambda[1])
+            ps_r, st_r = Lux.setup(rng, resonant)
+            y_cmpx, _ = resonant(x_cmpx, ps_r, st_r)
             @test size(y_cmpx) == (C_out, L, B)
-            @test eltype(y_cmpx) <: Complex
+            @test eltype(y_cmpx) <: Phase
         end
 
         @testset "Dirac single-oscillator consistency" begin
@@ -248,7 +260,7 @@ function dirac_discretization_tests()
             # Manual computation: same formula, verify we get identical results
             λ = -exp.(ps.log_neg_lambda)
             ω = st.omega
-            Z_manual = causal_conv_dirac(Float32.(phases), ps.weight, λ, ω, 1f0)
+            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, 1f0)
             y_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
 
             @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
@@ -286,12 +298,12 @@ function hippo_tests()
 end
 
 function phasor_ssm_layer_tests()
-    @testset "PhasorDense SSM layer" begin
+    @testset "PhasorResonant (Complex 3D → Phase 3D)" begin
         rng = Xoshiro(42)
         in_dim, out_dim = 8, 16
         L, B = 10, 4
 
-        layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
+        layer = PhasorResonant(in_dim => out_dim)   # default activation, no bias
         ps, st = Lux.setup(rng, layer)
 
         # Parameter shapes
@@ -302,28 +314,28 @@ function phasor_ssm_layer_tests()
         # parameterlength
         @test Lux.parameterlength(layer) == out_dim * in_dim + out_dim
 
-        # Forward pass (3D complex dispatch)
+        # Forward pass: Complex 3D in → Phase 3D out
         x = randn(ComplexF32, in_dim, L, B)
         y, st_new = layer(x, ps, st)
 
         @test size(y) == (out_dim, L, B)
-        @test all(isfinite, y)
-
-        # Unit circle activation: magnitudes ≈ 1
-        @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
+        @test eltype(y) <: Phase
+        @test all(isfinite, Float32.(y))
 
         # Different inputs give different outputs
         x2 = randn(ComplexF32, in_dim, L, B)
         y2, _ = layer(x2, ps, st)
-        @test y != y2
+        @test Float32.(y) != Float32.(y2)
 
-        # HiPPO init
-        layer_hippo = PhasorDense(in_dim => out_dim, identity; init_mode=:hippo, use_bias=false)
-        ps_h, st_h = Lux.setup(rng, layer_hippo)
-        @test size(ps_h.weight) == (out_dim, in_dim)
-        y_h, _ = layer_hippo(x, ps_h, st_h)
-        @test size(y_h) == (out_dim, L, B)
-        @test all(isfinite, y_h)
+        # Custom omega vector (per-channel)
+        ω_custom = collect(range(0.5f0, 3.0f0; length=out_dim))
+        layer_om = PhasorResonant(in_dim => out_dim; omega = ω_custom)
+        @test layer_om.omega ≈ Float32.(ω_custom)
+
+        # Scalar omega (broadcast)
+        layer_sc = PhasorResonant(in_dim => out_dim; omega = 1.5f0)
+        @test all(layer_sc.omega .≈ 1.5f0)
+        @test length(layer_sc.omega) == out_dim
     end
 end
 
@@ -404,8 +416,11 @@ function ssm_chain_tests()
         C_in, D_hidden, n_classes = 8, 16, 5
         L, B = 10, 4
 
+        # PhasorResonant encodes complex input → phase domain;
+        # PhasorDense (Phase 3D dispatch) does the SSM mix in phase space;
+        # SSMReadout consumes the phase output directly.
         model = Chain(
-            PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+            PhasorResonant(C_in => D_hidden),
             PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
@@ -421,27 +436,25 @@ function ssm_chain_tests()
 end
 
 function ssm_gradient_tests()
-    @testset "SSM Gradients" begin
+    @testset "SSM Gradients (PhasorResonant)" begin
         rng = Xoshiro(42)
         in_dim, out_dim = 4, 8
         L, B = 6, 2
 
-        layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
+        layer = PhasorResonant(in_dim => out_dim)
         ps, st = Lux.setup(rng, layer)
 
         x = randn(ComplexF32, in_dim, L, B)
 
         loss_fn = function(ps)
             y, _ = layer(x, ps, st)
-            return sum(abs2, y)
+            return sum(abs2, Float32.(y))
         end
 
         val, grads = withgradient(loss_fn, ps)
 
         @test isfinite(val)
         @test grads[1] !== nothing
-
-        # All gradient components finite
         @test all(isfinite, grads[1].weight)
         @test all(isfinite, grads[1].log_neg_lambda)
     end
@@ -453,11 +466,11 @@ function ssm_gpu_tests()
         rng = Xoshiro(42)
         device = gpu_device()
 
-        @testset "PhasorDense SSM forward on GPU" begin
+        @testset "PhasorResonant forward on GPU" begin
             in_dim, out_dim = 8, 16
             L, B = 10, 4
 
-            layer = PhasorDense(in_dim => out_dim, normalize_to_unit_circle; init_mode=:uniform, use_bias=false)
+            layer = PhasorResonant(in_dim => out_dim)
             ps, st = Lux.setup(rng, layer)
             ps = ps |> device
             st = st |> device
@@ -466,7 +479,8 @@ function ssm_gpu_tests()
             y, _ = layer(x, ps, st)
 
             @test size(y) == (out_dim, L, B)
-            @test all(isfinite, Array(y))
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(Array(y)))
         end
 
         @testset "psk_encode on GPU" begin
@@ -481,7 +495,7 @@ function ssm_gpu_tests()
             L, B = 10, 4
 
             model = Chain(
-                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+                PhasorResonant(C_in => D_hidden),
                 PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
@@ -661,10 +675,14 @@ function ssm_attention_chain_tests()
         L, B = 10, 4
 
         @testset "self-attention in chain" begin
+            # PhasorResonant encodes complex → phase. SSMSelfAttention takes
+            # complex, so we lift back via angle_to_complex; SSMReadout has a
+            # Phase 3D dispatch so we can finish in the phase domain.
             model = Chain(
-                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+                PhasorResonant(C_in => D_hidden),
+                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -677,9 +695,10 @@ function ssm_attention_chain_tests()
 
         @testset "cross-attention in chain" begin
             model = Chain(
-                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+                PhasorResonant(C_in => D_hidden),
+                angle_to_complex,
                 SSMCrossAttention(D_hidden => D_hidden, L, normalize_to_unit_circle),
-                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -692,8 +711,10 @@ function ssm_attention_chain_tests()
 
         @testset "gradient through chain with self-attention" begin
             model = Chain(
-                PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=:uniform, use_bias=false),
+                PhasorResonant(C_in => D_hidden),
+                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
+                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -706,8 +727,11 @@ function ssm_attention_chain_tests()
             end
             val, grads = withgradient(loss_fn, ps)
             @test isfinite(val)
+            # layer_1 is PhasorResonant; layer_2 / layer_4 are pass-through
+            # functions (no params); layer_3 is SSMSelfAttention; layer_5
+            # is SSMReadout (codes in state, no params either).
             @test all(isfinite, grads[1].layer_1.weight)
-            @test all(isfinite, grads[1].layer_2.weight_q)
+            @test all(isfinite, grads[1].layer_3.weight_q)
         end
     end
 end
@@ -876,7 +900,7 @@ function ssm_spiking_correlation_tests()
         @testset "Dirac matches manual causal_conv_dirac" begin
             λ_c = -exp.(ps.log_neg_lambda)
             ω_c = st.omega
-            Z_manual = causal_conv_dirac(Float32.(phases_in), ps.weight, λ_c, ω_c, 1f0)
+            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, 1f0)
             phases_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
             @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end
@@ -939,12 +963,12 @@ function ssm_spiking_chain_tests()
 end
 
 function phasor_stft_tests()
-    @testset "PhasorSTFT" begin
+    @testset "ResonantSTFT" begin
         rng = Xoshiro(42)
         in_dim, n_freqs = 8, 16
         L, B = 10, 4
 
-        layer = PhasorSTFT(in_dim => n_freqs, normalize_to_unit_circle)
+        layer = ResonantSTFT(in_dim => n_freqs, normalize_to_unit_circle)
         ps, st = Lux.setup(rng, layer)
 
         # Parameter structure: weight, log_neg_lambda, omega all trainable
@@ -998,7 +1022,7 @@ function phasor_stft_tests()
 
         # Frequency shift identity: when omega_out == omega, shift is no-op
         st_match = (omega_out = ps.omega[1],)
-        layer_id = PhasorSTFT(in_dim => 1, identity; omega_lo=ps.omega[1], omega_hi=ps.omega[1])
+        layer_id = ResonantSTFT(in_dim => 1, identity; omega_lo=ps.omega[1], omega_hi=ps.omega[1])
         ps_id, _ = Lux.setup(rng, layer_id)
         # Override omega to match omega_out exactly
         ps_id = merge(ps_id, (omega = Float32[st_match.omega_out],))
@@ -1014,12 +1038,276 @@ function phasor_stft_tests()
         @test y_shift ≈ Z_expected atol=1f-5
 
         # With bias
-        layer_bias = PhasorSTFT(in_dim => n_freqs, normalize_to_unit_circle; use_bias=true)
+        layer_bias = ResonantSTFT(in_dim => n_freqs, normalize_to_unit_circle; use_bias=true)
         ps_b, st_b = Lux.setup(rng, layer_bias)
         @test haskey(ps_b, :bias_real)
         @test haskey(ps_b, :bias_imag)
         y_b, _ = layer_bias(x, ps_b, st_b)
         @test size(y_b) == (n_freqs, L, B)
         @test all(isfinite, y_b)
+    end
+end
+
+"""
+Regression: ResonantSTFT backward must produce finite gradients at long L
+even with the default `log_neg_lambda = log(0.1)` (λ = -0.1), where
+phasor_kernel underflows past L ≈ 880 and the post-conv normalization
+sees near-zero magnitudes. Pre-fix: every parameter gradient came back
+NaN, training silently failed. The fix lives in `normalize_to_unit_circle`
+in src/domains.jl (safe_r = max(r, threshold) pattern).
+"""
+function phasor_stft_long_L_tests()
+    @testset "ResonantSTFT long-L finite gradient" begin
+        rng = Xoshiro(42)
+        in_dim, n_freqs, B = 1, 8, 2
+
+        # Lengths spanning the underflow boundary (~880 samples for λ=-0.1).
+        for L in (1024, 4096, 16000)
+            layer = ResonantSTFT(in_dim => n_freqs)
+            ps, st = Lux.setup(rng, layer)
+            x = randn(rng, ComplexF32, in_dim, L, B)
+
+            y, _ = layer(x, ps, st)
+            @test all(isfinite, y)
+            @test mean(abs.(y)) ≈ 1.0f0 atol=1f-3   # unit-circle activation
+
+            l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+            @test isfinite(l)
+            @test sum(isnan, gs[1].weight)         == 0
+            @test sum(isnan, gs[1].omega)          == 0
+            @test sum(isnan, gs[1].log_neg_lambda) == 0
+            @test sum(isinf, gs[1].weight)         == 0
+            @test sum(isinf, gs[1].omega)          == 0
+            @test sum(isinf, gs[1].log_neg_lambda) == 0
+            # Non-zero (gradients should actually carry information).
+            @test sum(abs, gs[1].weight)         > 0
+            @test sum(abs, gs[1].omega)          > 0
+            @test sum(abs, gs[1].log_neg_lambda) > 0
+        end
+
+        # λ-sweep at L=16000, demonstrating fix is independent of the
+        # underflow regime: stable across the full range from -1 (heavily
+        # damped) to -0.001 (effectively non-decaying over L=16000).
+        L = 16000
+        x = randn(rng, ComplexF32, in_dim, L, B)
+        for λ_val in (-1f0, -0.1f0, -0.01f0, -0.001f0)
+            layer = ResonantSTFT(in_dim => n_freqs;
+                               init_log_neg_lambda = log(-λ_val))
+            ps, st = Lux.setup(rng, layer)
+            l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+            @test isfinite(l)
+            @test sum(isnan, gs[1].weight)         == 0
+            @test sum(isnan, gs[1].omega)          == 0
+            @test sum(isnan, gs[1].log_neg_lambda) == 0
+        end
+    end
+end
+
+"""
+Verify the new `init_log_neg_lambda` kwarg actually plumbs through to the
+parameter init for ResonantSTFT, PhasorDense, PhasorConv. Replaces the
+post-init `ps.layer_N.log_neg_lambda .= log(0.001f0)` workaround pattern
+used by downstream callers.
+"""
+function phasor_stft_init_kwarg_tests()
+    @testset "init_log_neg_lambda kwarg" begin
+        rng = Xoshiro(0)
+        target = log(0.001f0)
+
+        # ResonantSTFT
+        s = ResonantSTFT(1 => 8; init_log_neg_lambda = target)
+        ps, _ = Lux.setup(rng, s)
+        @test all(ps.log_neg_lambda .≈ Float32(target))
+
+        # ResonantSTFT default still log(0.1) when kwarg omitted.
+        s_def = ResonantSTFT(1 => 8)
+        ps_def, _ = Lux.setup(rng, s_def)
+        @test all(ps_def.log_neg_lambda .≈ Float32(log(0.1)))
+
+        # PhasorDense — overrides per-mode default uniformly.
+        for mode in (:default, :uniform)
+            d = PhasorDense(4 => 4; init_mode=mode, init_log_neg_lambda=target)
+            ps_d, _ = Lux.setup(rng, d)
+            @test all(ps_d.log_neg_lambda .≈ Float32(target))
+        end
+
+        # PhasorConv — same.
+        c = PhasorConv((3,), 1 => 4; init_log_neg_lambda=target)
+        ps_c, _ = Lux.setup(rng, c)
+        @test all(ps_c.log_neg_lambda .≈ Float32(target))
+
+        # Default behavior preserved for callers that don't set the kwarg.
+        d_def = PhasorDense(4 => 4)
+        ps_d_def, _ = Lux.setup(rng, d_def)
+        @test all(ps_d_def.log_neg_lambda .≈ Float32(log(0.2)))
+    end
+end
+
+"""
+Default behavior (ε = 1e-8): `normalize_to_unit_circle` is the smooth
+`z / sqrt(|z|² + ε)` form — no fallback, no rrule. Forward at z = 0
+returns 0+0im and backward is finite (no NaN) for both real and complex
+cotangents.
+"""
+function normalize_to_unit_circle_zero_tests()
+    @testset "normalize_to_unit_circle default (safe) at z=0" begin
+        # Doc reproducer.
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        y = normalize_to_unit_circle(z)
+        @test all(isfinite, y)
+        @test y[3] == ComplexF32(0)            # zero in → zero out
+        @test y[4] == ComplexF32(0)
+        @test abs(abs(y[1]) - 1f0) < 1f-5      # |z| = 1 ⇒ |y| ≈ 1
+        @test abs(abs(y[2]) - 1f0) < 1f-5
+
+        # Forward agrees with the hard variant for unit-modulus inputs.
+        z_unit = ComplexF32[1.0+0im, 0.7071+0.7071im, 0.5-0.866im]
+        @test maximum(abs.(normalize_to_unit_circle(z_unit)
+                           .- normalize_to_unit_circle(z_unit; ε = 0))) < 1f-5
+
+        # Backward at z = 0 is finite (no NaN, no Inf).
+        gs = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs)
+
+        # Same for complex cotangent (production path passes y through
+        # downstream complex ops).
+        c   = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im, 0.8-0.6im, 1.2+0.1im]
+        gs2 = Zygote.gradient(z -> sum(real, c .* normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs2)
+
+        # Custom ε kwarg propagates through.
+        y_eps = normalize_to_unit_circle(z; ε = 1f-2)
+        @test abs(y_eps[1]) < 1f0
+        @test abs(y_eps[1]) > 0.99f0
+
+        # |z| = √ε transition: magnitude collapses to 1/√2.
+        zr = ComplexF32[1f-3+0im, 1f-4+0im, 1f-5+0im]
+        ymag = abs.(normalize_to_unit_circle(zr))   # ε = 1e-8 ⇒ √ε = 1e-4
+        @test abs(ymag[2] - 1f0 / sqrt(2f0)) < 1f-3
+    end
+end
+
+"""
+ε = 0 mode: the old hard `z/|z|` projection with `1+0im` sub-threshold
+fallback. Backward must still be NaN-free here, supplied by the rrule on
+`_normalize_to_unit_circle_hard`.
+"""
+function normalize_to_unit_circle_hard_mode_tests()
+    @testset "normalize_to_unit_circle ε=0 (hard) at z=0" begin
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+
+        # Forward: in-band elements get unit modulus; sub-threshold get 1+0im.
+        y = normalize_to_unit_circle(z; ε = 0)
+        @test y[3] == ComplexF32(1)
+        @test y[4] == ComplexF32(1)
+        for i in (1, 2, 5)
+            @test abs(abs(y[i]) - 1f0) < 1f-6
+        end
+
+        # Backward at z = 0: sub-threshold cotangent is exactly zero (rrule
+        # short-circuit — bypasses the abs(0) chain rule NaN).
+        gs = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z; ε = 0)), z)[1]
+        @test all(isfinite, gs)
+        @test gs[3] == ComplexF32(0)
+        @test gs[4] == ComplexF32(0)
+
+        # Active elements match the closed form
+        # dz = -i · z · imag(z · conj(ȳ)) / |z|³ with ȳ = 1.
+        for i in (1, 2, 5)
+            z_i = z[i]; r_i = abs(z_i)
+            expected = (-1.0f0im) * z_i * imag(z_i * conj(ComplexF32(1))) / r_i^3
+            @test gs[i] ≈ expected atol = 1f-6
+        end
+
+        # Custom threshold: sub-threshold elements are still zeroed in the
+        # backward.
+        z4  = ComplexF32[1f-12 + 0im, 1.0 + 0im]   # |z[1]| ≪ default threshold
+        gs4 = Zygote.gradient(z -> sum(real, normalize_to_unit_circle(z; ε = 0)), z4)[1]
+        @test all(isfinite, gs4)
+        @test gs4[1] == ComplexF32(0)
+    end
+end
+
+"""
+Regression: `soft_normalize_to_unit_circle` must produce finite gradients
+on inputs containing exact zeros (same root cause as
+`normalize_to_unit_circle`: the upstream `abs(z)` and `atan(b,a)` chain
+rules return NaN at z=0 and `0 · NaN = NaN` propagates).
+
+The custom rrule (src/domains.jl) returns zero cotangent for
+sub-threshold elements and the analytic closed form
+`dz = imag(ȳ·conj(y)) · z · (θ·blend'·r + i·blend) / r²` for active
+elements.
+"""
+function soft_normalize_to_unit_circle_zero_tests()
+    @testset "soft_normalize_to_unit_circle backward at z=0" begin
+        # Same shape as the doc reproducer for normalize_to_unit_circle.
+        z = ComplexF32[1.0+0im, 0.5+0.5im, 0+0im, 0+0im, 2-1im]
+        gs = Zygote.gradient(z -> sum(real, soft_normalize_to_unit_circle(z)), z)[1]
+        @test all(isfinite, gs)
+        @test gs[3] == ComplexF32(0)
+        @test gs[4] == ComplexF32(0)
+
+        # Complex cotangent (cost passes through a complex coefficient).
+        z3 = ComplexF32[1.0+0.5im, 0.0+0.0im, 1.5+0im]
+        c  = ComplexF32[0.5+0.2im, -0.7+1.1im, 0.3+0.4im]
+        gs3 = Zygote.gradient(z -> sum(real, c .* soft_normalize_to_unit_circle(z)), z3)[1]
+        @test all(isfinite, gs3)
+        @test gs3[2] == ComplexF32(0)
+
+        # Active-region finite-difference cross-check (loose tolerance for
+        # Float32 + central diff at eps=1e-3).
+        zR = ComplexF32[0.3+0.2im, 0.7-0.4im, 0.15+0.05im]
+        gsR = Zygote.gradient(z -> sum(real, soft_normalize_to_unit_circle(z)), zR)[1]
+        eps = 1f-3
+        fd = zeros(ComplexF32, length(zR))
+        f = z_ -> sum(real, soft_normalize_to_unit_circle(z_))
+        for i in eachindex(zR)
+            z_work = copy(zR)
+            z0 = z_work[i]
+            z_work[i] = z0 + eps;     fpr = f(z_work)
+            z_work[i] = z0 - eps;     fmr = f(z_work)
+            z_work[i] = z0 + eps*im;  fpi = f(z_work)
+            z_work[i] = z0 - eps*im;  fmi = f(z_work)
+            fd[i] = (fpr - fmr)/(2*eps) + im*(fpi - fmi)/(2*eps)
+        end
+        @test maximum(abs.(gsR .- fd)) < 5f-3
+
+        # Custom r_lo / r_hi: kwarg path still hits the rrule.
+        zK = ComplexF32[0+0im, 0.05+0.05im, 0.4+0.3im]
+        gsK = Zygote.gradient(
+            z -> sum(real, soft_normalize_to_unit_circle(z; r_lo=0.05f0, r_hi=0.3f0)),
+            zK)[1]
+        @test all(isfinite, gsK)
+        @test gsK[1] == ComplexF32(0)
+    end
+end
+
+"""
+Regression: ResonantSTFT backward must stay finite on sparse audio-like input
+where the convolution lands on exact-zero elements (the failure mode
+observed in mos2_oscillators that the random-input long_L test missed).
+"""
+function phasor_stft_sparse_input_tests()
+    @testset "ResonantSTFT sparse-input backward at L=16000" begin
+        rng = Xoshiro(7)
+        layer = ResonantSTFT(1 => 64)
+        ps, st = Lux.setup(rng, layer)
+
+        # Audio-like input: silence almost everywhere, brief active region.
+        L, B = 16000, 2
+        x = zeros(ComplexF32, 1, L, B)
+        x[:, 6000:8000, :] .= ComplexF32.(randn(rng, Float32, 1, 2001, B))
+
+        l, gs = withgradient(p -> sum(real, layer(x, p, st)[1]), ps)
+        @test isfinite(l)
+        @test sum(isnan, gs[1].weight)         == 0
+        @test sum(isnan, gs[1].omega)          == 0
+        @test sum(isnan, gs[1].log_neg_lambda) == 0
+        @test sum(isinf, gs[1].weight)         == 0
+        @test sum(isinf, gs[1].omega)          == 0
+        @test sum(isinf, gs[1].log_neg_lambda) == 0
+        # Gradient should still carry signal (non-zero where active region drove output).
+        @test sum(abs, gs[1].weight) > 0
     end
 end

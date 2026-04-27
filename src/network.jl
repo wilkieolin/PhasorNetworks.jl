@@ -209,17 +209,21 @@ end
 """
     PhasorDense <: Lux.AbstractLuxLayer
 
-A dense (fully-connected) layer for phase-valued and spiking neural networks.
-Implements complex-valued linear transformations with per-channel oscillator
-dynamics, supporting both direct phase inputs and spike train inputs.
+A dense (fully-connected) layer for phase-valued and spiking neural networks
+with per-channel oscillator dynamics. Operates on inputs that have already
+been moved into the phase domain — for continuous complex-valued sequences
+use [`PhasorResonant`](@ref) (or [`ResonantSTFT`](@ref) when ω should be
+trainable) as the encoder upstream.
 
 Dispatches on input type AND dimensionality:
-- 2D complex `(C, B)` → linear transform + bias, no activation or temporal kernel
-- 3D complex `(C, L, B)` → weight + causal convolution with per-channel kernel + activation
-- 2D Phase → angle_to_complex → 2D complex → activation → complex_to_angle
-- 3D Phase → Dirac discretization with causal convolution → complex_to_angle
+- 2D Phase `(C, B)` → angle_to_complex → 2D complex → activation → complex_to_angle
+- 3D Phase `(C, L, B)` → Dirac discretization with causal convolution → complex_to_angle
 - SpikingCall → convert to CurrentCall, delegate
 - CurrentCall → single-stage ODE `dz/dt = k·z + W·I(t)`, sampled at period boundaries
+
+A 2D Complex helper dispatch is kept as an internal building block for the
+2D Phase path (it does the matmul + bias step on already-complex data); it
+is not part of the documented forward-pass surface.
 
 # Fields
 - `in_dims::Int`: Input feature dimension
@@ -233,6 +237,11 @@ Dispatches on input type AND dimensionality:
 - `omega_hi::Float32`: Upper bound for uniform omega init
 - `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
+- `init_log_neg_lambda::Union{Float32, Nothing}`: Optional uniform override for the
+  initial value of `log_neg_lambda`. When `nothing` (default), each `init_mode`
+  uses its own preset (see *Init Modes* below). Useful at long sequence lengths
+  `L` where the per-mode default produces `λ·L < log(eps(Float32))` and the
+  kernel underflows.
 
 # Parameters (always present)
 - `weight` — `(out, in)` Float32
@@ -246,8 +255,12 @@ Dispatches on input type AND dimensionality:
 # Init Modes
 - `:default` — `log_neg_lambda = fill(log(0.2), out)`, `omega = fill(2π, out)`.
   All channels share identical initial dynamics.
-- `:uniform` — `log_neg_lambda` uniform, `omega` spread across `[omega_lo, omega_hi]`.
+- `:uniform` — `log_neg_lambda = fill(log(0.1), out)`, `omega` spread across `[omega_lo, omega_hi]`.
 - `:hippo` — HiPPO-LegS diagonal initialization for multi-timescale memory.
+
+When `init_log_neg_lambda` is set, it replaces the per-channel value uniformly
+across `out` for `:default` and `:uniform`, and overrides the multi-timescale
+HiPPO spread for `:hippo`.
 
 See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref)
 """
@@ -263,6 +276,7 @@ struct PhasorDense <: Lux.AbstractLuxLayer
     omega_hi::Float32
     trainable_omega::Bool
     return_type::SolutionType
+    init_log_neg_lambda::Union{Float32, Nothing}  # nothing → use init_mode default
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer},
@@ -276,6 +290,7 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
                     trainable_omega::Bool = false,
+                    init_log_neg_lambda::Union{Real, Nothing} = nothing,
                     kwargs...)
     # Handle backward compatibility: 'init' kwarg maps to init_weight
     if init_weight === nothing && init !== nothing
@@ -292,20 +307,27 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                         Float32(omega_lo),
                         Float32(omega_hi),
                         trainable_omega,
-                        return_type)
+                        return_type,
+                        init_log_neg_lambda === nothing ? nothing : Float32(init_log_neg_lambda))
 end
 
-# Helper to initialize (log_neg_lambda, omega) based on init_mode
+# Helper to initialize (log_neg_lambda, omega) based on init_mode.
+# If init_log_neg_lambda is set, it overrides the per-mode default and is
+# applied uniformly across channels (modes :default and :uniform); for :hippo
+# the multi-timescale spread is preserved unless the override is given.
 function _init_dynamics(l::PhasorDense)
     if l.init_mode == :hippo
         λ_init, ω_init = hippo_legs_diagonal(l.out_dims)
-        log_neg_lambda = log.(-λ_init)
+        log_neg_lambda = l.init_log_neg_lambda === nothing ?
+            log.(-λ_init) : fill(l.init_log_neg_lambda, l.out_dims)
         omega = ω_init
     elseif l.init_mode == :uniform
-        log_neg_lambda = fill(Float32(log(0.1)), l.out_dims)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.1)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, l.out_dims)
         omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.out_dims)))
     else  # :default — match standard spk_args defaults (leakage=-0.2, period=1.0)
-        log_neg_lambda = fill(Float32(log(0.2)), l.out_dims)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.2)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, l.out_dims)
         omega = fill(Float32(2π), l.out_dims)
     end
     return log_neg_lambda, omega
@@ -358,34 +380,13 @@ function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state:
     return y, state
 end
 
-# ---- 3D Complex dispatch: weight + causal_conv + activation ----
-
-function (a::PhasorDense)(x::AbstractArray{<:Complex, 3}, params::LuxParams, state::NamedTuple)
-    C_in, L, B = size(x)
-
-    # Build impulse-response kernel from per-channel oscillator parameters
-    λ = -exp.(params.log_neg_lambda)
-    ω = _get_omega(a, params, state)
-    K = phasor_kernel(λ, ω, 1f0, L)
-
-    # Apply weight matrix to mix input channels (all time steps at once)
-    xr = reshape(x, C_in, L * B)
-    Hr = complex.(params.weight * real.(xr), params.weight * imag.(xr))
-    H  = reshape(Hr, a.out_dims, L, B)
-
-    # Temporal integration via causal convolution
-    Z = causal_conv(K, H)
-
-    # Apply bias (broadcast over time and batch)
-    if a.use_bias
-        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
-        Z = Z .+ reshape(bias_val, :, 1, 1)
-    end
-
-    # Activation (e.g. project to unit circle)
-    Y = a.activation(Z)
-    return Y, state
-end
+# Note: the 3D Complex dispatch — ZOH SSM integration on a continuous
+# complex sequence — used to live here. It has been promoted to its own
+# layer, [`PhasorResonant`](@ref) (or [`ResonantSTFT`](@ref) when ω
+# should be trainable). `PhasorDense` is now a phase-domain transform: it
+# expects inputs that have already been moved into the phase domain by an
+# encoder (e.g. `PhasorResonant`). The 2D Complex helper below is kept
+# for internal use by the 2D Phase dispatch.
 
 # ---- 2D Phase dispatch ----
 
@@ -410,15 +411,18 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
     λ = -exp.(params.log_neg_lambda)
     ω = _get_omega(a, params, state)
 
-    Z = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+    Z = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     if a.use_bias
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
         Z = Z .+ reshape(bias_val, :, 1, 1)
     end
 
-    # Skip normalization when activation is normalize_to_unit_circle:
-    # angle() is magnitude-independent, so normalizing first is wasted work.
+    # Skip normalization when the activation is normalize_to_unit_circle:
+    # the function divides through a positive real (whether |z| or
+    # √(|z|² + ε)), so complex_to_angle ∘ normalize_to_unit_circle
+    # reduces to complex_to_angle on nonzero inputs, and both return 0
+    # angle at z = 0.
     if a.activation === normalize_to_unit_circle
         return complex_to_angle(Z), state
     else
@@ -525,11 +529,168 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
 end
 
 ###
-### PhasorSTFT — Trainable Frequency Decomposition
+### PhasorResonant — Complex → Phase encoder (fixed ω, ZOH SSM)
 ###
 
 """
-    PhasorSTFT <: Lux.AbstractLuxLayer
+    PhasorResonant(in_dims => out_dims, activation = normalize_to_unit_circle;
+                   omega = nothing, omega_lo = 0.2, omega_hi = 2.5,
+                   use_bias = false, init_weight = nothing,
+                   init_bias = default_bias,
+                   init_log_neg_lambda = log(0.1)) <: Lux.AbstractLuxLayer
+
+Encoder layer that consumes a continuous complex-valued sequence and produces
+a phase-valued sequence suitable for downstream phase-only layers
+(`PhasorDense`, `Codebook`, attention, …).
+
+Mathematically a per-channel resonate-and-fire SSM with **fixed** angular
+frequencies `ω` and trainable decay `λ = -exp(log_neg_lambda)`. Each output
+channel `c` integrates the weight-mixed input via the discrete-time
+zero-order-hold recurrence
+
+    z_c[n+1] = exp(k_c) · z_c[n] + B_c · I_c[n],    k_c = λ_c + i · ω_c
+
+precomputed once as the impulse-response kernel
+`K_c[n] = exp(k_c·n) · (exp(k_c) − 1)/k_c` and applied via [`causal_conv`](@ref).
+The output is then projected to the unit circle and converted to phase via
+`complex_to_angle`.
+
+This layer is the **fixed-frequency** sibling of [`ResonantSTFT`](@ref) — use
+`PhasorResonant` when you want a deterministic frequency bank (cheaper, no
+ω parameters), and `ResonantSTFT` when ω should be learned alongside the
+weights.
+
+# Arguments
+- `in_dims => out_dims`: input feature count → number of resonators.
+- `activation`: applied to the complex membrane potential before
+  `complex_to_angle`. Default `normalize_to_unit_circle` (which is then
+  short-circuited because angle is magnitude-independent).
+- `omega`: per-channel frequency. Pass a `Vector{<:Real}` of length
+  `out_dims`, a scalar (broadcast to all channels), or `nothing` to use a
+  uniform spread between `omega_lo` and `omega_hi`.
+- `omega_lo`, `omega_hi`: bounds for the default uniform frequency spread.
+- `use_bias`: optional complex bias added after the convolution.
+- `init_weight`: weight init `(rng, out, in) -> Matrix`. Default
+  `glorot_uniform`.
+- `init_bias`: bias init `(rng, dims) -> ComplexF32 array`. Default
+  `default_bias`.
+- `init_log_neg_lambda`: initial value for the per-channel `log_neg_lambda`
+  parameter (so initial `λ = -exp(init_log_neg_lambda)`). Override at long
+  sequence lengths to avoid `phasor_kernel` underflow (see
+  [`PhasorDense`](@ref) for the same modeling note).
+
+# Parameters
+- `weight` — `(out_dims, in_dims)` Float32.
+- `log_neg_lambda` — `(out_dims,)` Float32 (trainable per-channel decay).
+- `bias_real`, `bias_imag` — `(out_dims,)` Float32 (when `use_bias=true`).
+
+# State
+- `omega` — `(out_dims,)` Float32, fixed at construction.
+
+# Forward
+- 3D Complex `(C_in, L, B)` → 3D Phase `(out_dims, L, B)`.
+
+See also: [`ResonantSTFT`](@ref) (trainable-ω variant), [`PhasorDense`](@ref)
+(downstream phase-only layer), [`phasor_kernel`](@ref), [`causal_conv`](@ref).
+"""
+struct PhasorResonant <: Lux.AbstractLuxLayer
+    in_dims::Int
+    out_dims::Int
+    activation::Function
+    use_bias::Bool
+    init_weight::Function
+    init_bias::Function
+    omega::Vector{Float32}
+    init_log_neg_lambda::Vector{Float32}    # per-channel; allows HiPPO-style spread
+end
+
+function PhasorResonant(shape::Pair{<:Integer,<:Integer},
+                        activation = normalize_to_unit_circle;
+                        use_bias::Bool = false,
+                        init_weight = nothing,
+                        init_bias = default_bias,
+                        omega = nothing,
+                        omega_lo::Real = 0.2f0,
+                        omega_hi::Real = 2.5f0,
+                        init_log_neg_lambda = log(0.1))
+    if init_weight === nothing
+        init_weight = glorot_uniform
+    end
+    out = shape[2]
+    omega_vec = if omega === nothing
+        Float32.(collect(range(Float32(omega_lo), Float32(omega_hi); length = out)))
+    elseif omega isa Real
+        fill(Float32(omega), out)
+    else
+        @assert length(omega) == out "omega must have length $(out), got $(length(omega))"
+        Float32.(collect(omega))
+    end
+    lnl_vec = if init_log_neg_lambda isa Real
+        fill(Float32(init_log_neg_lambda), out)
+    else
+        @assert length(init_log_neg_lambda) == out "init_log_neg_lambda must have length $(out), got $(length(init_log_neg_lambda))"
+        Float32.(collect(init_log_neg_lambda))
+    end
+    return PhasorResonant(shape[1], out, activation, use_bias,
+                          init_weight, init_bias, omega_vec, lnl_vec)
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorResonant)
+    W = l.init_weight(rng, l.out_dims, l.in_dims)
+    parameters = (weight = W, log_neg_lambda = copy(l.init_log_neg_lambda))
+    if l.use_bias
+        bias = l.init_bias(rng, (l.out_dims,))
+        parameters = merge(parameters, (bias_real = Float32.(real.(bias)),
+                                         bias_imag = Float32.(imag.(bias))))
+    end
+    return parameters
+end
+
+Lux.initialstates(::AbstractRNG, l::PhasorResonant) = (omega = l.omega,)
+
+function Lux.parameterlength(l::PhasorResonant)
+    n = l.out_dims * l.in_dims + l.out_dims  # weight + log_neg_lambda
+    if l.use_bias
+        n += 2 * l.out_dims
+    end
+    return n
+end
+
+function (a::PhasorResonant)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    C_in, L, B = size(x)
+
+    λ = -exp.(ps.log_neg_lambda)
+    ω = st.omega
+
+    K = phasor_kernel(λ, ω, 1f0, L)
+
+    xr = reshape(x, C_in, L * B)
+    Hr = complex.(ps.weight * real.(xr), ps.weight * imag.(xr))
+    H  = reshape(Hr, a.out_dims, L, B)
+
+    Z = causal_conv(K, H)
+
+    if a.use_bias
+        bias_val = ps.bias_real .+ 1.0f0im .* ps.bias_imag
+        Z = Z .+ reshape(bias_val, :, 1, 1)
+    end
+
+    # complex_to_angle is magnitude-independent, so when the activation is
+    # the angle-preserving normalize_to_unit_circle we can skip it.
+    if a.activation === normalize_to_unit_circle
+        return complex_to_angle(Z), st
+    else
+        Y = a.activation(Z)
+        return complex_to_angle(Y), st
+    end
+end
+
+###
+### ResonantSTFT — Trainable Frequency Decomposition
+###
+
+"""
+    ResonantSTFT <: Lux.AbstractLuxLayer
 
 Multi-compartment neuron layer that performs trainable frequency decomposition
 (STFT) on complex phasor input sequences, then re-encodes the result at a
@@ -559,19 +720,17 @@ Dispatches on input dimensionality (3D only — STFT is inherently temporal):
 - `omega_lo::Float32`: Lower bound for omega initialization
 - `omega_hi::Float32`: Upper bound for omega initialization
 - `omega_out::Float32`: Downstream carrier frequency (fixed in state)
-
-# Parameters (always present)
-- `weight` — `(n_freqs, in_dims)` Float32
-- `log_neg_lambda` — `(n_freqs,)` Float32, per-channel decay (trainable)
-- `omega` — `(n_freqs,)` Float32, per-channel frequency (always trainable)
-- `bias_real`, `bias_imag` — `(n_freqs,)` Float32 (when `use_bias=true`)
+- `init_log_neg_lambda::Float32`: Initial value used to fill `log_neg_lambda`
+  for every channel (default `log(0.1)` ⇒ `λ = -0.1`). Override at long
+  sequence lengths `L` where `λ · L < log(eps(Float32)) ≈ -88` would cause
+  `phasor_kernel` to underflow.
 
 # State
 - `omega_out` — Float32, downstream carrier frequency (fixed)
 
 See also: [`PhasorDense`](@ref)
 """
-struct PhasorSTFT <: Lux.AbstractLuxLayer
+struct ResonantSTFT <: Lux.AbstractLuxLayer
     in_dims::Int
     n_freqs::Int
     activation::Function
@@ -581,27 +740,30 @@ struct PhasorSTFT <: Lux.AbstractLuxLayer
     omega_lo::Float32
     omega_hi::Float32
     omega_out::Float32
+    init_log_neg_lambda::Float32
 end
 
-function PhasorSTFT(shape::Pair{<:Integer,<:Integer},
+function ResonantSTFT(shape::Pair{<:Integer,<:Integer},
                     activation = normalize_to_unit_circle;
                     use_bias::Bool = false,
                     init_weight = nothing,
                     init_bias = default_bias,
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
-                    omega_out::Real = Float32(2π))
+                    omega_out::Real = Float32(2π),
+                    init_log_neg_lambda::Real = log(0.1))
     if init_weight === nothing
         init_weight = glorot_uniform
     end
-    return PhasorSTFT(shape[1], shape[2],
+    return ResonantSTFT(shape[1], shape[2],
                       activation,
                       use_bias,
                       init_weight,
                       init_bias,
                       Float32(omega_lo),
                       Float32(omega_hi),
-                      Float32(omega_out))
+                      Float32(omega_out),
+                      Float32(init_log_neg_lambda))
 end
 
 # Frequency-shift modulation: re-encode from per-channel omega to uniform omega_out
@@ -617,9 +779,9 @@ function _freq_shift(Z::AbstractArray{<:Complex, 3},
     return Z .* reshape(shift, n_freqs, L, 1)               # (n_freqs, L, B)
 end
 
-function Lux.initialparameters(rng::AbstractRNG, l::PhasorSTFT)
+function Lux.initialparameters(rng::AbstractRNG, l::ResonantSTFT)
     W = l.init_weight(rng, l.n_freqs, l.in_dims)
-    log_neg_lambda = fill(Float32(log(0.1)), l.n_freqs)
+    log_neg_lambda = fill(l.init_log_neg_lambda, l.n_freqs)
     omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=l.n_freqs)))
 
     parameters = (weight = W, log_neg_lambda = log_neg_lambda, omega = omega)
@@ -633,11 +795,11 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorSTFT)
     return parameters
 end
 
-function Lux.initialstates(rng::AbstractRNG, l::PhasorSTFT)
+function Lux.initialstates(rng::AbstractRNG, l::ResonantSTFT)
     return (omega_out = l.omega_out,)
 end
 
-function Lux.parameterlength(l::PhasorSTFT)
+function Lux.parameterlength(l::ResonantSTFT)
     n = l.n_freqs * l.in_dims + l.n_freqs + l.n_freqs  # weight + log_neg_lambda + omega
     if l.use_bias
         n += 2 * l.n_freqs
@@ -647,7 +809,7 @@ end
 
 # ---- 3D Complex dispatch ----
 
-function (a::PhasorSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, state::NamedTuple)
+function (a::ResonantSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, state::NamedTuple)
     C_in, L, B = size(x)
 
     λ = -exp.(params.log_neg_lambda)
@@ -679,12 +841,12 @@ end
 
 # ---- 3D Phase dispatch ----
 
-function (a::PhasorSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
+function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
     λ = -exp.(params.log_neg_lambda)
     ω = params.omega
 
     # Dirac discretization: causal convolution on phase inputs
-    Z_sig = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+    Z_sig = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     # Frequency shift: re-encode at downstream carrier omega_out
     Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
@@ -721,12 +883,25 @@ Flat structure with per-channel oscillator dynamics, matching PhasorDense.
 - `omega_lo::Float32`, `omega_hi::Float32`: For `:uniform` init
 - `trainable_omega::Bool`: If true, omega is a trainable parameter
 - `return_type::SolutionType`: Output format for spiking inputs
+- `init_log_neg_lambda::Union{Float32, Nothing}`: Optional uniform override for
+  the initial value of `log_neg_lambda`; semantics match
+  [`PhasorDense`](@ref). Use to avoid `phasor_kernel` underflow at long L.
 
 # Parameters
 - `weight` — Conv weight tensor
 - `log_neg_lambda` — `(out_chs,)` per-channel decay
 - `bias_real`, `bias_imag` — bias (when `use_bias=true`)
 - `omega` — `(out_chs,)` (when `trainable_omega=true`)
+
+!!! note "Architectural direction"
+    PhasorConv currently still accepts complex-valued inputs and runs the
+    ZOH SSM internally — mirroring the pre-refactor PhasorDense layout.
+    The intended direction (already applied to `PhasorDense`) is to split
+    that responsibility off into a dedicated complex→phase encoder layer
+    (cf. [`PhasorResonant`](@ref)) and have `PhasorConv` operate purely
+    in the phase domain. When you next touch this layer, consider doing
+    the same split: keep the Phase paths here, move the complex-input
+    SSM kernel into a `PhasorResonantConv` (or similar) sibling.
 """
 struct PhasorConv <: Lux.AbstractLuxLayer
     _conv  # Internal Conv for forward pass mechanics
@@ -738,6 +913,7 @@ struct PhasorConv <: Lux.AbstractLuxLayer
     omega_hi::Float32
     trainable_omega::Bool
     return_type::SolutionType
+    init_log_neg_lambda::Union{Float32, Nothing}
 end
 
 function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, activation = normalize_to_unit_circle;
@@ -748,6 +924,7 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
                     trainable_omega::Bool = false,
+                    init_log_neg_lambda::Union{Real, Nothing} = nothing,
                     kwargs...)
     conv = Conv(k, chs, identity; use_bias=false, kwargs...)
     return PhasorConv(conv,
@@ -758,7 +935,8 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
                       Float32(omega_lo),
                       Float32(omega_hi),
                       trainable_omega,
-                      return_type)
+                      return_type,
+                      init_log_neg_lambda === nothing ? nothing : Float32(init_log_neg_lambda))
 end
 
 # Helper to get output channels
@@ -768,13 +946,16 @@ function _init_conv_dynamics(l::PhasorConv)
     n = _out_chs(l)
     if l.init_mode == :hippo
         λ_init, ω_init = hippo_legs_diagonal(n)
-        log_neg_lambda = log.(-λ_init)
+        log_neg_lambda = l.init_log_neg_lambda === nothing ?
+            log.(-λ_init) : fill(l.init_log_neg_lambda, n)
         omega = ω_init
     elseif l.init_mode == :uniform
-        log_neg_lambda = fill(Float32(log(0.1)), n)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.1)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, n)
         omega = Float32.(collect(range(l.omega_lo, l.omega_hi; length=n)))
     else  # :default — match standard spk_args defaults
-        log_neg_lambda = fill(Float32(log(0.2)), n)
+        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.2)) : l.init_log_neg_lambda
+        log_neg_lambda = fill(ll, n)
         omega = fill(Float32(2π), n)
     end
     return log_neg_lambda, omega
@@ -911,36 +1092,52 @@ end
 ###
 
 """
-    Codebook <: LuxCore.AbstractLuxLayer
+    Codebook(d => n; init_mode = :random) <: LuxCore.AbstractLuxLayer
 
-Layer that accesses a fixed set of phase codes and computes similarities with inputs.
-Used for discrete embedding or classification tasks in phase-based networks.
+Layer that holds `n` fixed `d`-dimensional phase codes and returns
+similarities with its input.
+
+# Arguments
+- `d => n`: input feature dimension `d` paired with number of codes `n`.
+- `init_mode::Symbol`: how the codebook is initialized.
+    - `:random` (default) — i.i.d. uniform phases via [`random_symbols`](@ref).
+      Pairwise similarities have standard deviation `O(1/√d)`; reliable
+      separation only when `d` is large relative to `n`.
+    - `:orthogonal` — DFT-shifted codes via [`orthogonal_codes`](@ref).
+      Pairwise similarities are exactly zero when `d` is divisible by `n`,
+      and bounded by `O(n/d)` otherwise. Requires `n ≤ d`. Useful when
+      `d` is small enough that random initialization may not give enough
+      separation between classes.
 
 # Fields
-- `dims::Pair{<:Int, <:Int}`: Input dimension => Number of codes
+- `dims::Pair{Int,Int}`: `d => n`.
+- `init_mode::Symbol`: `:random` or `:orthogonal`.
 
 # State
-- `codes`: Random phase symbols initialized as the codebook
-- Codes are fixed after initialization (non-trainable)
+- `codes::Array{Phase, 2}` of shape `(d, n)` — fixed after initialization
+  (non-trainable).
 
 # Forward Pass
-1. For phase inputs: Computes similarity with all codes
-2. For spiking inputs: Converts codes to currents and computes temporal similarity
+- Phase inputs: returns `similarity_outer(input, codes)`.
+- Spiking inputs: converts codes to currents and returns temporal
+  similarity.
 
-# Use Cases
-- Discrete symbol encoding in Vector Symbolic Architectures
-- Classification by similarity to learned phase patterns
-- Phase-based memory or lookup mechanisms
-
-See also: [`similarity_outer`](@ref) for similarity computation
+See also: [`similarity_outer`](@ref), [`orthogonal_codes`](@ref),
+[`random_symbols`](@ref).
 """
 struct Codebook <: LuxCore.AbstractLuxLayer
     dims
-    Codebook(x::Pair{<:Int, <:Int}) = new(x)
+    init_mode::Symbol
+end
+
+function Codebook(x::Pair{<:Int, <:Int}; init_mode::Symbol = :random)
+    init_mode in (:random, :orthogonal) || throw(ArgumentError(
+        "Codebook init_mode must be :random or :orthogonal, got :$init_mode"))
+    return Codebook(x, init_mode)
 end
 
 function Base.show(io::IO, cb::Codebook)
-    print(io, "Codebook($(cb.dims))")
+    print(io, "Codebook($(cb.dims); init_mode=:$(cb.init_mode))")
 end
 
 function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
@@ -948,8 +1145,11 @@ function Lux.initialparameters(rng::AbstractRNG, cb::Codebook)
 end
 
 function Lux.initialstates(rng::AbstractRNG, cb::Codebook)
-    state = (codes = random_symbols(rng, (cb.dims[1], cb.dims[2])),)
-    return state
+    d, n = cb.dims
+    codes = cb.init_mode === :orthogonal ?
+        orthogonal_codes(rng, d, n) :
+        random_symbols(rng, (d, n))
+    return (codes = codes,)
 end
 
 function (cb::Codebook)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)

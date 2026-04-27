@@ -17,7 +17,7 @@ Three conditions:
 
 Ablation mode (--benchmark ablation):
   Tests the contribution of individual architectural components:
-  - FashionMNIST: compares models with and without the PhasorSTFT input layer
+  - FashionMNIST: compares models with and without the ResonantSTFT input layer
   - Copying: compares models with and without SSMSelfAttention
 
 Key insight: PhasorDense uses Δt=1 in its convolutional mode, so the kernel
@@ -237,16 +237,16 @@ end
 """
     create_ablation_model(; C_in, D_hidden, n_classes, use_stft, use_attention, readout_frac)
 
-Build a model with optional PhasorSTFT and SSMSelfAttention for ablation testing.
+Build a model with optional ResonantSTFT and SSMSelfAttention for ablation testing.
 """
 function create_ablation_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
                                  use_stft::Bool=true, use_attention::Bool=true,
                                  readout_frac::Float32=0.25f0)
     layers = []
 
-    # Input layer: PhasorSTFT (trainable omega, outputs complex) or PhasorDense
+    # Input layer: ResonantSTFT (trainable omega, outputs complex) or PhasorDense
     if use_stft
-        push!(layers, PhasorSTFT(C_in => D_hidden, normalize_to_unit_circle))
+        push!(layers, ResonantSTFT(C_in => D_hidden, normalize_to_unit_circle))
     else
         push!(layers, PhasorDense(C_in => D_hidden, normalize_to_unit_circle; use_bias=false))
     end
@@ -681,7 +681,7 @@ function main()
 
         # --- FashionMNIST ablation: STFT vs no STFT ---
         println("\n" * "#"^64)
-        println("  ABLATION: PhasorSTFT on FashionMNIST")
+        println("  ABLATION: ResonantSTFT on FashionMNIST")
         println("#"^64)
 
         train_loader, test_loader, fmnist_L, fmnist_C = load_sequential_fmnist(; batchsize, pixels_per_step=pps)

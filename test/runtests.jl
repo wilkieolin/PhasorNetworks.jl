@@ -1,5 +1,5 @@
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, PhasorNetworks, Test
-using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA
+using Lux, OneHotArrays, Statistics, PhasorNetworks, Test
+using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
@@ -9,10 +9,22 @@ using LinearAlgebra: diag
 using Distributions: Normal
 using DifferentialEquations: Heun, Tsit5
 #global args for all tests
-n_x = 101
-n_y = 101
+# Phase-grid resolution (vsa_tests). Was 101 — coarser is fine for the
+# check_phase logic and the comprehension-built outer matrix is O(n²).
+# Smaller (e.g. 33) breaks the bundling test's mean-error threshold:
+# the test averages a per-element systematic bias (~0.01 magnitude)
+# over n² samples, so the empirical mean has noise ~bias/√(n²); 51
+# clears the 0.025 threshold with margin.
+n_x = 51
+n_y = 51
 n_vsa = 1
-epsilon = 0.10
+# Spike-train cycle count — controls tspan = (0, repeats); each repeat
+# is one ODE integration window. 10 was empirically required for the
+# spiking model to reach the cycle-correlation / spiking-accuracy
+# thresholds (~0.7) in network_tests; lowering it broke those without
+# meaningfully widening the convergence assertions. The cost is in
+# per-call ODE integration; we already bring that down by shrinking
+# batch sizes in network_tests.
 repeats = 10
 epsilon = 0.025
 #solver_args = Dict(:adaptive => false, :dt => 0.01)
@@ -21,9 +33,9 @@ solver_args = Dict(:adaptive => false,
                     :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP()),
                     :save_start => true)
 
-spk_args = SpikingArgs(t_window = 0.01, 
+spk_args = SpikingArgs(t_window = 0.01,
                     threshold = 0.001,
-                    solver=Tsit5(), 
+                    solver=Tsit5(),
                     solver_args = solver_args)
 tspan = (0.0, repeats*1.0)
 tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])

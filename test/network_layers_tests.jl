@@ -348,23 +348,77 @@ function codebook_tests()
     @testset "Codebook Tests" begin
         rng = Xoshiro(42)
         n_classes, embedding_dim = 10, 32
-        
+
         # Create codebook using Pair syntax
         layer = Codebook(embedding_dim => n_classes)
         ps, st = Lux.setup(rng, layer)
-        
+
         # Check state (codes stored in state, not parameters)
         @test size(st.codes) == (embedding_dim, n_classes)
-        
+
         # Lookup valid indices
         indices = rand(1:n_classes, 16)
         embeddings = st.codes[:, indices]
-        
+
         # Embeddings should be correct shape
         @test size(embeddings) == (embedding_dim, 16)
-        
+
         # Embeddings should be numeric (Phase is a Real subtype)
         @test eltype(embeddings) <: Real
+
+        # ---- init_mode kwarg ----
+
+        # Default mode is :random; preserves prior behavior.
+        @test layer.init_mode === :random
+
+        # :orthogonal mode at d divisible by n — exact orthogonality.
+        layer_o = Codebook(16 => 4; init_mode = :orthogonal)
+        @test layer_o.init_mode === :orthogonal
+        _, st_o = Lux.setup(Xoshiro(0), layer_o)
+        @test size(st_o.codes) == (16, 4)
+        Mo = similarity_outer(st_o.codes, st_o.codes; dims = 2)
+        @test all(diag(Mo) .≈ 1f0)
+        offdiag_o = [Mo[i, j] for i in 1:4, j in 1:4 if i != j]
+        @test maximum(abs, offdiag_o) < 1f-5  # Float32 noise floor
+
+        # Square case d == n — also exact.
+        _, st_sq = Lux.setup(Xoshiro(0), Codebook(8 => 8; init_mode = :orthogonal))
+        Msq = similarity_outer(st_sq.codes, st_sq.codes; dims = 2)
+        offdiag_sq = [Msq[i, j] for i in 1:8, j in 1:8 if i != j]
+        @test maximum(abs, offdiag_sq) < 1f-5
+
+        # Approximate case d not divisible by n — should still beat random
+        # baseline by a clear margin.
+        _, st_ap = Lux.setup(Xoshiro(0), Codebook(21 => 10; init_mode = :orthogonal))
+        Map = similarity_outer(st_ap.codes, st_ap.codes; dims = 2)
+        offdiag_ap = [Map[i, j] for i in 1:10, j in 1:10 if i != j]
+        _, st_rd = Lux.setup(Xoshiro(0), Codebook(21 => 10; init_mode = :random))
+        Mrd = similarity_outer(st_rd.codes, st_rd.codes; dims = 2)
+        offdiag_rd = [Mrd[i, j] for i in 1:10, j in 1:10 if i != j]
+        @test maximum(abs, offdiag_ap) < maximum(abs, offdiag_rd)
+        @test maximum(abs, offdiag_ap) < 1.0f0 / sin(Float32(π) / 10) / 21 + 1f-3
+
+        # Forward pass uses the orthogonal codes correctly: feeding a code
+        # back in must recover ~1 on its own row, ~0 elsewhere.
+        layer_fp = Codebook(8 => 4; init_mode = :orthogonal)
+        _, st_fp = Lux.setup(Xoshiro(1), layer_fp)
+        # Pass each code as input, check the diagonal of output similarities.
+        out, _ = layer_fp(st_fp.codes, NamedTuple(), st_fp)
+        @test size(out) == (4, 4)
+        @test all(diag(out) .≈ 1f0)
+        offdiag_fp = [out[i, j] for i in 1:4, j in 1:4 if i != j]
+        @test maximum(abs, offdiag_fp) < 1f-5
+
+        # Error: invalid init_mode symbol.
+        @test_throws ArgumentError Codebook(8 => 4; init_mode = :nope)
+
+        # Error: n > d for orthogonal mode (impossible).
+        cb_bad = Codebook(4 => 8; init_mode = :orthogonal)
+        @test_throws ArgumentError Lux.setup(Xoshiro(0), cb_bad)
+
+        # n = 1 edge case: orthogonality is vacuous; should not error.
+        _, st_one = Lux.setup(Xoshiro(0), Codebook(8 => 1; init_mode = :orthogonal))
+        @test size(st_one.codes) == (8, 1)
     end
 end
 
