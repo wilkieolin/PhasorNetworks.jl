@@ -118,12 +118,12 @@ function test_binding()
         u_check = in_tolerance(u_err)
         @test u_check
 
-        #check with spiking outputs
+        #check with spiking outputs (use last full cycle to cover any `repeats`)
         b2 = v_bind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
         b2d = train_to_phase(b2, spk_args=spk_args)
-        enc_error = remove_nan(vec(b2d[:,:,:,5]) .- vec(b)) |> mean
+        enc_error = remove_nan(vec(b2d[:,:,:,end-1]) .- vec(b)) |> mean
         enc_check = in_tolerance(enc_error)
-        @test enc_check 
+        @test enc_check
 
         #check unbinding operation
         ub_soln = v_unbind(st_x, st_y, tspan=tspan, spk_args=spk_args, return_solution=true)
@@ -132,10 +132,10 @@ function test_binding()
         unbind_chk = in_tolerance(err)
         @test unbind_chk 
 
-        #check unbinding with spiking outputs
+        #check unbinding with spiking outputs (last full cycle)
         ub2 = v_unbind(st_x, st_y, spk_args=spk_args, tspan=tspan, return_solution=false)
         ub2d = train_to_phase(ub2, spk_args=spk_args)
-        ub_enc_error = remove_nan(vec(ub2d[:,:,:,5]) .- vec(ub)) |> mean
+        ub_enc_error = remove_nan(vec(ub2d[:,:,:,end-1]) .- vec(ub)) |> mean
         ub_enc_check = in_tolerance(ub_enc_error)
         @test ub_enc_check 
     end
@@ -265,7 +265,7 @@ function test_bundling()
         #check bundling function
         b = v_bundle(phases, dims=2);
 
-        st = phase_to_train(phases, spk_args=spk_args, repeats=6)
+        st = phase_to_train(phases, spk_args=spk_args, repeats=repeats)
         #check potential encodings
         b2_sol = v_bundle(st, dims=2, spk_args=spk_args, tspan=tspan, return_solution=true)
         b2_phase = solution_to_phase(b2_sol, tbase, spk_args=spk_args, offset=0.0)
