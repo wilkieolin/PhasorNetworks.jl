@@ -601,7 +601,7 @@ struct PhasorResonant <: Lux.AbstractLuxLayer
     init_weight::Function
     init_bias::Function
     omega::Vector{Float32}
-    init_log_neg_lambda::Float32
+    init_log_neg_lambda::Vector{Float32}    # per-channel; allows HiPPO-style spread
 end
 
 function PhasorResonant(shape::Pair{<:Integer,<:Integer},
@@ -612,7 +612,7 @@ function PhasorResonant(shape::Pair{<:Integer,<:Integer},
                         omega = nothing,
                         omega_lo::Real = 0.2f0,
                         omega_hi::Real = 2.5f0,
-                        init_log_neg_lambda::Real = log(0.1))
+                        init_log_neg_lambda = log(0.1))
     if init_weight === nothing
         init_weight = glorot_uniform
     end
@@ -625,15 +625,19 @@ function PhasorResonant(shape::Pair{<:Integer,<:Integer},
         @assert length(omega) == out "omega must have length $(out), got $(length(omega))"
         Float32.(collect(omega))
     end
+    lnl_vec = if init_log_neg_lambda isa Real
+        fill(Float32(init_log_neg_lambda), out)
+    else
+        @assert length(init_log_neg_lambda) == out "init_log_neg_lambda must have length $(out), got $(length(init_log_neg_lambda))"
+        Float32.(collect(init_log_neg_lambda))
+    end
     return PhasorResonant(shape[1], out, activation, use_bias,
-                          init_weight, init_bias, omega_vec,
-                          Float32(init_log_neg_lambda))
+                          init_weight, init_bias, omega_vec, lnl_vec)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorResonant)
     W = l.init_weight(rng, l.out_dims, l.in_dims)
-    log_neg_lambda = fill(l.init_log_neg_lambda, l.out_dims)
-    parameters = (weight = W, log_neg_lambda = log_neg_lambda)
+    parameters = (weight = W, log_neg_lambda = copy(l.init_log_neg_lambda))
     if l.use_bias
         bias = l.init_bias(rng, (l.out_dims,))
         parameters = merge(parameters, (bias_real = Float32.(real.(bias)),

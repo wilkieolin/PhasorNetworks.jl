@@ -44,6 +44,44 @@ function complex_to_angle(x::AbstractArray)
     return Phase.(angle.(x) ./ pi_f32)
 end
 
+# Closed-form pullback for `complex_to_angle` on arrays. Forward is
+# `y = atan(imag(z), real(z)) / π` (in units of π). Standard derivative
+# (away from z = 0):
+#
+#   ∂y/∂a = -b / (π · |z|²),    ∂y/∂b = a / (π · |z|²)
+#
+# In ChainRules tangent convention (`ȳ = ∂L/∂(re y) + i·∂L/∂(im y)`,
+# but y is real so ȳ is real), the chain gives
+#
+#   dz = ȳ · (-b + i·a) / (π · |z|²) = ȳ · (i · z) / (π · |z|²)
+#
+# At z = 0, atan(0, 0) is conventionally 0 (Julia's convention), but the
+# derivative is undefined (0/0 = NaN). We zero the cotangent for
+# sub-threshold elements — same short-circuit pattern as the
+# `normalize_to_unit_circle` rrule, for the same reason: a real
+# pipeline like sparse-input PhasorResonant lands on exact zeros after
+# the SSM kernel underflows, and the abs(0) / atan(0,0) chain rules
+# would otherwise propagate NaN through the rest of the gradient.
+function ChainRulesCore.rrule(::typeof(complex_to_angle), x::AbstractArray;
+                              threshold::Real = 1.0f-10)
+    y = complex_to_angle(x)
+    th2 = Float32(threshold)^2
+    r2 = abs2.(real.(x)) .+ abs2.(imag.(x))
+
+    function complex_to_angle_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        # ȳ may be a Phase array (Real subtype); coerce to Float32 for arithmetic.
+        ȳf = Float32.(ȳ)
+        active = r2 .> th2
+        safe_r2 = max.(r2, th2)
+        # dz = ȳ · i·z / (π · |z|²)  for active; 0 otherwise.
+        dz_active = ȳf .* (1.0f0im) .* x ./ (pi_f32 .* safe_r2)
+        dz = ifelse.(active, dz_active, zero(eltype(x)))
+        return (NoTangent(), dz)
+    end
+    return y, complex_to_angle_pullback
+end
+
 """
     complex_to_angle(x_real::Real, x_imag::Real)
 
