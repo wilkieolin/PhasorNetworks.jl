@@ -411,7 +411,7 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
     λ = -exp.(params.log_neg_lambda)
     ω = _get_omega(a, params, state)
 
-    Z = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+    Z = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     if a.use_bias
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
@@ -842,7 +842,7 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
     ω = params.omega
 
     # Dirac discretization: causal convolution on phase inputs
-    Z_sig = causal_conv_dirac(Float32.(x), params.weight, λ, ω, 1f0)
+    Z_sig = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     # Frequency shift: re-encode at downstream carrier omega_out
     Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)

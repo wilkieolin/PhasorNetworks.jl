@@ -184,7 +184,7 @@ function dirac_discretization_tests()
 
         @testset "causal_conv_dirac shape and finiteness" begin
             C_in, C_out, L, B = 4, 8, 16, 3
-            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             W = randn(rng, Float32, C_out, C_in)
             λ = fill(-0.1f0, C_out)
             ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
@@ -197,7 +197,7 @@ function dirac_discretization_tests()
 
         @testset "gradient flow through Dirac path" begin
             C_in, C_out, L, B = 4, 8, 10, 2
-            phases = 2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0
+            phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             W = randn(rng, Float32, C_out, C_in)
             λ = fill(-0.1f0, C_out)
             ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
@@ -260,7 +260,7 @@ function dirac_discretization_tests()
             # Manual computation: same formula, verify we get identical results
             λ = -exp.(ps.log_neg_lambda)
             ω = st.omega
-            Z_manual = causal_conv_dirac(Float32.(phases), ps.weight, λ, ω, 1f0)
+            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, 1f0)
             y_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
 
             @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
@@ -900,7 +900,7 @@ function ssm_spiking_correlation_tests()
         @testset "Dirac matches manual causal_conv_dirac" begin
             λ_c = -exp.(ps.log_neg_lambda)
             ω_c = st.omega
-            Z_manual = causal_conv_dirac(Float32.(phases_in), ps.weight, λ_c, ω_c, 1f0)
+            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, 1f0)
             phases_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
             @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end

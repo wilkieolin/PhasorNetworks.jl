@@ -248,13 +248,13 @@ So: `z_c[m] = Σ_n K_c[m-n] · H_c[n]`  where  `K_c[n] = exp(k_c·n·T)`
 and  `H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])`.
 
 # Arguments
-- `phases::AbstractArray{<:Real, 3}` — (C_in, L, B) phases in [-1, 1]
+- `phases::AbstractArray{<:Phase, 3}` — (C_in, L, B) phases in [-1, 1]
 - `W::AbstractMatrix{<:Real}` — (C_out, C_in) weight matrix
 - `λ::AbstractVector` — (C_out,) per-channel decay rates
 - `ω::AbstractVector` — (C_out,) per-channel angular frequencies
 - `T::Real` — Oscillation period
 """
-function causal_conv_dirac(phases::AbstractArray{<:Real, 3},
+function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
                            W::AbstractMatrix{<:Real},
                            λ::AbstractVector, ω::AbstractVector, T::Real;
                            group_size::Int = 8)
@@ -263,8 +263,10 @@ function causal_conv_dirac(phases::AbstractArray{<:Real, 3},
     k_c = ComplexF32.(λ .+ im .* ω)                        # (C_out,)
     T_f = Float32(T)
 
-    # Time remaining from spike to end of same period: dt = T·(0.5 - θ/2)
-    dt = T_f .* (0.5f0 .- Float32.(phases) ./ 2f0)        # (C_in, L, B)
+    # Time remaining from spike to end of same period: dt = T·(0.5 - θ/2).
+    # Phase / Float32 promotes to Float32 elementwise (per the Phase
+    # type's promotion rules), so no explicit cast is needed.
+    dt = T_f .* (0.5f0 .- phases ./ 2f0)                   # (C_in, L, B) Float32
 
     # Grouped diagonal encoding: compute H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
     # Processes G output channels at once to reduce GPU kernel launch overhead
