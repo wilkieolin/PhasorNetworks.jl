@@ -41,15 +41,38 @@ Every layer implements a single defining equation with per-channel oscillator dy
 
     dz_c/dt = k_c * z_c + W * I(t),  where k_c = lambda_c + i*omega_c
 
-This equation is evaluated via multiple dispatch on the input type:
+This equation is evaluated via multiple dispatch on the input type. Two
+families of layers share the same defining equation but differ in what
+input domain they accept:
+
+**Encoder layers** (Complex 3D in → Phase 3D out, fixed/trainable ω):
+- `PhasorResonant` — fixed per-channel ω, ZOH SSM via `phasor_kernel +
+  causal_conv`, then `complex_to_angle`. Use this to bring a sampled
+  complex sequence into the phase domain.
+- `ResonantSTFT` — same shape as `PhasorResonant` but with **trainable**
+  ω; learned frequency decomposition.
+
+**Phase-domain layers** (Phase 3D / 2D in → Phase out):
+- `PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, attention.
+  These dispatch on `<:Phase` arrays and use `causal_conv_dirac`
+  (Dirac/spike-time encoding) for 3D Phase, or matmul for 2D Phase.
+- They also accept `SpikingCall` (→ CurrentCall → ODE) and `CurrentCall`
+  (single-stage ODE `dz/dt = k*z + W*I(t)` solved via
+  DifferentialEquations.jl).
+
+Common dispatch summary across these layers:
 
 1. **2D Phase/Complex** (`AbstractArray{<:Phase}` or `AbstractArray{<:Complex}`) — direct linear transform `W*x + bias`, fast single-step inference
 2. **3D Phase** (`AbstractArray{<:Phase, 3}`) — Dirac discretization + causal convolution via `causal_conv_dirac`, returns Phase
-3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — weight mixing + causal convolution via `phasor_kernel` + `causal_conv` (Toeplitz or FFT)
+3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — only on `PhasorResonant` / `ResonantSTFT` (the encoder layers); `PhasorDense` no longer has this dispatch
 4. **SpikingCall** — converts to CurrentCall, then ODE integration
 5. **CurrentCall** — continuous ODE: `dz/dt = k*z + W*I(t)`, solved via DifferentialEquations.jl
 
 The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) is mathematically equivalent to the continuous ODE, linking all modes.
+
+`PhasorConv` currently still has the legacy "complex 3D in" path baked
+in; its docstring carries a note about migrating it to follow the
+encoder/phase-layer split when next touched.
 
 ### Lux Layer Contract
 
@@ -68,7 +91,7 @@ Init modes: `:default` (uniform dynamics), `:uniform` (spread omega), `:hippo` (
 
 ```
 Input → Encoding (Phase, complex, or spike train)
-      → Network Layers (PhasorDense / PhasorConv / PhasorSTFT / PhasorAttention)
+      → Network Layers (PhasorDense / PhasorConv / ResonantSTFT / PhasorAttention)
       │   Discrete path: weight mixing → causal_conv(phasor_kernel, input)
       │   ODE path:      dz/dt = k*z + W*I(t) via oscillator_bank
       → Readout (Codebook / SSMReadout — similarity-based classification)
@@ -82,7 +105,7 @@ Input → Encoding (Phase, complex, or spike train)
 | `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
 | `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
 | `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
-| `network.jl` | `PhasorDense`, `PhasorConv`, `PhasorSTFT`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
 | `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, encoding helpers, spiking dispatch, deprecated `PhasorSSM` compat |
 | `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |

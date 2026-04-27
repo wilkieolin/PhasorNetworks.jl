@@ -33,7 +33,7 @@ This equation discretizes to a linear recurrence `z[n+1] = A*z[n] + B*I[n]` whic
 2. **Continuous ODE mode** — spike train or current inputs integrated via `oscillator_bank` using DifferentialEquations.jl. Enables neuromorphic deployment.
 3. **Dirac mode** — phase inputs encoded as instantaneous spikes, processed via `causal_conv_dirac` for efficient phase-to-phase computation.
 
-Frequencies are locked across layers (or explicitly shifted via `PhasorSTFT`) to allow communication with invariant phase differences.
+Frequencies are locked across layers (or explicitly shifted via `ResonantSTFT`) to allow communication with invariant phase differences.
 
 The package also provides:
 - **VSA operations** — binding (element-wise phase addition) and bundling (circular mean) for compositional representations
@@ -48,7 +48,7 @@ Input Data
 Encoding (Phase, complex, or spike train)
     |
     v
-Network Layers (PhasorDense / PhasorConv / PhasorSTFT / PhasorAttention)
+Network Layers (PhasorDense / PhasorConv / ResonantSTFT / PhasorAttention)
     |  Discrete path: weight mixing -> causal_conv(phasor_kernel, input)
     |  ODE path:      dz/dt = k*z + W*I(t) via oscillator_bank
     |  Dirac path:    causal_conv_dirac(phases, W, lambda, omega, T)
@@ -66,7 +66,7 @@ Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
 | **Types** | `src/types.jl` | Core data structures: `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
 | **Domains** | `src/domains.jl` | Conversions between phase, complex, time, potential, spike train, and real-vector representations |
 | **Kernels** | `src/kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding (`dirac_encode`, `causal_conv_dirac`), HiPPO-LegS initialization |
-| **Network** | `src/network.jl` | Lux layer definitions: `PhasorDense`, `PhasorConv`, `PhasorSTFT`, `PhasorFixed`, `ComplexBias`, `Codebook`, `ResidualBlock`, `PhasorAttention`, `SingleHeadAttention`, `MinPool`, `MakeSpiking`, `train()` |
+| **Network** | `src/network.jl` | Lux layer definitions: `PhasorDense`, `PhasorConv`, `ResonantSTFT`, `PhasorFixed`, `ComplexBias`, `Codebook`, `ResidualBlock`, `PhasorAttention`, `SingleHeadAttention`, `MinPool`, `MakeSpiking`, `train()` |
 | **SSM** | `src/ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch for SSM layers, deprecated `PhasorSSM` constructor |
 | **VSA** | `src/vsa.jl` | Vector Symbolic Architecture ops: `v_bind`, `v_unbind`, `v_bundle`, `v_bundle_project`, `similarity`, `random_symbols` |
 | **Spiking** | `src/spiking.jl` | ODE-mode utilities: `oscillator_bank`, `spike_current`, `bias_current`, `neuron_constant`, spike detection |
