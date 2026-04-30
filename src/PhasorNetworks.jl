@@ -128,6 +128,7 @@ pack_hep_gradients,
 
 #ep
 SimilarityCost,
+CodebookCost,
 StaticEP,
 LockinEP,
 phasor_settle,

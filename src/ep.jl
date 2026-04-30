@@ -48,6 +48,67 @@ end
 nudge_force(c::SimilarityCost, z_o, β) = (β / length(z_o)) .* c.y
 ep_loss(c::SimilarityCost, z_o)        = one(Float32) - real(dot(c.y, z_o)) / length(z_o)
 
+"""
+    CodebookCost(codes::AbstractMatrix{<:Complex}, y_onehot::AbstractVector)
+    CodebookCost(codes, y_class::Integer)
+
+Softmax-cross-entropy cost over similarity to a complex codebook
+of class codewords (one column per class):
+
+    s_c = (1/d) · Re⟨code_c, z_o⟩
+    C   = -Σ_c y_c · log softmax(s)_c
+
+The codes are assumed to be unit-modulus complex (e.g. produced by
+`angle_to_complex(codes_phase)` from `Codebook`'s state). The class
+target is either a one-hot vector of length `n_classes`, or a class
+index that's converted to one-hot internally.
+
+Real-parameter convention (matches FD on real W):
+
+    nudge_force(c, z_o, β) = -(β/d) · codes · (softmax(s) − y)
+
+Sign flip relative to the SimilarityCost case is correct: we're
+pulling z_o toward the target codeword, which means pulling AWAY
+from the wrongly-active codewords (`err > 0`).
+"""
+struct CodebookCost{C<:AbstractMatrix{<:Complex}, T<:AbstractVector{<:Real}} <: AbstractEPCost
+    codes::C
+    y_onehot::T
+end
+
+function CodebookCost(codes::AbstractMatrix{<:Complex}, y_class::Integer)
+    n_classes = size(codes, 2)
+    y_oh = zeros(Float32, n_classes)
+    @assert 1 <= y_class <= n_classes "y_class out of range: got $y_class, expected 1..$n_classes"
+    y_oh[y_class] = one(Float32)
+    return CodebookCost(codes, y_oh)
+end
+
+function _codebook_logits(c::CodebookCost, z_o)
+    d = length(z_o)
+    return real.(adjoint(c.codes) * z_o) ./ Float32(d)
+end
+
+function _softmax(s::AbstractVector{<:Real})
+    s_shift = s .- maximum(s)
+    e = exp.(s_shift)
+    return e ./ sum(e)
+end
+
+function ep_loss(c::CodebookCost, z_o)
+    s = _codebook_logits(c, z_o)
+    s_shift = s .- maximum(s)
+    log_probs = s_shift .- log(sum(exp.(s_shift)))
+    return -sum(c.y_onehot .* log_probs)
+end
+
+function nudge_force(c::CodebookCost, z_o, β)
+    s   = _codebook_logits(c, z_o)
+    err = _softmax(s) .- c.y_onehot
+    d   = length(z_o)
+    return -(Float32(β) / d) .* (c.codes * err)
+end
+
 # ================================================================
 # 2. Per-layer EP interface
 # ================================================================
@@ -123,27 +184,49 @@ function ep_feedback(layer::PhasorDense, ps, st, z_out)
     return transpose(ps.weight) * z_out
 end
 
-# Phase 1: K = 0 (no self-energy term). Returns a zero array of
-# matching shape so the settling code can unconditionally `.+= ` it.
-ep_self_force(::PhasorDense, ps, st, z_self) = zero(z_self)
+# ep_self_force: half-K times z_self. K_mode = :zero ignores the
+# stored per-channel dynamics (matches the prototype's K=0
+# settling); K_mode = :stored pulls λ = -exp(log_neg_lambda) and ω
+# from the layer's params/state. With ω ≈ 0 (e.g. by zeroing
+# state.omega) the equilibrium remains close to the unit circle;
+# with the layer's default ω = 2π and dt = 0.5 the per-step
+# rotation is too large for damped fixed-point iteration to settle,
+# so :stored mode typically requires a smaller dt or a chain whose
+# omega has been overridden.
+function ep_self_force(layer::PhasorDense, ps, st, z_self;
+                       K_mode::Symbol = :zero)
+    K_mode == :zero && return zero(z_self)
+    λ = -exp.(ps.log_neg_lambda)
+    ω = layer.trainable_omega ? ps.omega : st.omega
+    return Float32(0.5) .* ComplexF32.(λ .+ im .* ω) .* z_self
+end
 
 """
     ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
 
-Hebbian outer product `Re(z_self * z_in')`. Uses `adjoint` (not
-`transpose`) because the states are complex and the energy
-derivative requires conjugation. (hep.jl uses transpose because it
-is doing the holomorphic Wirtinger derivative deliberately —
-different convention; do not copy.)
+Per-parameter Hebbian outer products at the equilibrium states
+`(z_in, z_self)`:
+
+* `weight = real(z_self * z_in')` — uses `adjoint` (not
+  `transpose`) because the states are complex and the energy
+  derivative requires conjugation. (hep.jl uses transpose because
+  it does the holomorphic Wirtinger derivative deliberately —
+  different convention; do not copy.)
+* `bias_real = real(z_self)`, `bias_imag = imag(z_self)` — derived
+  from `Φ_bias = Re⟨bias, z_self⟩` with bias = bias_real + i·bias_imag.
 
 Returns a NamedTuple matching `ps`'s trainable-parameter structure,
 with zero gradients on `log_neg_lambda` (and `omega` if trainable)
-since Phase 1 EP does not update per-channel dynamics.
+since EP does not update per-channel dynamics in this Phase 2.
 """
 function ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
     g = (weight = real.(z_self * adjoint(z_in)),)
+    if haskey(ps, :bias_real)
+        g = merge(g, (bias_real = Float32.(real.(z_self)),
+                      bias_imag = Float32.(imag.(z_self))))
+    end
     # Match ps shape exactly so Optimisers.update doesn't warn /
-    # silently skip. Zero out the dynamics params (Phase 1: K = 0).
+    # silently skip. Dynamics params are not EP-updated.
     if haskey(ps, :log_neg_lambda)
         g = merge(g, (log_neg_lambda = zeros(Float32, size(ps.log_neg_lambda)),))
     end
@@ -153,8 +236,28 @@ function ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
     return g
 end
 
-function ep_energy_contribution(::PhasorDense, ps, st, z_in, z_self)
-    return Float32(real(dot(z_self, ps.weight * z_in)))
+function ep_energy_contribution(::PhasorDense, ps, st, z_in, z_self;
+                                K_mode::Symbol = :zero)
+    e = Float32(real(dot(z_self, ps.weight * z_in)))
+    if haskey(ps, :bias_real)
+        bias = ps.bias_real .+ 1f0im .* ps.bias_imag
+        e += Float32(real(dot(z_self, bias)))
+    end
+    if K_mode == :stored
+        λ = -exp.(ps.log_neg_lambda)
+        ω = layer_omega(z_self, ps, st)   # see helper below
+        K = ComplexF32.(λ .+ im .* ω)
+        # Energy contribution: ½·Re<z, K·z>
+        e += Float32(0.5) * Float32(real(dot(z_self, K .* z_self)))
+    end
+    return e
+end
+
+# Tiny helper used only by ep_energy_contribution; the runtime
+# dispatch in ep_self_force does the trainable_omega check itself.
+function layer_omega(z_self, ps, st)
+    haskey(ps, :omega) && return ps.omega
+    return st.omega
 end
 
 # ================================================================
@@ -184,7 +287,8 @@ EP-compatible layers. Returns one complex-state vector per layer.
 """
 function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Real;
                        T::Int = 100, dt::Real = 0.5f0,
-                       init::Union{Nothing,Vector} = nothing)
+                       init::Union{Nothing,Vector} = nothing,
+                       K_mode::Symbol = :zero)
     layer_keys = collect(keys(ps))
     dt_f = Float32(dt)
     β_f  = Float32(β)
@@ -196,16 +300,19 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
     z0 = _phase_input_to_complex(x)
 
     for _ in 1:T
-        states = _phasor_step(chain, ps, st, layer_keys, z0, cost, β_f, dt_f, states)
+        states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
+                              β_f, dt_f, states; K_mode=K_mode)
     end
     return states
 end
 
 # Single damped projected update step across all layers, with the
 # given time-varying nudge β. Factored out so phasor_settle and the
-# lock-in gradient extraction share the per-step logic.
+# lock-in gradient extraction share the per-step logic. `K_mode`
+# selects the self-energy treatment (see `ep_self_force`).
 function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
-                      cost::AbstractEPCost, β::Float32, dt::Float32, states)
+                      cost::AbstractEPCost, β::Float32, dt::Float32, states;
+                      K_mode::Symbol = :zero)
     n = length(layer_keys)
     new_states = Vector{Vector{ComplexF32}}(undef, n)
     for l in 1:n
@@ -215,7 +322,8 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
         z_self = states[l]
 
         grad_l = ep_drive(chain.layers[key], ps_l, st_l, z_in)
-        grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self)
+        grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self;
+                                          K_mode=K_mode)
 
         if l < n
             key_n = layer_keys[l+1]
@@ -246,52 +354,68 @@ _phase_input_to_complex(x::AbstractArray{<:Real})    = ComplexF32.(angle_to_comp
 # ================================================================
 
 """
-    fd_gradient_phasor(chain, ps, st, x, y; ε=1e-5, T=200, dt=0.5)
+    fd_gradient_phasor(chain, ps, st, x, cost::AbstractEPCost; ε=1e-5, T=200, dt=0.5, K_mode=:zero)
+    fd_gradient_phasor(chain, ps, st, x, y; kwargs...)
 
 Coordinate-by-coordinate forward finite-difference gradient of
-`L(ps) = ep_loss(SimilarityCost(y), z_o*_free)` with respect to
-each `weight` parameter of every PhasorDense layer in the chain.
+`L(ps) = ep_loss(cost, z_o*_free)` with respect to each EP-trained
+parameter (`weight`, plus `bias_real` and `bias_imag` when present)
+of every PhasorDense layer in the chain.
+
+The convenience form `fd_gradient_phasor(..., x, y::AbstractVector{<:Complex}; kwargs...)`
+wraps `y` in a `SimilarityCost`.
 
 Returns a NamedTuple matching `ps`'s structure; entries for
-parameters other than `weight` are zero (we don't FD them in Phase
-1, since they aren't EP-updated either).
+parameters EP does not update (e.g., `log_neg_lambda`, `omega`)
+are zero.
 
 This is the **ground-truth oracle** for the EP gradient. O(n_params)
-expensive — for a chain with n_w trainable weight entries, runs
-n_w + 1 free-phase settles. Use for tests and small-network
+expensive — for a chain with n_p trainable params (weight + bias),
+runs n_p + 1 free-phase settles. Use for tests and small-network
 analysis only.
 """
-function fd_gradient_phasor(chain::Lux.Chain, ps, st, x, y;
-                            ε::Real = 1e-5, T::Int = 200, dt::Real = 0.5f0)
-    cost = SimilarityCost(ComplexF32.(y))
+function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
+                            cost::AbstractEPCost;
+                            ε::Real = 1e-5, T::Int = 200, dt::Real = 0.5f0,
+                            K_mode::Symbol = :zero)
     ε_f  = Float32(ε)
 
     function loss_at(ps_perturbed)
-        s = phasor_settle(chain, ps_perturbed, st, x, cost, 0f0; T=T, dt=dt)
+        s = phasor_settle(chain, ps_perturbed, st, x, cost, 0f0;
+                          T=T, dt=dt, K_mode=K_mode)
         return ep_loss(cost, s[end])
     end
 
     base = loss_at(ps)
 
-    # Walk every layer; for layers with `weight`, FD each entry and
-    # build a matched-shape gradient NamedTuple from scratch.
+    # Walk every layer; FD each EP-trained parameter (weight, plus
+    # bias if present), build a matched-shape gradient NamedTuple.
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
-        if haskey(ps[key], :weight)
-            W = ps[key].weight
-            gW = zeros(Float32, size(W))
-            for i in eachindex(W)
-                Wp = copy(W)
-                Wp[i] += ε_f
-                ps_perturbed = _replace_weight(ps, key, Wp)
-                gW[i] = (loss_at(ps_perturbed) - base) / ε_f
+        layer_ps = ps[key]
+        filled = NamedTuple()
+        for pname in (:weight, :bias_real, :bias_imag)
+            haskey(layer_ps, pname) || continue
+            P = layer_ps[pname]
+            gP = zeros(Float32, size(P))
+            for i in eachindex(P)
+                Pp = copy(P)
+                Pp[i] += ε_f
+                ps_perturbed = _replace_param(ps, key, pname, Pp)
+                gP[i] = (loss_at(ps_perturbed) - base) / ε_f
             end
-            push!(pairs, key => _zero_other_params(ps[key], (weight = gW,)))
-        else
-            push!(pairs, key => _zero_other_params(ps[key], NamedTuple()))
+            filled = merge(filled, NamedTuple{(pname,)}((gP,)))
         end
+        push!(pairs, key => _zero_other_params(layer_ps, filled))
     end
     return NamedTuple(pairs)
+end
+
+# Backwards-compatible: y as a complex vector → SimilarityCost.
+function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
+                            y::AbstractVector{<:Complex}; kwargs...)
+    return fd_gradient_phasor(chain, ps, st, x,
+                              SimilarityCost(ComplexF32.(y)); kwargs...)
 end
 
 # Build a per-layer gradient NamedTuple matching the parameter
@@ -312,10 +436,10 @@ function _zero_other_params(ps_layer::NamedTuple, g_filled::NamedTuple)
     return NamedTuple(out)
 end
 
-# Replace ps[key].weight with W, returning a new NamedTuple.
-function _replace_weight(ps::NamedTuple, key::Symbol, W::AbstractArray)
+# Replace ps[key][pname] with V, returning a new NamedTuple.
+function _replace_param(ps::NamedTuple, key::Symbol, pname::Symbol, V::AbstractArray)
     inner = ps[key]
-    new_inner = merge(inner, (weight = W,))
+    new_inner = merge(inner, NamedTuple{(pname,)}((V,)))
     return merge(ps, NamedTuple{(key,)}((new_inner,)))
 end
 
@@ -326,33 +450,47 @@ end
 abstract type AbstractEPMethod end
 
 """
-    StaticEP(; β=0.1, T_free=100, T_nudge=50, dt=0.5)
+    StaticEP(; β=0.1, T_free=100, T_nudge=50, dt=0.5, K_mode=:zero)
 
 Vanilla EP gradient extraction with a single static real β. The
 nudged phase warm-starts from the free equilibrium for tighter
 linear-response sampling.
+
+`K_mode = :zero` (default) ignores the layer's stored
+`log_neg_lambda` / `omega` for self-energy — matches the
+prototype's K = 0 phase-consensus settling. `K_mode = :stored` adds
+the `½·(λ + iω)·z` self-force; in this mode the equilibrium reflects
+the layer's per-channel SSM dynamics, but settling is sensitive to
+the per-step rotation `dt·ω`, so a smaller `dt` and / or chain with
+zeroed `ω` is typically required (see `docs/phasor_ep_design.md`).
 """
 Base.@kwdef struct StaticEP <: AbstractEPMethod
-    β::Float32     = 0.1f0
-    T_free::Int    = 100
-    T_nudge::Int   = 50
-    dt::Float32    = 0.5f0
+    β::Float32      = 0.1f0
+    T_free::Int     = 100
+    T_nudge::Int    = 50
+    dt::Float32     = 0.5f0
+    K_mode::Symbol  = :zero
 end
 
 """
-    ep_gradient(method, chain, ps, st, x, y) -> (grads, states_free)
+    ep_gradient(method, chain, ps, st, x, cost::AbstractEPCost) -> (grads, states_free)
+    ep_gradient(method, chain, ps, st, x, y::AbstractVector{<:Complex}) -> (grads, states_free)
 
 Compute the EP gradient for all trainable parameters of `chain`.
 Returns a NamedTuple `grads` matching the structure of `ps` (one
-entry per layer, with `weight` populated and other params zeroed in
-Phase 1) and the free-phase equilibrium states.
+entry per layer, with `weight` and `bias_real` / `bias_imag`
+populated as appropriate, and other params zeroed) and the
+free-phase equilibrium states.
+
+The convenience form taking a complex vector `y` wraps it in a
+`SimilarityCost` for backward compatibility.
 """
-function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x, y)
-    cost   = SimilarityCost(ComplexF32.(y))
+function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x,
+                     cost::AbstractEPCost)
     s_free  = phasor_settle(chain, ps, st, x, cost, 0f0;
-                            T=m.T_free,  dt=m.dt)
+                            T=m.T_free,  dt=m.dt, K_mode=m.K_mode)
     s_nudge = phasor_settle(chain, ps, st, x, cost, m.β;
-                            T=m.T_nudge, dt=m.dt, init=s_free)
+                            T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode)
 
     h_free  = chain_hebbians(chain, ps, st, x, s_free)
     h_nudge = chain_hebbians(chain, ps, st, x, s_nudge)
@@ -361,6 +499,12 @@ function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x, y)
     # Φ contains -β·C and we want dL/dW.
     grads = _ep_diff_gradient(ps, h_free, h_nudge, m.β)
     return grads, s_free
+end
+
+# Back-compat: y as a complex vector → SimilarityCost.
+function ep_gradient(m::AbstractEPMethod, chain::Lux.Chain, ps, st, x,
+                     y::AbstractVector{<:Complex})
+    return ep_gradient(m, chain, ps, st, x, SimilarityCost(ComplexF32.(y)))
 end
 
 # Walk the chain, computing per-layer Hebbian outer products at the
@@ -383,28 +527,39 @@ function chain_hebbians(chain::Lux.Chain, ps, st, x, states::Vector)
 end
 
 # Build the gradient NamedTuple by differencing per-layer Hebbians
-# and dividing by β. Layers without `weight` get `_zero_grad` of
-# their params.
+# and dividing by β. Handles weight + bias (when present) and
+# zeros-out non-EP-trained params (log_neg_lambda, omega).
 function _ep_diff_gradient(ps, h_free, h_nudge, β)
+    inv_β = -1f0 / Float32(β)
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
         if haskey(ps[key], :weight)
-            hf = h_free[key].weight
-            hn = h_nudge[key].weight
-            gW = -(hn .- hf) ./ Float32(β)
-            entry = (weight = gW,)
-            if haskey(ps[key], :log_neg_lambda)
-                entry = merge(entry, (log_neg_lambda = zeros(Float32, size(ps[key].log_neg_lambda)),))
+            entry = (weight = inv_β .* (h_nudge[key].weight .- h_free[key].weight),)
+            if haskey(ps[key], :bias_real)
+                entry = merge(entry, (
+                    bias_real = inv_β .* (h_nudge[key].bias_real .- h_free[key].bias_real),
+                    bias_imag = inv_β .* (h_nudge[key].bias_imag .- h_free[key].bias_imag),
+                ))
             end
-            if haskey(ps[key], :omega)
-                entry = merge(entry, (omega = zeros(Float32, size(ps[key].omega)),))
-            end
+            entry = _pad_dynamics_zeros(entry, ps[key])
             push!(pairs, key => entry)
         else
             push!(pairs, key => _zero_grad(ps[key]))
         end
     end
     return NamedTuple(pairs)
+end
+
+# Add zero gradients for log_neg_lambda / omega so the returned
+# NamedTuple matches `ps` shape exactly (avoids Optimisers warnings).
+function _pad_dynamics_zeros(entry::NamedTuple, layer_ps::NamedTuple)
+    if haskey(layer_ps, :log_neg_lambda)
+        entry = merge(entry, (log_neg_lambda = zeros(Float32, size(layer_ps.log_neg_lambda)),))
+    end
+    if haskey(layer_ps, :omega)
+        entry = merge(entry, (omega = zeros(Float32, size(layer_ps.omega)),))
+    end
+    return entry
 end
 
 # ================================================================
@@ -466,14 +621,14 @@ Base.@kwdef struct LockinEP <: AbstractEPMethod
     T_warmup_cycles::Int       = 2
     T_free::Int                = 200
     dt::Float32                = 0.1f0
+    K_mode::Symbol             = :zero
 end
 
-function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x, y)
-    cost = SimilarityCost(ComplexF32.(y))
-
+function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
+                     cost::AbstractEPCost)
     # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
     s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
-                           T=m.T_free, dt=m.dt)
+                           T=m.T_free, dt=m.dt, K_mode=m.K_mode)
     h_dc   = chain_hebbians(chain, ps, st, x, s_free)
 
     # 2. Lock-in setup.
@@ -489,14 +644,18 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x, y)
     for t in 1:T_warmup
         β_t = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
-                              β_t, m.dt, states)
+                              β_t, m.dt, states; K_mode=m.K_mode)
     end
 
-    # 4. Per-layer complex Hebbian accumulator.
-    H_acc = Dict{Symbol, Matrix{ComplexF32}}()
+    # 4. Per-layer complex Hebbian accumulator. Weight + bias_real
+    #    + bias_imag entries when present.
+    H_W = Dict{Symbol, Matrix{ComplexF32}}()
+    H_b = Dict{Symbol, Vector{ComplexF32}}()
     for key in layer_keys
-        if haskey(ps[key], :weight)
-            H_acc[key] = zeros(ComplexF32, size(ps[key].weight))
+        haskey(ps[key], :weight) || continue
+        H_W[key] = zeros(ComplexF32, size(ps[key].weight))
+        if haskey(ps[key], :bias_real)
+            H_b[key] = zeros(ComplexF32, size(ps[key].bias_real))
         end
     end
 
@@ -504,38 +663,51 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x, y)
     for t in 1:T_lockin
         β_t   = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
-                              β_t, m.dt, states)
+                              β_t, m.dt, states; K_mode=m.K_mode)
         demod = exp(-im * m.ω_p * t * m.dt)
         for (l, key) in enumerate(layer_keys)
             haskey(ps[key], :weight) || continue
             z_in   = (l == 1) ? z0 : states[l-1]
             z_self = states[l]
-            h_complex = z_self * adjoint(z_in)
-            H_acc[key] .+= (h_complex .- ComplexF32.(h_dc[key].weight)) .* demod
+            # Weight outer product
+            h_W = z_self * adjoint(z_in)
+            H_W[key] .+= (h_W .- ComplexF32.(h_dc[key].weight)) .* demod
+            # Bias hebbians (per-channel z_self real / imag) packaged
+            # as complex so the demodulation is consistent.
+            if haskey(H_b, key)
+                h_b_complex = z_self
+                H_b[key] .+= (h_b_complex .- ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)) .* demod
+            end
         end
     end
 
-    # 6. Convert to gradient: dL/dW = -2·Re(H) / (T_lockin · ε).
+    # 6. Convert to gradient: dL/d(real-param) = -2·Re(H) / (T_lockin · ε).
     #    The factor of 2 comes from the real cosine probe — see the
-    #    design doc, section "Implementation sketch".
-    grads = _ep_lockin_gradient(ps, H_acc, T_lockin, m.ε)
+    #    design doc, section "Implementation sketch". For bias the
+    #    real/imag parts of H_b give the bias_real / bias_imag grads
+    #    respectively (since H_b's "complex" packaging is z_self and
+    #    Re(z_self), Im(z_self) are independent params).
+    grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin, m.ε)
     return grads, s_free
 end
 
-function _ep_lockin_gradient(ps, H_acc::Dict{Symbol,Matrix{ComplexF32}},
+function _ep_lockin_gradient(ps,
+                              H_W::Dict{Symbol,Matrix{ComplexF32}},
+                              H_b::Dict{Symbol,Vector{ComplexF32}},
                               T_lockin::Int, ε)
     norm_factor = Float32(T_lockin) * Float32(ε)
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
         if haskey(ps[key], :weight)
-            gW = -2f0 .* real.(H_acc[key]) ./ norm_factor
-            entry = (weight = gW,)
-            if haskey(ps[key], :log_neg_lambda)
-                entry = merge(entry, (log_neg_lambda = zeros(Float32, size(ps[key].log_neg_lambda)),))
+            entry = (weight = -2f0 .* real.(H_W[key]) ./ norm_factor,)
+            if haskey(H_b, key)
+                # Re(H_b) → bias_real grad; Im(H_b) → bias_imag grad.
+                entry = merge(entry, (
+                    bias_real = -2f0 .* real.(H_b[key]) ./ norm_factor,
+                    bias_imag = -2f0 .* imag.(H_b[key]) ./ norm_factor,
+                ))
             end
-            if haskey(ps[key], :omega)
-                entry = merge(entry, (omega = zeros(Float32, size(ps[key].omega)),))
-            end
+            entry = _pad_dynamics_zeros(entry, ps[key])
             push!(pairs, key => entry)
         else
             push!(pairs, key => _zero_grad(ps[key]))
@@ -549,7 +721,8 @@ end
 # ================================================================
 
 """
-    ep_train(model, ps, st, train_loader, args; method=StaticEP())
+    ep_train(model, ps, st, train_loader, args;
+             method=StaticEP(), cost_fn=default_cost_fn, verbose=false)
 
 Train a `Lux.Chain` of EP-compatible layers via equilibrium
 propagation. Returns `(losses, ps, st)` — same shape as `train` and
@@ -557,25 +730,29 @@ propagation. Returns `(losses, ps, st)` — same shape as `train` and
 
 `train_loader` is any iterable of `(x, y)` batches where `x` is a
 phase-typed (or real-valued, interpreted as phase) array and `y` is
-a complex unit-modulus target matching the chain's last layer's
-output dimension.
+whatever your `cost_fn` consumes (a complex vector for the default
+`SimilarityCost`, an integer class index for `CodebookCost`, etc.).
+
+`cost_fn(y) -> AbstractEPCost`. The default constructs
+`SimilarityCost(ComplexF32.(y))`, preserving the Phase-1 interface.
+For codebook-style classification, pass
+`cost_fn = y -> CodebookCost(codes_complex, y)`.
 
 `args` is the global `Args` struct (see `test/runtests.jl`); only
 `lr` and `epochs` are read.
 """
 function ep_train(model::Lux.Chain, ps, st, train_loader, args;
                   method::AbstractEPMethod = StaticEP(),
+                  cost_fn::Function = _default_cost_fn,
                   verbose::Bool = false)
     opt_state = Optimisers.setup(Optimisers.Descent(Float32(args.lr)), ps)
     losses = Float32[]
     for epoch in 1:args.epochs
         for (x, y) in train_loader
-            grads, s_free = ep_gradient(method, model, ps, st, x, y)
+            cost = cost_fn(y)
+            grads, s_free = ep_gradient(method, model, ps, st, x, cost)
             opt_state, ps = Optimisers.update(opt_state, ps, grads)
-
-            cost = SimilarityCost(ComplexF32.(y))
             push!(losses, ep_loss(cost, s_free[end]))
-
             if verbose
                 println("epoch=$epoch loss=$(losses[end])")
             end
@@ -583,3 +760,5 @@ function ep_train(model::Lux.Chain, ps, st, train_loader, args;
     end
     return losses, ps, st
 end
+
+_default_cost_fn(y) = SimilarityCost(ComplexF32.(y))

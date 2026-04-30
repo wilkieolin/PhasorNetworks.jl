@@ -17,15 +17,18 @@ const EP_BETA    = 0.001f0       # small enough to suppress O(β) bias
 const EP_FD_TOL  = 0.05          # 5% rel-err target on each layer
 
 function ep_tests()
-    @testset "Phasor EP (Phase 1)" begin
+    @testset "Phasor EP" begin
         ep_cost_tests()
         ep_interface_tests()
         ep_settle_tests()
         ep_gradient_vs_fd_tests()
         ep_training_tests()
-        ep_bias_rejection_tests()
         ep_lockin_vs_fd_tests()
         ep_lockin_training_tests()
+        ep_bias_support_tests()
+        ep_codebook_cost_tests()
+        ep_codebook_training_tests()
+        ep_kmode_stored_tests()
     end
 end
 
@@ -291,32 +294,166 @@ function ep_lockin_training_tests()
 end
 
 # ----------------------------------------------------------------
-# 8. Boundary: bias rejection
+# 8. Bias support — EP-vs-FD with use_bias=true
 # ----------------------------------------------------------------
-function ep_bias_rejection_tests()
-    @testset "use_bias=true is unsupported in Phase 1" begin
+function ep_bias_support_tests()
+    @testset "Bias gradients match FD" begin
         rng = Xoshiro(42)
-        # Layers with bias — ep_drive will pull the bias into the drive
-        # even though we want the no-bias formulation. The current Phase 1
-        # documentation requires use_bias=false; we verify the assumption
-        # by demonstrating that the EP gradient diverges from FD when
-        # bias is enabled (smoke test that the expected restriction is real
-        # rather than silently giving a wrong answer).
         chain = Chain(
             PhasorDense(4 => 8, normalize_to_unit_circle, use_bias=true),
             PhasorDense(8 => 2, normalize_to_unit_circle, use_bias=false),
         )
         ps, st = Lux.setup(rng, chain)
+        ps = (
+            layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+            layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)),
+        )
         x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
         y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
 
-        # The settle and gradient calls themselves should NOT throw — the
-        # restriction is documentary, not enforced. We just confirm that
-        # the call succeeds (so users get a result, just with the bias
-        # contribution unaccounted for in the FD derivation).
-        @test_nowarn phasor_settle(chain, ps, st, x, SimilarityCost(y), 0f0;
-                                   T=20, dt=EP_DT)
-        @test_nowarn ep_gradient(StaticEP(β=0.01f0, T_free=20, T_nudge=10),
-                                 chain, ps, st, x, y)
+        # Sanity: layer_1 ps has bias_real / bias_imag; layer_2 doesn't.
+        @test haskey(ps.layer_1, :bias_real)
+        @test haskey(ps.layer_1, :bias_imag)
+        @test !haskey(ps.layer_2, :bias_real)
+
+        fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT)
+        grads, _ = ep_gradient(StaticEP(β=EP_BETA, T_free=200, T_nudge=100, dt=EP_DT),
+                                chain, ps, st, x, y)
+
+        for pname in (:weight, :bias_real, :bias_imag)
+            g_ep = grads.layer_1[pname]
+            g_fd = fd.layer_1[pname]
+            re   = norm(g_ep .- g_fd) / norm(g_fd)
+            @info "Bias EP vs FD on layer_1.$pname: rel-err=$(round(re, digits=4))"
+            @test re < EP_FD_TOL * 2          # bias is looser; 10% target is fine
+        end
+
+        # Sanity: layer_2 weight still matches at the tighter tolerance.
+        re2 = norm(grads.layer_2.weight .- fd.layer_2.weight) / norm(fd.layer_2.weight)
+        @test re2 < EP_FD_TOL
+    end
+end
+
+# ----------------------------------------------------------------
+# 9. CodebookCost — cost identities and gradient shape
+# ----------------------------------------------------------------
+function ep_codebook_cost_tests()
+    @testset "CodebookCost identities" begin
+        rng = Xoshiro(42)
+        d, n_classes = 8, 4
+        codes_phase = Float32.(2 .* rand(rng, Float32, d, n_classes) .- 1)
+        codes = ComplexF32.(exp.(im .* π .* codes_phase))
+
+        # Class-2 target.
+        cost = CodebookCost(codes, 2)
+        @test length(cost.y_onehot) == n_classes
+        @test cost.y_onehot[2] == one(Float32)
+        @test sum(cost.y_onehot) == one(Float32)
+
+        # Loss at perfect target codeword should be < log(n_classes).
+        z_match = ComplexF32.(codes[:, 2])
+        loss_match = ep_loss(cost, z_match)
+        @test loss_match < Float32(log(n_classes))
+        @test loss_match > 0
+
+        # Loss at the *wrong* codeword should be larger than at the right one.
+        z_wrong = ComplexF32.(codes[:, 3])
+        @test ep_loss(cost, z_wrong) > ep_loss(cost, z_match)
+
+        # Nudge force shape matches z_o; finite values.
+        z_test = randn(rng, ComplexF32, d)
+        nudge = PhasorNetworks.nudge_force(cost, z_test, 0.1f0)
+        @test size(nudge) == (d,)
+        @test all(isfinite, nudge)
+
+        # One-hot constructor matches explicit y_onehot.
+        cost_explicit = CodebookCost(codes, Float32[0, 1, 0, 0])
+        @test PhasorNetworks.nudge_force(cost_explicit, z_test, 0.1f0) ≈
+              PhasorNetworks.nudge_force(cost, z_test, 0.1f0)
+    end
+end
+
+function ep_codebook_training_tests()
+    @testset "ep_train(cost_fn=CodebookCost) decreases loss" begin
+        rng = Xoshiro(42)
+        d, n_classes = 8, 4
+        codes_phase = Float32.(2 .* rand(Xoshiro(7), Float32, d, n_classes) .- 1)
+        codes = ComplexF32.(exp.(im .* π .* codes_phase))
+
+        chain = Chain(PhasorDense(4 => d, normalize_to_unit_circle, use_bias=false))
+        ps, st = Lux.setup(rng, chain)
+        ps = (layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),)
+
+        x = Phase.(2f0 .* rand(Xoshiro(1), Float32, 4) .- 1f0)
+        target_class = 2
+        args = Args(lr=0.05, epochs=60)
+
+        losses, _, _ = ep_train(chain, ps, st, [(x, target_class)], args;
+                                method=StaticEP(β=0.1f0, T_free=100, T_nudge=50),
+                                cost_fn = y_class -> CodebookCost(codes, y_class))
+
+        @test length(losses) == 60
+        @test all(isfinite, losses)
+        @test losses[end] < losses[1]
+        @info "Codebook training: start=$(round(losses[1], digits=4)) end=$(round(losses[end], digits=4))"
+    end
+end
+
+# ----------------------------------------------------------------
+# 10. K_mode = :stored — self-energy from layer's stored params
+# ----------------------------------------------------------------
+function ep_kmode_stored_tests()
+    @testset "K_mode=:stored matches FD with omega=0" begin
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        # Override omega = 0 in state so the K = λ + iω self-force
+        # contributes only the real decay. The default ω = 2π would
+        # give per-step rotations dt·ω that destabilize the damped
+        # iteration at dt = 0.5.
+        st = (
+            layer_1 = (omega = zeros(Float32, length(st.layer_1.omega)),),
+            layer_2 = (omega = zeros(Float32, length(st.layer_2.omega)),),
+        )
+
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+
+        for K_mode in (:zero, :stored)
+            fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT, K_mode=K_mode)
+            grads, _ = ep_gradient(
+                StaticEP(β=EP_BETA, T_free=200, T_nudge=100, dt=EP_DT, K_mode=K_mode),
+                chain, ps, st, x, y)
+            for key in (:layer_1, :layer_2)
+                re = norm(grads[key].weight .- fd[key].weight) / norm(fd[key].weight)
+                @info "K_mode=:$K_mode $key rel-err=$(round(re, digits=4))"
+                @test re < EP_FD_TOL
+            end
+        end
+
+        # Sanity: with ω = 0 the self-force is purely a real ½·λ·z,
+        # which only scales magnitude — and the unit-circle projection
+        # then erases the difference. So the equilibria SHOULD match.
+        # Verify this and then re-test with non-zero ω, where the
+        # rotation contribution genuinely changes the angle.
+        cost = SimilarityCost(y)
+        s_zero   = phasor_settle(chain, ps, st, x, cost, 0f0;
+                                  T=200, dt=EP_DT, K_mode=:zero)
+        s_stored = phasor_settle(chain, ps, st, x, cost, 0f0;
+                                  T=200, dt=EP_DT, K_mode=:stored)
+        @test isapprox(s_stored[end], s_zero[end]; atol=1e-3)
+
+        # With non-zero ω (and a smaller dt to keep settling stable),
+        # K_mode=:stored produces a genuinely different equilibrium.
+        st_omega = (
+            layer_1 = (omega = fill(0.3f0, length(st.layer_1.omega)),),
+            layer_2 = (omega = fill(0.3f0, length(st.layer_2.omega)),),
+        )
+        s_zero_ω   = phasor_settle(chain, ps, st_omega, x, cost, 0f0;
+                                    T=400, dt=0.1f0, K_mode=:zero)
+        s_stored_ω = phasor_settle(chain, ps, st_omega, x, cost, 0f0;
+                                    T=400, dt=0.1f0, K_mode=:stored)
+        Δ = norm(s_stored_ω[end] .- s_zero_ω[end])
+        @test Δ > 1e-3
+        @info "K_mode :zero vs :stored with ω=0.3: Δ = $(round(Δ, digits=4))"
     end
 end
