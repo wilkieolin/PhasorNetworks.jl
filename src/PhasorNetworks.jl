@@ -129,6 +129,7 @@ pack_hep_gradients,
 #ep
 SimilarityCost,
 StaticEP,
+LockinEP,
 phasor_settle,
 ep_gradient,
 ep_train,

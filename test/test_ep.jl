@@ -24,6 +24,8 @@ function ep_tests()
         ep_gradient_vs_fd_tests()
         ep_training_tests()
         ep_bias_rejection_tests()
+        ep_lockin_vs_fd_tests()
+        ep_lockin_training_tests()
     end
 end
 
@@ -197,7 +199,99 @@ function ep_training_tests()
 end
 
 # ----------------------------------------------------------------
-# 6. Boundary: bias rejection
+# 6. LockinEP vs FD ground truth
+# ----------------------------------------------------------------
+const EP_LOCKIN_FD_TOL = 0.10   # 10% rel-err — looser than static (extra knobs to tune)
+
+function ep_lockin_vs_fd_tests()
+    @testset "LockinEP ≈ fd_gradient_phasor (deep adiabatic regime)" begin
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+
+        # FD oracle uses the same dt as static — 0.5 — to match the
+        # corresponding equilibrium. LockinEP needs a finer dt for its
+        # probe phase increments to be small enough.
+        fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT)
+
+        # Use a slow probe and small amplitude — deep adiabatic
+        # regime where lock-in matches FD.
+        method = LockinEP(ε=0.01f0, ω_p=0.01f0,
+                          n_cycles=8, T_warmup_cycles=2,
+                          T_free=400, dt=0.1f0)
+        grads, _ = ep_gradient(method, chain, ps, st, x, y)
+
+        for key in (:layer_1, :layer_2)
+            g_lk = grads[key].weight
+            g_fd = fd[key].weight
+            re   = norm(g_lk - g_fd) / norm(g_fd)
+            cs   = dot(vec(g_lk), vec(g_fd)) / (norm(g_lk) * norm(g_fd) + 1e-10)
+            @info "LockinEP vs FD on $key: cos=$(round(cs, digits=4)) rel-err=$(round(re, digits=4))"
+            @test re < EP_LOCKIN_FD_TOL
+            @test cs > 1 - EP_LOCKIN_FD_TOL
+        end
+
+        # Non-EP-trained params get zero gradient (same as StaticEP).
+        @test all(grads.layer_1.log_neg_lambda .== 0)
+        @test all(grads.layer_2.log_neg_lambda .== 0)
+    end
+
+    @testset "LockinEP non-adiabatic regime drifts (sanity check)" begin
+        # Confirms that the adiabatic constraint is real — a
+        # too-fast probe gives a worse gradient than the slow one.
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+
+        fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT)
+        fd_norm1 = norm(fd.layer_1.weight)
+
+        slow, _ = ep_gradient(LockinEP(ε=0.01f0, ω_p=0.01f0,
+                                       n_cycles=8, T_warmup_cycles=2,
+                                       T_free=400, dt=0.1f0),
+                              chain, ps, st, x, y)
+        fast, _ = ep_gradient(LockinEP(ε=0.01f0, ω_p=0.5f0,
+                                       n_cycles=8, T_warmup_cycles=2,
+                                       T_free=400, dt=0.1f0),
+                              chain, ps, st, x, y)
+        re_slow = norm(slow.layer_1.weight - fd.layer_1.weight) / fd_norm1
+        re_fast = norm(fast.layer_1.weight - fd.layer_1.weight) / fd_norm1
+        @info "Lock-in adiabaticity: slow rel-err=$(round(re_slow, digits=4)) fast rel-err=$(round(re_fast, digits=4))"
+        @test re_slow < re_fast
+    end
+end
+
+# ----------------------------------------------------------------
+# 7. LockinEP end-to-end training
+# ----------------------------------------------------------------
+function ep_lockin_training_tests()
+    @testset "ep_train(method=LockinEP) decreases loss" begin
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+
+        # Lock-in at modest ε / ω_p — fast enough to keep test runtime
+        # reasonable, slow enough to give a useful gradient.
+        method = LockinEP(ε=0.05f0, ω_p=0.05f0,
+                          n_cycles=4, T_warmup_cycles=2,
+                          T_free=100, dt=0.1f0)
+        args = Args(lr=0.05, epochs=40)
+
+        losses, _, _ = ep_train(chain, ps, st, [(x, y)], args; method=method)
+
+        @test length(losses) == 40
+        @test all(isfinite, losses)
+        @test losses[end] < losses[1]
+        @test losses[end] < 0.5    # looser than static — slower convergence per epoch
+        @info "ep_train (LockinEP): start=$(round(losses[1], digits=4)) end=$(round(losses[end], digits=4))"
+    end
+end
+
+# ----------------------------------------------------------------
+# 8. Boundary: bias rejection
 # ----------------------------------------------------------------
 function ep_bias_rejection_tests()
     @testset "use_bias=true is unsupported in Phase 1" begin

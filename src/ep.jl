@@ -185,47 +185,53 @@ EP-compatible layers. Returns one complex-state vector per layer.
 function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Real;
                        T::Int = 100, dt::Real = 0.5f0,
                        init::Union{Nothing,Vector} = nothing)
-    layers = chain.layers
     layer_keys = collect(keys(ps))
-    n = length(layer_keys)
     dt_f = Float32(dt)
     β_f  = Float32(β)
 
     states = init === nothing ?
-        [zeros(ComplexF32, layers[k].out_dims) for k in layer_keys] :
+        [zeros(ComplexF32, chain.layers[k].out_dims) for k in layer_keys] :
         [ComplexF32.(s) for s in init]
 
-    # Pre-compute the layer-1 input (constant across the iteration).
     z0 = _phase_input_to_complex(x)
 
     for _ in 1:T
-        new_states = Vector{Vector{ComplexF32}}(undef, n)
-        for l in 1:n
-            key  = layer_keys[l]
-            ps_l = ps[key]; st_l = st[key]
-            z_in   = (l == 1) ? z0 : states[l-1]
-            z_self = states[l]
-
-            grad_l = ep_drive(layers[key], ps_l, st_l, z_in)
-            grad_l = grad_l .+ ep_self_force(layers[key], ps_l, st_l, z_self)
-
-            if l < n
-                key_n  = layer_keys[l+1]
-                ps_n   = ps[key_n]; st_n = st[key_n]
-                grad_l = grad_l .+ ep_feedback(layers[key_n], ps_n, st_n, states[l+1])
-            end
-            if l == n && β_f != 0f0
-                grad_l = grad_l .+ nudge_force(cost, z_self, β_f)
-            end
-
-            # Hard projection (ε = 0) — matches prototype, avoids
-            # sub-threshold magnitude bias from the safe-mode default.
-            new_states[l] = (1 - dt_f) .* z_self .+
-                            dt_f .* normalize_to_unit_circle(grad_l; ε = 0)
-        end
-        states = new_states
+        states = _phasor_step(chain, ps, st, layer_keys, z0, cost, β_f, dt_f, states)
     end
     return states
+end
+
+# Single damped projected update step across all layers, with the
+# given time-varying nudge β. Factored out so phasor_settle and the
+# lock-in gradient extraction share the per-step logic.
+function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
+                      cost::AbstractEPCost, β::Float32, dt::Float32, states)
+    n = length(layer_keys)
+    new_states = Vector{Vector{ComplexF32}}(undef, n)
+    for l in 1:n
+        key  = layer_keys[l]
+        ps_l = ps[key]; st_l = st[key]
+        z_in   = (l == 1) ? z0 : states[l-1]
+        z_self = states[l]
+
+        grad_l = ep_drive(chain.layers[key], ps_l, st_l, z_in)
+        grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self)
+
+        if l < n
+            key_n = layer_keys[l+1]
+            grad_l = grad_l .+ ep_feedback(chain.layers[key_n],
+                                            ps[key_n], st[key_n], states[l+1])
+        end
+        if l == n && β != 0f0
+            grad_l = grad_l .+ nudge_force(cost, z_self, β)
+        end
+
+        # Hard projection (ε = 0) — matches prototype, avoids
+        # sub-threshold magnitude bias from the safe-mode default.
+        new_states[l] = (1 - dt) .* z_self .+
+                        dt .* normalize_to_unit_circle(grad_l; ε = 0)
+    end
+    return new_states
 end
 
 # Convert any phase-typed input (Phase array, raw real array
@@ -402,7 +408,144 @@ function _ep_diff_gradient(ps, h_free, h_nudge, β)
 end
 
 # ================================================================
-# 6. Training loop
+# 6. LockinEP — temporal Cauchy / lock-in detection
+# ================================================================
+#
+# Drive the nudge as a real cosine probe β(t) = ε·cos(ω_p t), then
+# extract the linear-response coefficient by demodulating the
+# Hebbian outer products at +ω_p (DC-subtracted, integer cycles,
+# warm-up phase). Equivalent to hEP's spatial contour but laid out
+# in time — see docs/phasor_ep_design.md for the derivation.
+#
+# Why a real probe (not complex e^{iω_p t}): with non-holomorphic
+# unit_project, z*(β,β̄) depends on both β and β̄. A complex probe
+# extracts only the Wirtinger ∂/∂β; a real cosine probe excites both
+# sidebands so the +ω_p Fourier coefficient picks up the full
+# d/dβ_real = ∂/∂β + ∂/∂β̄, matching FD on real weights.
+
+"""
+    LockinEP(; ε=0.05, ω_p=0.05, n_cycles=8, T_warmup_cycles=2,
+             T_free=200, dt=0.1)
+
+Lock-in / temporal-Cauchy EP gradient extraction. The nudge is
+swept as `β(t) = ε·cos(ω_p t)` and the gradient is recovered by
+demodulating the per-layer Hebbian outer products at the probe
+frequency.
+
+# Knobs
+
+* `ε` — probe amplitude. Smaller → more linear, but eventually
+  hits the FD-precision noise floor.
+* `ω_p` — probe angular frequency (rad / time-unit, where one
+  step is `dt` time-units). Must be slow enough that the network
+  tracks the probe adiabatically — i.e. `ω_p ≪ relaxation_rate ≈
+  1/T_settle`.
+* `n_cycles` — integer number of probe periods over which to
+  integrate the lock-in. More → better demodulator selectivity at
+  proportional compute cost.
+* `T_warmup_cycles` — discarded probe periods at the start to let
+  the equilibrium catch up to the modulation. Two is usually
+  enough.
+* `T_free` — free-phase settle steps (β = 0) to reach the
+  base equilibrium.
+* `dt` — per-step time increment. The product `ω_p · dt` is the
+  per-step phase increment of the probe, so `dt` and `ω_p` are
+  coupled — fine `dt` lets you use higher `ω_p` without aliasing.
+
+# Defaults
+
+The defaults `(ε=0.05, ω_p=0.05, dt=0.1, n_cycles=8)` give roughly
+the deep-adiabatic regime visible in
+`demos/phasor_ep_demo.ipynb` Section 6 (matches FD to a few
+percent on a 2-layer chain).
+"""
+Base.@kwdef struct LockinEP <: AbstractEPMethod
+    ε::Float32                 = 0.05f0
+    ω_p::Float32               = 0.05f0
+    n_cycles::Int              = 8
+    T_warmup_cycles::Int       = 2
+    T_free::Int                = 200
+    dt::Float32                = 0.1f0
+end
+
+function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x, y)
+    cost = SimilarityCost(ComplexF32.(y))
+
+    # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
+    s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
+                           T=m.T_free, dt=m.dt)
+    h_dc   = chain_hebbians(chain, ps, st, x, s_free)
+
+    # 2. Lock-in setup.
+    layer_keys = collect(keys(ps))
+    z0 = _phase_input_to_complex(x)
+    period_steps = round(Int, 2π / (m.ω_p * m.dt))
+    T_warmup = m.T_warmup_cycles * period_steps
+    T_lockin = m.n_cycles        * period_steps
+
+    states = [copy(s) for s in s_free]
+
+    # 3. Warm-up — drive the probe but don't accumulate (transients die).
+    for t in 1:T_warmup
+        β_t = m.ε * cos(m.ω_p * t * m.dt)
+        states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
+                              β_t, m.dt, states)
+    end
+
+    # 4. Per-layer complex Hebbian accumulator.
+    H_acc = Dict{Symbol, Matrix{ComplexF32}}()
+    for key in layer_keys
+        if haskey(ps[key], :weight)
+            H_acc[key] = zeros(ComplexF32, size(ps[key].weight))
+        end
+    end
+
+    # 5. Integration: settle + DC-subtracted, demodulated accumulation.
+    for t in 1:T_lockin
+        β_t   = m.ε * cos(m.ω_p * t * m.dt)
+        states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
+                              β_t, m.dt, states)
+        demod = exp(-im * m.ω_p * t * m.dt)
+        for (l, key) in enumerate(layer_keys)
+            haskey(ps[key], :weight) || continue
+            z_in   = (l == 1) ? z0 : states[l-1]
+            z_self = states[l]
+            h_complex = z_self * adjoint(z_in)
+            H_acc[key] .+= (h_complex .- ComplexF32.(h_dc[key].weight)) .* demod
+        end
+    end
+
+    # 6. Convert to gradient: dL/dW = -2·Re(H) / (T_lockin · ε).
+    #    The factor of 2 comes from the real cosine probe — see the
+    #    design doc, section "Implementation sketch".
+    grads = _ep_lockin_gradient(ps, H_acc, T_lockin, m.ε)
+    return grads, s_free
+end
+
+function _ep_lockin_gradient(ps, H_acc::Dict{Symbol,Matrix{ComplexF32}},
+                              T_lockin::Int, ε)
+    norm_factor = Float32(T_lockin) * Float32(ε)
+    pairs = Pair{Symbol,Any}[]
+    for key in keys(ps)
+        if haskey(ps[key], :weight)
+            gW = -2f0 .* real.(H_acc[key]) ./ norm_factor
+            entry = (weight = gW,)
+            if haskey(ps[key], :log_neg_lambda)
+                entry = merge(entry, (log_neg_lambda = zeros(Float32, size(ps[key].log_neg_lambda)),))
+            end
+            if haskey(ps[key], :omega)
+                entry = merge(entry, (omega = zeros(Float32, size(ps[key].omega)),))
+            end
+            push!(pairs, key => entry)
+        else
+            push!(pairs, key => _zero_grad(ps[key]))
+        end
+    end
+    return NamedTuple(pairs)
+end
+
+# ================================================================
+# 7. Training loop
 # ================================================================
 
 """
