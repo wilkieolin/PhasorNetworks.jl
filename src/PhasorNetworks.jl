@@ -126,6 +126,16 @@ hep_interference_cost_grad,
 extract_hep_params,
 pack_hep_gradients,
 
+#ep
+SimilarityCost,
+StaticEP,
+phasor_settle,
+ep_gradient,
+ep_train,
+ep_loss,
+fd_gradient_phasor,
+chain_hebbians,
+
 #metrics
 arc_error,
 angular_mean,
@@ -157,5 +167,6 @@ include("network.jl")
 include("ssm.jl")
 include("metrics.jl")
 include("hep.jl")
+include("ep.jl")
 
 end
