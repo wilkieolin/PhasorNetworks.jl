@@ -320,6 +320,18 @@ function (l::SSMCrossAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, s
     return l.activation(output), st
 end
 
+# Phase 3D trampoline: lift the input to unit-modulus complex, run the
+# Complex 3D path, lower the output back to phase. Lets the layer drop
+# straight into a phase-domain chain (e.g. after `PhasorResonant`)
+# without manual `angle_to_complex` / `complex_to_angle` steps. The
+# algorithm is unchanged — Q and K are already reduced to phase inside
+# the Complex 3D path, so the round-trip is essentially free for inputs
+# that started as Phase.
+function (l::SSMCrossAttention)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+    y, st_new = l(angle_to_complex(x), ps, st)
+    return complex_to_angle(y), st_new
+end
+
 # ================================================================
 # 6. SSM Self-Attention Layer
 # ================================================================
@@ -400,6 +412,14 @@ function (l::SSMSelfAttention)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st
     output = batched_mul(V, scores)                # d_model × L × B
 
     return l.activation(output), st
+end
+
+# EXCUSE ME NANI - TODO get rid of this
+
+# Phase 3D trampoline (see SSMCrossAttention for the rationale).
+function (l::SSMSelfAttention)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+    y, st_new = l(angle_to_complex(x), ps, st)
+    return complex_to_angle(y), st_new
 end
 
 # ================================================================

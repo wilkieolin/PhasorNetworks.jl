@@ -683,14 +683,13 @@ function ssm_attention_chain_tests()
         L, B = 10, 4
 
         @testset "self-attention in chain" begin
-            # PhasorResonant encodes complex → phase. SSMSelfAttention takes
-            # complex, so we lift back via angle_to_complex; SSMReadout has a
-            # Phase 3D dispatch so we can finish in the phase domain.
+            # PhasorResonant outputs Phase 3D; SSMSelfAttention now has a
+            # Phase 3D dispatch (trampolines through its Complex 3D path)
+            # so the chain stays in the phase domain end-to-end without
+            # manual angle_to_complex / complex_to_angle plumbing.
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -704,9 +703,7 @@ function ssm_attention_chain_tests()
         @testset "cross-attention in chain" begin
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMCrossAttention(D_hidden => D_hidden, L, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -720,9 +717,7 @@ function ssm_attention_chain_tests()
         @testset "gradient through chain with self-attention" begin
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -735,11 +730,8 @@ function ssm_attention_chain_tests()
             end
             val, grads = withgradient(loss_fn, ps)
             @test isfinite(val)
-            # layer_1 is PhasorResonant; layer_2 / layer_4 are pass-through
-            # functions (no params); layer_3 is SSMSelfAttention; layer_5
-            # is SSMReadout (codes in state, no params either).
             @test all(isfinite, grads[1].layer_1.weight)
-            @test all(isfinite, grads[1].layer_3.weight_q)
+            @test all(isfinite, grads[1].layer_2.weight_q)
         end
     end
 end
