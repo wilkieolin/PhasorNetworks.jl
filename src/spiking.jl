@@ -386,8 +386,10 @@ Expects `params` to contain:
 - `log_neg_lambda` — (out,) log-parameterized decay rates
 - `bias_real`, `bias_imag` — (out,) complex bias (when use_bias=true)
 
-And `state` (or params, when `layer.trainable_omega`) to contain:
-- `omega` — (out,) angular frequencies
+And `state` to contain:
+- `omega` — (out,) angular frequencies (per-channel ω rule: every entry
+  is `2π` for normal phase-locked layers; only `ResonantSTFT` carries
+  a heterogeneous spread).
 """
 function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
     return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args)
@@ -406,7 +408,8 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
 
     function dzdt(u, p, t)
         λ = -exp.(p.log_neg_lambda)
-        ω_val = hasproperty(layer, :trainable_omega) && layer.trainable_omega ? p.omega : state.omega
+        # ω lives in state across all phase-locked layers (per-channel ω rule).
+        ω_val = state.omega
         k = ComplexF32.(λ .+ im .* ω_val)
         I_transformed = p.weight * x.current_fn(t)
         result = k .* u .+ I_transformed

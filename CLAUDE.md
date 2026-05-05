@@ -82,10 +82,35 @@ All layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, state) -
 
 Each layer has per-channel trainable dynamics:
 - `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable, parameterized as `lambda = -exp(log_neg_lambda)`)
-- `omega` — `(out,)` Float32, per-channel angular frequency (trainable or fixed in state)
+- `omega` — `(out,)` Float32, per-channel angular frequency (lives in state; see *Per-channel ω rule* below)
 - `weight` — `(out, in)` Float32, connection weights
 
-Init modes: `:default` (uniform dynamics), `:uniform` (spread omega), `:hippo` (HiPPO-LegS multi-timescale)
+### Per-channel ω rule
+
+The architecture is built on **phase-locked communication**: layer outputs
+encode information as relative phase, and downstream layers compare those
+phases via interference (similarity, binding, bundling). For the
+comparison to be well-defined, every channel within a layer must rotate
+its phasor at the same carrier frequency `ω`. Per-channel ω drift would
+desynchronize the carrier and break HD-VSA invariance.
+
+So in `PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`:
+**`ω` is a single shared scalar (`= 2π`), held in state, identical for
+every channel**. Cross-channel diversity comes from `λ` (multi-timescale
+memory) and from the weight matrix.
+
+The single architectural exception is `ResonantSTFT`, which is explicitly
+a frequency-decomposition front end: it carries per-channel trainable
+ω, then re-encodes its outputs at a single downstream `omega_out` (via
+`_freq_shift`) so subsequent layers resume phase-locked operation.
+
+Init modes for normal layers (`PhasorDense` / `PhasorConv` / `PhasorFixed`):
+- `:default` — `log_neg_lambda = log(0.2)` (single timescale).
+- `:hippo`   — `log_neg_lambda` from log-spaced HiPPO-LegS spectrum
+  (multi-timescale memory).
+
+(`:uniform` was removed — it spread ω across channels, which violates
+the per-channel ω rule.)
 
 ### Data Flow
 

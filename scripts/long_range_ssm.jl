@@ -12,17 +12,22 @@
 # As L grows, the resonator must retain the t=1 impulse without it being
 # washed out by decay.
 #
-# Compares two PhasorResonant initializations:
+# Compares two PhasorResonant configurations. Both run at the same shared
+# carrier ω = 2π (per-channel ω rule — every neuron in a phase-locked
+# layer must share one ω so phases stay commensurable). The contrast is
+# entirely about the layout of the per-channel decay rates λ:
 #
-#   :uniform — ω linearly spread in [0.2, 2.5]; all channels share a
-#              single decay rate (default `log(0.1)` ⇒ λ = −0.1). At
-#              L≫10, exp(λ·L) underflows everywhere — the impulse is
-#              lost. Should perform near-chance.
+#   :flat   — single uniform decay (default `log(0.1)` ⇒ λ = −0.1) across
+#             every channel. Single timescale, single carrier. At L ≫ 10
+#             the impulse from t=1 has decayed past Float32 precision in
+#             every channel, leaving only FFT roundoff for the head to
+#             learn from.
 #
-#   :hippo   — (λ, ω) from `hippo_legs_diagonal(D)`. The HiPPO-LegS
-#              eigenvalue spectrum spans many decades of decay rates;
-#              the slowest channels (|λ| ≪ 1) retain the impulse across
-#              thousands of timesteps. Should learn the task.
+#   :hippo  — λ from log-spaced HiPPO-LegS spectrum (slowest channels
+#             |λ| ≪ 1 retain the impulse across thousands of timesteps;
+#             fastest decay quickly). Multi-timescale memory at the same
+#             shared carrier ω. The slow channels carry the long-range
+#             signal that the head can fit.
 #
 # ---------------------------------------------------------------------
 # Memory characteristics (forward + backward, FFT path, ComplexF32)
@@ -118,23 +123,23 @@ function (l::LastStepDense)(x::AbstractArray{<:Phase, 3}, ps, st)
 end
 
 """
-    build_model(mode, in_dims, D, n_classes; omega_lo, omega_hi)
+    build_model(mode, in_dims, D, n_classes)
 
 Build a Chain `PhasorResonant → LastStepDense` configured for the chosen
-init `mode` (`:uniform` or `:hippo`).
+λ layout (`:flat` or `:hippo`). ω is shared across all channels in both
+modes (per-channel ω rule).
 """
-function build_model(mode::Symbol, in_dims::Int, D::Int, n_classes::Int;
-                     omega_lo::Real = 0.2f0,
-                     omega_hi::Real = 2.5f0)
-    encoder = if mode === :uniform
-        PhasorResonant(in_dims => D; omega_lo = omega_lo, omega_hi = omega_hi)
+function build_model(mode::Symbol, in_dims::Int, D::Int, n_classes::Int)
+    encoder = if mode === :flat
+        # Single uniform λ; default ω = 2π for every channel.
+        PhasorResonant(in_dims => D)
     elseif mode === :hippo
-        λ_h, ω_h = hippo_legs_diagonal(D)
+        # HiPPO-LegS λ spectrum (per-channel multi-timescale); ω stays at 2π.
+        λ_h, _ = hippo_legs_diagonal(D)
         PhasorResonant(in_dims => D;
-                       omega = ω_h,
                        init_log_neg_lambda = log.(-λ_h))
     else
-        error("mode must be :uniform or :hippo, got :$mode")
+        error("mode must be :flat or :hippo, got :$mode")
     end
     return Chain(encoder, LastStepDense(D, n_classes))
 end
@@ -225,7 +230,7 @@ function main(; n_classes::Int = 4,
     @info "task" task = "first-element recall (one-shot impulse at t=1, zero rest)" chance
 
     results = Dict{Symbol, Vector{Float32}}()
-    for mode in (:uniform, :hippo)
+    for mode in (:flat, :hippo)
         @info "training" mode
         model = build_model(mode, 1, D, n_classes)
         ps_cpu, st_cpu = Lux.setup(rng, model)
@@ -247,7 +252,7 @@ function main(; n_classes::Int = 4,
     @info "summary"
     println("  L = $L, D = $D, B = $B, n_classes = $n_classes")
     println("  chance = $(round(chance, digits=3))")
-    for mode in (:uniform, :hippo)
+    for mode in (:flat, :hippo)
         accs = results[mode]
         println("  $(rpad(string(mode), 8)) final test_acc = $(round(accs[end], digits=3))" *
                 "    (per-epoch: $(round.(accs, digits=3)))")

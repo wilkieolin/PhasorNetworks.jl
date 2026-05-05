@@ -323,6 +323,15 @@ Diagonalizing the N×N HiPPO-LegS matrix yields N complex eigenvalues:
 # Returns
 Tuple `(λ, ω)` of Float32 vectors of length N.  Caller must map to the
 log-parameterization (`log_neg_lambda = log.(-λ)`).
+
+!!! note "Per-channel ω rule"
+    The returned `ω` carries a HiPPO-style per-channel frequency spread
+    that is meaningful in *frequency-decomposition* contexts (i.e.
+    [`ResonantSTFT`](@ref)). Phase-locked layers — `PhasorDense`,
+    `PhasorConv`, `PhasorFixed`, `PhasorResonant` — discard it and use
+    a single shared `ω = 2π` so output phases remain commensurable for
+    HD-VSA downstream operations. Only `λ` from this function is used
+    by those layers' `:hippo` init mode.
 """
 function hippo_legs_diagonal(N::Int; clip_decay::Union{Nothing, Real}=nothing)
     if clip_decay === nothing

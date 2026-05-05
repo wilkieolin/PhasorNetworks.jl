@@ -86,7 +86,9 @@ All custom layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, s
 - **SpikingCall** — converts to CurrentCall, delegates
 - **CurrentCall** — continuous ODE `dz/dt = k*z + W*I(t)`, sampled at period boundaries
 
-Per-channel trainable parameters: `log_neg_lambda` (decay), `omega` (angular frequency), `weight` (connections). Init modes: `:default`, `:uniform`, `:hippo` (HiPPO-LegS multi-timescale memory).
+Trainable parameters per layer: `log_neg_lambda` (per-channel decay), `weight` (connections). Init modes: `:default` (single-timescale `λ`) and `:hippo` (HiPPO-LegS multi-timescale `λ` spread).
+
+**Per-channel ω rule:** in normal phase-locked layers (`PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`), `ω` is a single shared scalar (= `2π`) held in state — every channel rotates at the same carrier so that output phases stay commensurable for downstream HD-VSA operations. The single architectural exception is `ResonantSTFT`, which carries per-channel trainable `ω` (frequency decomposition) and re-encodes its outputs at a uniform downstream `omega_out` so subsequent layers resume phase-locked operation.
 
 ## Directory Structure
 

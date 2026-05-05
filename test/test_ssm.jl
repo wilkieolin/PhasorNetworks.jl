@@ -215,7 +215,7 @@ function dirac_discretization_tests()
 
             # SSM-mode layer (init_mode != :default) should use Dirac
             layer_ssm = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                    init_mode=:uniform, use_bias=false)
+                                    init_mode=:default, use_bias=false)
             ps, st = Lux.setup(rng, layer_ssm)
             y_dirac, _ = layer_ssm(phases, ps, st)
             @test size(y_dirac) == (C_out, L, B)
@@ -232,10 +232,11 @@ function dirac_discretization_tests()
 
             # The complex-3D ZOH path now lives in PhasorResonant; verify it
             # produces a same-shape Phase output from the same phase data
-            # lifted to the unit circle.
+            # lifted to the unit circle. Both layers carry a single shared
+            # ω = 2π (per-channel ω rule).
             x_cmpx = angle_to_complex(phases)
             resonant = PhasorResonant(C_in => C_out, normalize_to_unit_circle;
-                                      omega = st.omega,
+                                      omega = st.omega[1],
                                       init_log_neg_lambda = ps.log_neg_lambda[1])
             ps_r, st_r = Lux.setup(rng, resonant)
             y_cmpx, _ = resonant(x_cmpx, ps_r, st_r)
@@ -249,7 +250,7 @@ function dirac_discretization_tests()
             L, B = 8, 3
 
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false)
+                                init_mode=:default, use_bias=false)
             ps, st = Lux.setup(rng, layer)
 
             phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
@@ -309,7 +310,9 @@ function phasor_ssm_layer_tests()
         # Parameter shapes
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
-        @test size(st.omega) == (out_dim,)
+        # Per-channel ω rule: ω is a single scalar shared across channels.
+        @test st.omega isa Real
+        @test st.omega ≈ Float32(2π)
 
         # parameterlength
         @test Lux.parameterlength(layer) == out_dim * in_dim + out_dim
@@ -327,15 +330,20 @@ function phasor_ssm_layer_tests()
         y2, _ = layer(x2, ps, st)
         @test Float32.(y) != Float32.(y2)
 
-        # Custom omega vector (per-channel)
-        ω_custom = collect(range(0.5f0, 3.0f0; length=out_dim))
-        layer_om = PhasorResonant(in_dim => out_dim; omega = ω_custom)
-        @test layer_om.omega ≈ Float32.(ω_custom)
+        # Custom (single) omega — every channel shares the same carrier.
+        layer_om = PhasorResonant(in_dim => out_dim; omega = 1.5f0)
+        @test layer_om.omega ≈ 1.5f0
+        _, st_om = Lux.setup(rng, layer_om)
+        @test st_om.omega ≈ 1.5f0
 
-        # Scalar omega (broadcast)
-        layer_sc = PhasorResonant(in_dim => out_dim; omega = 1.5f0)
-        @test all(layer_sc.omega .≈ 1.5f0)
-        @test length(layer_sc.omega) == out_dim
+        # Default omega is 2π (per-channel ω rule).
+        @test layer.omega ≈ Float32(2π)
+
+        # Per-channel multi-timescale λ via init_log_neg_lambda vector.
+        lnl_vec = collect(range(log(0.01), log(0.5); length=out_dim))
+        layer_mt = PhasorResonant(in_dim => out_dim; init_log_neg_lambda = lnl_vec)
+        ps_mt, _ = Lux.setup(rng, layer_mt)
+        @test all(ps_mt.log_neg_lambda .≈ Float32.(lnl_vec))
     end
 end
 
@@ -421,7 +429,7 @@ function ssm_chain_tests()
         # SSMReadout consumes the phase output directly.
         model = Chain(
             PhasorResonant(C_in => D_hidden),
-            PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+            PhasorDense(D_hidden => D_hidden, identity; init_mode=:default, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
         ps, st = Lux.setup(rng, model)
@@ -496,7 +504,7 @@ function ssm_gpu_tests()
 
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+                PhasorDense(D_hidden => D_hidden, identity; init_mode=:default, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -784,7 +792,7 @@ function ssm_spiking_dispatch_tests()
         sc = SpikingCall(train, spk_args, tspan_spk)
 
         @testset "PhasorDense SSM SpikingCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
             ps, st = Lux.setup(rng, layer)
 
             y, st_new = layer(sc, ps, st)
@@ -795,7 +803,7 @@ function ssm_spiking_dispatch_tests()
         end
 
         @testset "PhasorDense SSM CurrentCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
             ps, st = Lux.setup(rng, layer)
 
             cc = CurrentCall(sc)
@@ -808,7 +816,7 @@ function ssm_spiking_dispatch_tests()
 
         @testset "PhasorDense SSM potential return type" begin
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:potential))
+                                init_mode=:hippo, use_bias=false, return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
             sol, st_new = layer(sc, ps, st)
@@ -821,7 +829,7 @@ function ssm_spiking_dispatch_tests()
 
         @testset "PhasorDense SSM spiking return type" begin
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking))
+                                init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking))
             ps, st = Lux.setup(rng, layer)
 
             result, st_new = layer(sc, ps, st)
@@ -878,7 +886,7 @@ function ssm_spiking_correlation_tests()
         L, B = 8, 3
 
         # Phase-returning layer for both Dirac and spiking comparison
-        layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
+        layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
         ps, st = Lux.setup(rng, layer)
 
         # Random phase input
@@ -931,7 +939,7 @@ function ssm_spiking_chain_tests()
             model = Chain(
                 MakeSpikingSSM(spk_args),
                 PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
-                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
+                            init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -947,7 +955,7 @@ function ssm_spiking_chain_tests()
             model = Chain(
                 MakeSpikingSSM(spk_args),
                 PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
-                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
+                            init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
                 SSMReadout(D_hidden => n_classes),
             )
@@ -1125,7 +1133,7 @@ function phasor_stft_init_kwarg_tests()
         @test all(ps_def.log_neg_lambda .≈ Float32(log(0.1)))
 
         # PhasorDense — overrides per-mode default uniformly.
-        for mode in (:default, :uniform)
+        for mode in (:default, :hippo)
             d = PhasorDense(4 => 4; init_mode=mode, init_log_neg_lambda=target)
             ps_d, _ = Lux.setup(rng, d)
             @test all(ps_d.log_neg_lambda .≈ Float32(target))

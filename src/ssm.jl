@@ -30,14 +30,16 @@ with `init_mode=:uniform` or `init_mode=:hippo`.
 A `PhasorDense` layer configured for SSM use (no bias, uniform/hippo init).
 """
 function PhasorSSM(dims::Pair{Int,Int}, act=normalize_to_unit_circle;
-                   init_omega_range=(0.2f0, 2.5f0), init=:uniform,
+                   init_omega_range=(0.2f0, 2.5f0), init=:default,
                    return_type::SolutionType=SolutionType(:phase))
-    @assert init in (:uniform, :hippo) "init must be :uniform or :hippo"
+    @assert init in (:default, :hippo) "init must be :default or :hippo " *
+        "(:uniform was removed: it spread ω across channels, breaking the per-channel ω rule)"
     Base.depwarn("PhasorSSM is deprecated, use PhasorDense with init_mode instead", :PhasorSSM)
+    # `init_omega_range` is no longer used (per-channel ω rule means ω = 2π
+    # for every channel) but the kwarg is preserved as a no-op for callers
+    # that still pass it.
     return PhasorDense(dims, act;
                        init_mode=init,
-                       omega_lo=Float32(init_omega_range[1]),
-                       omega_hi=Float32(init_omega_range[2]),
                        use_bias=false,
                        return_type=return_type)
 end
@@ -47,9 +49,6 @@ function Lux.parameterlength(l::PhasorDense)
     n = l.out_dims * l.in_dims + l.out_dims  # weight + log_neg_lambda
     if l.use_bias
         n += 2 * l.out_dims  # bias_real + bias_imag
-    end
-    if l.trainable_omega
-        n += l.out_dims
     end
     return n
 end
