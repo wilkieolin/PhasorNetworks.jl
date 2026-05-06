@@ -14,6 +14,7 @@ function vsa_tests()
         test_bundling()
         test_similarity_outer_complex_cpu_shape()
         test_similarity_outer_rrule()
+        test_similarity_outer_fused_precision()
         test_angle_to_complex_rrule()
     end
 end
@@ -227,6 +228,43 @@ function test_similarity_outer_rrule()
             A, B)
         @test maximum(abs.(gA .- dA)) < 1f-5
         @test maximum(abs.(gB .- dB)) < 1f-5
+    end
+end
+
+"""
+Precision check for the fused (D,M,N,X)-free forward of
+`_similarity_outer_canonical_complex` at a non-trivial size, against
+both a scalar reference and unit-modulus inputs (the production case).
+Catches any precision regression from re-associating the sum.
+"""
+function test_similarity_outer_fused_precision()
+    @testset "similarity_outer fused-forward precision" begin
+        rng = Xoshiro(7)
+
+        # General complex inputs at moderate D.
+        D, M, N, X = 64, 32, 24, 4
+        A = ComplexF32.(randn(rng, ComplexF64, D, M, X))
+        B = ComplexF32.(randn(rng, ComplexF64, D, N, X))
+        out = PhasorNetworks._similarity_outer_canonical_complex(A, B)
+        ref = zeros(Float32, M, N, X)
+        invD = inv(Float32(D))
+        for x in 1:X, n in 1:N, m in 1:M, d in 1:D
+            ref[m, n, x] += invD * (0.5f0 * abs2(A[d, m, x] + B[d, n, x]) - 1f0)
+        end
+        @test maximum(abs.(out .- ref)) < 5f-5
+
+        # Production case: unit-modulus inputs (output of angle_to_complex).
+        # Here |A|² = |B|² = 1 exactly, so the only roundoff is in cross.
+        ph_a = Float32.(2 .* rand(rng, Float32, D, M, X) .- 1)
+        ph_b = Float32.(2 .* rand(rng, Float32, D, N, X) .- 1)
+        Au = angle_to_complex(ph_a)
+        Bu = angle_to_complex(ph_b)
+        outu = PhasorNetworks._similarity_outer_canonical_complex(Au, Bu)
+        refu = zeros(Float32, M, N, X)
+        for x in 1:X, n in 1:N, m in 1:M, d in 1:D
+            refu[m, n, x] += invD * (0.5f0 * abs2(Au[d, m, x] + Bu[d, n, x]) - 1f0)
+        end
+        @test maximum(abs.(outu .- refu)) < 5f-6
     end
 end
 

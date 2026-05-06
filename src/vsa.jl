@@ -536,6 +536,27 @@ The clamp `max(|A+B|², 4)` from the original GPU formulation is dropped
 because every production caller passes unit-modulus inputs (output of
 `angle_to_complex`), for which `|A+B|² ≤ 4` holds exactly. Removing it
 preserves the bilinear structure required for a closed-form backward.
+
+# Memory layout
+
+The defining sum is decomposed before any `(D, M, N, X)` tensor is
+materialized:
+
+    ½|A_d+B_d|² − 1
+       = ½(|A_d|² + |B_d|²) + (Ar_d Br_d + Ai_d Bi_d) − 1
+
+Summing over `d`:
+
+    sim[m,n,x] = (1/D) [ ½·a2[m,x] + ½·b2[n,x] + cross[m,n,x] ] − 1
+
+with `a2 = Σ_d |A|²` shape `(M, X)`, `b2 = Σ_d |B|²` shape `(N, X)`, and
+`cross = Σ_d (Ar Br + Ai Bi)` shape `(M, N, X)` computed as two batched
+real GEMMs via `NNlib.batched_mul`. Forward peak transient is
+`O(D·max(M,N)·X + M·N·X)` instead of `O(D·M·N·X)`. At
+`D=64, M=N=784, X=32` this drops the broadcast-time peak from ~19 GiB
+to ~270 MiB (≈ 70× reduction), which matters for end-to-end attention on
+long sequences. The closed-form rrule below remains correct since it is
+derived from the math, not the implementation.
 """
 function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
                                              B::AbstractArray{ComplexF32,3})
@@ -545,16 +566,17 @@ function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
     @assert size(B, 3) == X "batch dim mismatch: size(A,3)=$X vs size(B,3)=$(size(B,3))"
     invD = inv(Float32(D))
 
-    A4 = reshape(A, D, M, 1, X)
-    B4 = reshape(B, D, 1, N, X)
+    Ar = real.(A); Ai = imag.(A)        # (D, M, X) Float32 each
+    Br = real.(B); Bi = imag.(B)        # (D, N, X) Float32 each
 
-    sr = real.(A4) .+ real.(B4)
-    si = imag.(A4) .+ imag.(B4)
-    sq = sr .^ 2 .+ si .^ 2
-    sim_per_d = 0.5f0 .* sq .- 1.0f0
+    a2 = reshape(sum(Ar .^ 2 .+ Ai .^ 2; dims=1), M, 1, X)   # (M, 1, X)
+    b2 = reshape(sum(Br .^ 2 .+ Bi .^ 2; dims=1), 1, N, X)   # (1, N, X)
 
-    sim = dropdims(sum(sim_per_d, dims=1), dims=1) .* invD
-    return sim
+    Ar_T = permutedims(Ar, (2, 1, 3))   # (M, D, X)
+    Ai_T = permutedims(Ai, (2, 1, 3))   # (M, D, X)
+    cross = batched_mul(Ar_T, Br) .+ batched_mul(Ai_T, Bi)   # (M, N, X)
+
+    return invD .* (0.5f0 .* (a2 .+ b2) .+ cross) .- 1.0f0
 end
 
 """
