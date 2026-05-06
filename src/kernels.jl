@@ -226,6 +226,82 @@ function dirac_encode(phases::AbstractArray{<:Real, 3},
 end
 
 """
+    _exp_kdt(k, dt) -> exp.(k .* dt)
+
+Element-wise `exp(k * dt)` with broadcasted shapes — used inside
+`causal_conv_dirac`'s per-group encoding. Behaviorally identical to
+`exp.(k .* dt)`, but the closed-form `rrule` below bypasses Zygote's
+generic `broadcast_forward` adjoint, which lifts each output to
+`Complex{ForwardDiff.Dual{Float32, 2}}` (24 bytes/element) and balloons
+the saved tape ~3× over `ComplexF32` (8 bytes/element). At
+`(C_out=64, C_in=64, L=784, B=64)` with the default `group_size=8`,
+this saves ~10 GiB across the 3 Q/K/V Phase-3D PhasorDense layers in
+SSMSelfAttention.
+
+`k` may be complex or real; `dt` is real. Result is complex when `k` is
+complex.
+"""
+_exp_kdt(k::AbstractArray, dt::AbstractArray) = exp.(k .* dt)
+
+"""
+    rrule(_exp_kdt, k, dt)
+
+Closed-form pullback for `enc = exp.(k .* dt)`:
+
+    ∂enc[i,j,k] / ∂k[i]      = dt[j,k] * enc[i,j,k]
+    ∂enc[i,j,k] / ∂dt[j,k]   = k[i]    * enc[i,j,k]
+
+For complex output cotangent `ḡ`, using ChainRules conventions
+(holomorphic in `k`, real-input projection for `dt`):
+
+    k̄[i]      = Σ_jk dt[j,k] · conj(enc[i,j,k]) · ḡ[i,j,k]
+    dt̄[j,k]   = Re( Σ_i conj(k[i]) · conj(enc[i,j,k]) · ḡ[i,j,k] )
+
+Sums are taken over whichever broadcast axes `k` and `dt` were spread
+across, so the returned cotangents match each input's original shape.
+The only `(g, C_in, L*B)` tensor saved on the tape is `enc` itself
+(ComplexF32, not Dual), giving the 3× memory reduction.
+"""
+function ChainRulesCore.rrule(::typeof(_exp_kdt),
+                              k::AbstractArray, dt::AbstractArray)
+    enc = _exp_kdt(k, dt)
+    function _exp_kdt_pullback(ḡ_)
+        ḡ = unthunk(ḡ_)
+        # Common factor: ḡ * conj(enc) (same shape as enc)
+        contrib = ḡ .* conj.(enc)
+
+        # k̄: sum over dims where k was broadcasted (i.e. dims of size 1 in k)
+        k_grad_full = contrib .* dt
+        k_grad = _sum_broadcast_dims(k_grad_full, size(k))
+
+        # dt̄: sum over dims where dt was broadcasted, then take real
+        dt_grad_full = real.(conj.(k) .* contrib)
+        dt_grad = _sum_broadcast_dims(dt_grad_full, size(dt))
+
+        return (NoTangent(), k_grad, dt_grad)
+    end
+    return enc, _exp_kdt_pullback
+end
+
+"""
+    _sum_broadcast_dims(x, target_shape) -> Array
+
+Sum `x` over every axis where `target_shape` has size 1 but `x` has size
+> 1. The returned array has `ndims(x)` dims (singleton along reduced
+axes), then is reshaped to `target_shape`. Used by the `_exp_kdt`
+pullback to collapse broadcasted axes back to each input's shape.
+"""
+function _sum_broadcast_dims(x::AbstractArray, target_shape::NTuple{N,Int}) where {N}
+    @assert ndims(x) == N "ndims mismatch: $(ndims(x)) vs target $N"
+    reduce_dims = ntuple(i -> size(x, i) != target_shape[i], N)
+    if any(reduce_dims)
+        dims_to_sum = Tuple(i for i in 1:N if reduce_dims[i])
+        x = sum(x; dims=dims_to_sum)
+    end
+    return reshape(x, target_shape)
+end
+
+"""
     causal_conv_dirac(phases, W, λ, ω, T) -> ComplexF32 (C_out × L × B)
 
 Causal convolution with Dirac discretization for phase-valued inputs.
@@ -280,7 +356,7 @@ function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
     H_slices = map(1:G:C_out) do c_start
         c_end = min(c_start + G - 1, C_out)
         k_group = reshape(k_c[c_start:c_end], :, 1, 1)     # (g, 1, 1)
-        enc = exp.(k_group .* dt_flat)                       # (g, C_in, L*B)
+        enc = _exp_kdt(k_group, dt_flat)                     # (g, C_in, L*B); custom rrule avoids Dual blowup
         w_group = reshape(W_c[c_start:c_end, :], :, C_in, 1) # (g, C_in, 1)
         h = sum(w_group .* enc; dims=2)                      # (g, 1, L*B)
         reshape(dropdims(h; dims=2), :, L, B)                # (g, L, B)

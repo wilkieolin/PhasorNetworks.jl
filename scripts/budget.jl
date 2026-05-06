@@ -45,8 +45,12 @@ const MIB        = 2^20
 # more conservative budget for *new* allocations on top of whatever the
 # REPL / driver / OS already holds.
 const TOTAL_UNIFIED_GIB    = 121.0f0
-const SAFE_PEAK_GIB        = 40.0f0   # comfortable: leaves ~80 GiB slack
-const MARGINAL_PEAK_GIB    = 70.0f0   # tight: leaves ~50 GiB slack
+# SAFE = comfortable: model prediction has ≥30% headroom against the hard
+# cap we'd set, so transient pool growth doesn't OOM. After the D=96,B=64
+# calibration point, "model says X" means "needs at least X" — never set
+# the hard cap right at X.
+const SAFE_PEAK_GIB        = 30.0f0
+const MARGINAL_PEAK_GIB    = 60.0f0
 # Above MARGINAL_PEAK_GIB → RISKY (don't launch without watchdog).
 
 # Causal-conv-dirac default group_size from src/kernels.jl:260.
@@ -66,10 +70,17 @@ const FFT_CONV_MULT = 5
 const BACKWARD_FACTOR = 1.6f0
 
 # Allocator + gradient-buffer slack on top of the modelled tensor live set.
-# Covers: CUDA allocator pool caching freed blocks, GC lag between batches
-# (often two batch-steps worth of intermediates alive simultaneously),
-# MLDatasets / Lux compile-time intermediates, and per-batch CPU→GPU
-# copies that haven't been reclaimed yet.
+# Covers: CUDA allocator pool caching freed blocks (the pool grows to
+# the worst-case peak across all training steps and doesn't release to
+# system between batches), GC lag between batches, MLDatasets / Lux
+# compile-time intermediates, and per-batch CPU→GPU copies.
+#
+# Originally bumped to 1.80 to absorb a then-unmodelled 3× Dual-number
+# blowup in causal_conv_dirac's `enc = exp.(k * dt)` broadcast (Zygote
+# fell back to broadcast_forward, which lifts each element to
+# Complex{ForwardDiff.Dual{Float32,2}} — 24 bytes vs 8). That is now
+# fixed in src/kernels.jl by a closed-form rrule on `_exp_kdt`, so the
+# saved tape is back to ComplexF32 and 1.50 once again sufficies.
 const SLACK_FACTOR = 1.50f0
 
 # ---------------------------------------------------------------------
