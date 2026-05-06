@@ -127,15 +127,24 @@ function (l::LastStepDense)(x::AbstractArray{<:Phase, 3}, ps, st)
 end
 
 """
-    build_sfmnist_model(mode, D)
+    build_sfmnist_model(mode, D; L=784, use_attention=false)
 
-Build `Chain(PhasorResonant(1 => D), LastStepDense(D, 10))` for the
-chosen λ layout (`:flat` or `:hippo`). Both share ω = 2π.
+Build a chain `PhasorResonant → [SSMSelfAttention] → LastStepDense` for
+the chosen λ layout (`:flat` or `:hippo`). Both share ω = 2π.
 
 `init_log_neg_lambda` is chosen so the slowest channel survives the
 full 784-step sequence (`λ_min · 784 > log(eps(Float32)) ≈ −87`).
+
+When `use_attention = true`, an `SSMSelfAttention(D => D)` layer sits
+between the encoder and the readout — adds a phase-domain mixing step
+across the L=784 timesteps before the final-step pooling. After the
+attention-layer refactor, this layer wraps `SingleHeadAttention` with
+`PhasorDense` Q/K/V projections; the chain stays in the phase domain
+end-to-end.
 """
-function build_sfmnist_model(mode::Symbol, D::Int; L::Int = 784)
+function build_sfmnist_model(mode::Symbol, D::Int;
+                              L::Int = 784,
+                              use_attention::Bool = false)
     encoder = if mode === :flat
         # Single timescale tuned to retain the impulse over L steps.
         # α = 5/L gives exp(−5) ≈ 0.0067 retention at the readout.
@@ -156,7 +165,13 @@ function build_sfmnist_model(mode::Symbol, D::Int; L::Int = 784)
     else
         error("mode must be :flat or :hippo, got :$mode")
     end
-    return Chain(encoder, LastStepDense(D, 10))
+    if use_attention
+        return Chain(encoder,
+                     SSMSelfAttention(D => D, normalize_to_unit_circle),
+                     LastStepDense(D, 10))
+    else
+        return Chain(encoder, LastStepDense(D, 10))
+    end
 end
 
 # ---------------------------------------------------------------------
@@ -220,12 +235,13 @@ function main_sfmnist(; D::Int        = 128,
                        lr::Real      = 3f-3,
                        n_train::Int  = 10_000,
                        n_test::Int   = 2_000,
+                       use_attention::Bool = false,
                        use_cuda::Bool = true,
                        seed::Int     = 0)
     rng  = Xoshiro(seed)
     gdev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
 
-    @info "config" D B n_epochs lr n_train n_test device = string(gdev)
+    @info "config" D B n_epochs lr n_train n_test use_attention device = string(gdev)
 
     @info "loading FashionMNIST..."
     (Xtr, ytr), (Xte, yte) = load_fashionmnist(; n_train, n_test)
@@ -236,7 +252,7 @@ function main_sfmnist(; D::Int        = 128,
     results = Dict{Symbol, Vector{Float32}}()
     for mode in (:flat, :hippo)
         @info "training" mode
-        model = build_sfmnist_model(mode, D)
+        model = build_sfmnist_model(mode, D; use_attention = use_attention)
         ps_cpu, st_cpu = Lux.setup(rng, model)
         ps = ps_cpu |> gdev
         st = st_cpu |> gdev
