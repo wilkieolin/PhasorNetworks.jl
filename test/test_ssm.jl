@@ -561,54 +561,63 @@ function ssm_cross_attention_tests()
         layer = SSMCrossAttention(C_in => d_model, n_keys)
         ps, st = Lux.setup(rng, layer)
 
-        @testset "parameter shapes" begin
-            @test size(ps.weight_q) == (d_model, C_in)
-            @test size(ps.weight_v) == (d_model, C_in)
+        @testset "parameter structure (PhasorDense q/v projections + stored keys)" begin
+            # q_proj / v_proj are PhasorDense layers (use_bias=false), so each
+            # parameter tree has weight (d_model, C_in) + log_neg_lambda (d_model,).
+            @test size(ps.q_proj.weight) == (d_model, C_in)
+            @test size(ps.q_proj.log_neg_lambda) == (d_model,)
+            @test size(ps.v_proj.weight) == (d_model, C_in)
+            @test size(ps.v_proj.log_neg_lambda) == (d_model,)
             @test size(ps.keys) == (d_model, n_keys)
             @test length(ps.scale) == 1
         end
 
-        @testset "output shape and finiteness" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, st_new = layer(x, ps, st)
+        @testset "Phase 3D forward (primary path)" begin
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            y, _ = layer(x, ps, st)
+            @test size(y) == (d_model, n_keys, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
 
+        @testset "Complex 3D forward (back-compat trampoline)" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, _ = layer(x, ps, st)
             @test size(y) == (d_model, n_keys, B)
             @test eltype(y) <: Complex
             @test all(isfinite, y)
-        end
-
-        @testset "unit circle normalization" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, _ = layer(x, ps, st)
-            mags = abs.(y)
-            @test all(abs.(mags .- 1f0) .< 0.1f0)
+            # angle_to_complex output is unit modulus.
+            @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
         end
 
         @testset "different inputs produce different outputs" begin
-            x1 = randn(rng, ComplexF32, C_in, L, B)
-            x2 = randn(rng, ComplexF32, C_in, L, B)
+            x1 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            x2 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
-            @test y1 != y2
+            @test Float32.(y1) != Float32.(y2)
         end
 
         @testset "gradient computation" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             loss_fn = ps -> begin
                 y, _ = layer(x, ps, st)
-                sum(abs2.(y))
+                sum(abs2.(Float32.(y)))
             end
             val, grads = withgradient(loss_fn, ps)
             g = grads[1]
             @test isfinite(val)
-            @test all(isfinite, g.weight_q)
-            @test all(isfinite, g.weight_v)
+            @test all(isfinite, g.q_proj.weight)
+            @test all(isfinite, g.q_proj.log_neg_lambda)
+            @test all(isfinite, g.v_proj.weight)
+            @test all(isfinite, g.v_proj.log_neg_lambda)
             @test all(isfinite, g.keys)
             @test all(isfinite, g.scale)
         end
 
         @testset "parameterlength" begin
-            expected = d_model * C_in * 2 + d_model * n_keys + 1
+            # 2 PhasorDense layers (each: d_model*C_in + d_model) + keys + scale.
+            expected = 2 * (d_model * C_in + d_model) + d_model * n_keys + 1
             @test Lux.parameterlength(layer) == expected
         end
     end
@@ -623,54 +632,63 @@ function ssm_self_attention_tests()
         layer = SSMSelfAttention(C_in => d_model)
         ps, st = Lux.setup(rng, layer)
 
-        @testset "parameter shapes" begin
-            @test size(ps.weight_q) == (d_model, C_in)
-            @test size(ps.weight_k) == (d_model, C_in)
-            @test size(ps.weight_v) == (d_model, C_in)
-            @test length(ps.scale) == 1
+        @testset "parameter structure (SingleHeadAttention internals)" begin
+            # Inner SingleHeadAttention container holds q/k/v PhasorDense
+            # projections, the PhasorAttention scale, and an identity out_proj.
+            @test haskey(ps, :inner)
+            @test haskey(ps.inner, :q_proj)
+            @test haskey(ps.inner, :k_proj)
+            @test haskey(ps.inner, :v_proj)
+            @test haskey(ps.inner, :attention)
+            @test size(ps.inner.q_proj.weight) == (d_model, C_in)
+            @test size(ps.inner.k_proj.weight) == (d_model, C_in)
+            @test size(ps.inner.v_proj.weight) == (d_model, C_in)
+            @test length(ps.inner.attention.scale) == 1
         end
 
-        @testset "output shape preserves temporal dim" begin
+        @testset "Phase 3D forward (primary path)" begin
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            y, _ = layer(x, ps, st)
+            @test size(y) == (d_model, L, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
+
+        @testset "Complex 3D forward (back-compat trampoline)" begin
             x = randn(rng, ComplexF32, C_in, L, B)
             y, _ = layer(x, ps, st)
-
             @test size(y) == (d_model, L, B)
             @test eltype(y) <: Complex
             @test all(isfinite, y)
-        end
-
-        @testset "unit circle normalization" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, _ = layer(x, ps, st)
-            mags = abs.(y)
-            @test all(abs.(mags .- 1f0) .< 0.1f0)
+            @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
         end
 
         @testset "different inputs produce different outputs" begin
-            x1 = randn(rng, ComplexF32, C_in, L, B)
-            x2 = randn(rng, ComplexF32, C_in, L, B)
+            x1 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            x2 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
-            @test y1 != y2
+            @test Float32.(y1) != Float32.(y2)
         end
 
         @testset "gradient computation" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             loss_fn = ps -> begin
                 y, _ = layer(x, ps, st)
-                sum(abs2.(y))
+                sum(abs2.(Float32.(y)))
             end
             val, grads = withgradient(loss_fn, ps)
             g = grads[1]
             @test isfinite(val)
-            @test all(isfinite, g.weight_q)
-            @test all(isfinite, g.weight_k)
-            @test all(isfinite, g.weight_v)
-            @test all(isfinite, g.scale)
+            @test all(isfinite, g.inner.q_proj.weight)
+            @test all(isfinite, g.inner.k_proj.weight)
+            @test all(isfinite, g.inner.v_proj.weight)
+            @test all(isfinite, g.inner.attention.scale)
         end
 
         @testset "parameterlength" begin
-            expected = d_model * C_in * 3 + 1
+            # 3 PhasorDense layers (each: d_model*C_in + d_model) + scale.
+            expected = 3 * (d_model * C_in + d_model) + 1
             @test Lux.parameterlength(layer) == expected
         end
     end
@@ -731,7 +749,9 @@ function ssm_attention_chain_tests()
             val, grads = withgradient(loss_fn, ps)
             @test isfinite(val)
             @test all(isfinite, grads[1].layer_1.weight)
-            @test all(isfinite, grads[1].layer_2.weight_q)
+            # SSMSelfAttention now wraps a SingleHeadAttention; q_proj is a
+            # PhasorDense whose weight lives at layer_2.inner.q_proj.weight.
+            @test all(isfinite, grads[1].layer_2.inner.q_proj.weight)
         end
     end
 end
