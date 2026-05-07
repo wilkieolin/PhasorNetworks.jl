@@ -1,39 +1,44 @@
 #!/usr/bin/env julia
 #
-# scripts/sfmnist.jl  —  sequential FashionMNIST benchmark for PhasorResonant
+# scripts/sfmnist.jl  —  sequential FashionMNIST benchmark for phasor SSMs
 #
 # Each 28×28 image is read pixel-by-pixel in row-major order, giving a
-# length-784 sequence of complex unit-modulus phasors:
+# length-784 sequence. The model must classify the image based on the
+# state at the final timestep.
 #
-#     pixel value v ∈ [0, 1]   →   phase = 2v − 1   →   exp(iπ · phase)
+# Two encoder front-ends:
+#   :phase  (default) — pixel v ∈ [0,1] → Phase v/2 ∈ [0, 0.5] → PhasorDense
+#                       Dirac SSM. Treats pixels as spike-time arrivals.
+#                       Outperformed :zoh in the May-2026 ablation.
+#   :zoh              — pixel v → exp(iπ·(2v-1)) → PhasorResonant ZOH SSM.
 #
-# The model must classify the image based on the resonator state at the
-# end of the sequence. This is the canonical "sequential MNIST"
-# benchmark adapted to FashionMNIST (slightly harder, 10 classes, more
-# texture).
+# Two λ initialization modes (shared carrier ω = 2π per the per-channel ω rule):
+#   :flat   — single uniform decay across all D channels (`α = 5/L`).
+#   :hippo  — log-spaced HiPPO-LegS λ spectrum across D channels, rescaled
+#             so slowest channel α_min = 1/L survives 784 steps.
 #
-# Compares two PhasorResonant configurations — both at shared carrier
-# ω = 2π (per-channel ω rule):
-#
-#   :flat   — single uniform decay across all D channels.
-#   :hippo  — log-spaced HiPPO-LegS λ spectrum across D channels;
-#             slowest channel retains early pixels, fast channels
-#             integrate recent context.
-#
-# Both modes scale `init_log_neg_lambda` so the slowest channel actually
-# survives 784 timesteps (default `λ = -0.1` underflows past L≈870 in
-# Float32 — see the long_range_ssm.jl notes for the underflow analysis).
+# Optional Hopfield-style attractor mid-layer (use_attractor=true):
+#   AttractorPhasorSSM(D=>D, n_codes) sits between encoder and readout. Each
+#   timestep of the encoder's phase output is mixed by a linear SSM step
+#   and then nudged toward the nearest of n_codes learnable code prototypes
+#   via softmax-weighted retrieval. Replaces a previous SSMSelfAttention
+#   experiment (transformer-style attention) that suffered score collapse
+#   in this regime — the recurrent attractor formulation preserves phase
+#   semantics and adds content-addressable persistence inside the SSM.
 #
 # ---------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------
-#   julia --project=scripts scripts/sfmnist.jl                 # default config
-#   julia --project=scripts -e 'include("scripts/sfmnist.jl"); main_sfmnist(D=128, n_epochs=10)'
+#   julia --project=scripts scripts/sfmnist.jl                                         # default config
+#   julia --project=scripts -e 'include("scripts/sfmnist.jl"); main_sfmnist(use_attractor=true, track_attractor=true)'
 #
 # First-time setup of the scripts environment:
 #   julia --project=scripts -e 'using Pkg; Pkg.instantiate()'
 #
-# Memory: D=64, B=64 ≈ 0.7 GiB peak GPU; D=128, B=64 ≈ 2.7 GiB.
+# Memory (rough, GPU): no-attractor D=96, B=64 ≈ 1 GiB peak; with attractor
+# D=96, B=16 ≈ 8 GiB peak (the per-step Dirac kick `enc :: (D, D, B)` is
+# pinned across all L=784 timesteps in the recurrent loop). For larger B
+# the attractor-mid-layer needs gradient checkpointing — TODO.
 
 using PhasorNetworks, Lux, Zygote, Optimisers, CUDA, LuxCUDA
 using MLDatasets: FashionMNIST
@@ -185,48 +190,57 @@ function _encoder_lnl(mode::Symbol, D::Int; L::Int = 784)
 end
 
 """
-    build_sfmnist_model(mode, D; L=784, use_attention=false,
-                         encoding=:zoh, init_scale=3f0)
+    build_sfmnist_model(mode, D; L=784, use_attractor=false,
+                         encoding=:phase, n_codes=10,
+                         attractor_log_neg_lambda=log(0.1))
 
-Build a chain `Encoder → [SSMSelfAttention] → LastStepDense` for the
+Build a chain `Encoder → [AttractorPhasorSSM] → LastStepDense` for the
 chosen λ layout (`:flat` or `:hippo`). All layers share ω = 2π.
 
 `encoding` selects the input front-end:
 - `:zoh`   — pixel `v ∈ [0,1]` → `exp(iπ·(2v-1))` complex sample, then
-  `PhasorResonant(1 => D)` does ZOH SSM. (Original baseline.)
-- `:phase` — pixel `v` → Phase `v/2 ∈ [0, 0.5]` directly, then
-  `PhasorDense(1 => D)` integrates as a Dirac SSM (no separate
-  encoder layer; uses `causal_conv_dirac` internally). Cheaper and
-  treats the pixel sequence as spike-time arrivals into a single
-  learnable SSM bank.
+  `PhasorResonant(1 => D)` does ZOH SSM.
+- `:phase` (default) — pixel `v` → Phase `v/2 ∈ [0, 0.5]` directly,
+  then `PhasorDense(1 => D)` integrates as a Dirac SSM (no separate
+  encoder layer; treats the pixel sequence as spike-time arrivals
+  into a single learnable SSM bank). Phase encoding consistently
+  outperformed ZOH in the May-2026 ablation (hippo final test_acc
+  0.347 vs 0.328 with much faster loss decay).
 
-`init_scale` controls `score_scale` inside the optional
-`SSMSelfAttention(D => D)` block: `exp(scale · sim)/d_k` where
-`sim ∈ [-1, 1]` is the normalized phasor interference. Too low ⇒
-all queries weight all keys nearly the same (no selection). Too
-high ⇒ a tiny similarity gap dominates the output. Defaults to 3,
-which previously worked better than 1 in this regime — track scores
-during training to verify.
+`use_attractor = true` inserts an `AttractorPhasorSSM(D => D, n_codes)`
+between encoder and readout. Each timestep of the encoder's phase
+output is mixed by the linear SSM half then nudged toward the nearest
+of `n_codes` learnable phasor codes via a Hopfield-style soft retrieval
+(the pull strength α and softmax sharpness β are also trainable). This
+provides selective, content-addressable persistence — the network can
+learn to lock the state onto code prototypes that correspond to class
+features rather than relying solely on the linear decay kernel. With
+`use_attractor = false` the chain is `Encoder → LastStepDense` only.
+
+`attractor_log_neg_lambda` sets the mid-layer's per-channel decay rate
+(default `log(0.1)` = α=0.1, mild). The mid-layer doesn't need the
+slow `1/L` decay the encoder uses — it's processing the encoder's
+already-time-integrated output.
 """
 function build_sfmnist_model(mode::Symbol, D::Int;
                               L::Int = 784,
-                              use_attention::Bool = false,
-                              encoding::Symbol = :zoh,
-                              init_scale::Real = 3f0)
+                              use_attractor::Bool = false,
+                              encoding::Symbol = :phase,
+                              n_codes::Int = 10,
+                              attractor_log_neg_lambda::Real = log(0.1))
     lnl = _encoder_lnl(mode, D; L = L)
     encoder = if encoding === :zoh
         PhasorResonant(1 => D; init_log_neg_lambda = lnl)
     elseif encoding === :phase
-        # init_mode is irrelevant when init_log_neg_lambda is supplied
-        # (it overrides the mode default).
         PhasorDense(1 => D; init_log_neg_lambda = lnl)
     else
         error("encoding must be :zoh or :phase, got :$encoding")
     end
-    if use_attention
+    if use_attractor
         return Chain(encoder,
-                     SSMSelfAttention(D => D, normalize_to_unit_circle;
-                                      init_scale = init_scale),
+                     AttractorPhasorSSM(D => D, n_codes;
+                                         init_log_neg_lambda = attractor_log_neg_lambda,
+                                         trainable_codes = true),
                      LastStepDense(D, 10))
     else
         return Chain(encoder, LastStepDense(D, 10))
@@ -234,78 +248,66 @@ function build_sfmnist_model(mode::Symbol, D::Int;
 end
 
 # ---------------------------------------------------------------------
-# Diagnostics: attention score statistics
+# Diagnostics: attractor code utilization
 # ---------------------------------------------------------------------
 
 """
-    attention_score_stats(model, ps, st, x_batch) -> NamedTuple
+    attractor_diagnostics(model, ps, st, x_batch) -> NamedTuple
 
-Snapshot the SSMSelfAttention block's score statistics on a single
-batch. Reaches into `model.layers[2].inner` (`SingleHeadAttention`),
-manually replays Q/K projections, computes the raw similarity tensor
-`(L_q, L_k, B)` and the post-`score_scale` weights, and returns
-summary statistics — used to detect score collapse during training.
+Snapshot the AttractorPhasorSSM mid-layer's behavior on a held-out
+batch. Runs the encoder forward, then *manually* runs the attractor
+mid-layer to inspect:
 
-Returns:
-- `raw_*`  — stats over the raw `similarity_outer` output (∈ ≈ [-1, 1]).
-- `scaled_*` — stats over `exp(scale * sim) / d_k`.
-- `per_query_std` — mean std-across-keys per query timestep. If this
-  is near 0, every query is treating every key the same: collapse.
-- `effective_keys` — `exp(H)` where `H = -Σ p log p` is the entropy of
-  the per-query softmax-normalized scores; values close to `L_k`
-  indicate uniform attention, values close to 1 indicate single-key
-  selection.
+- `mean_max_sim` — average (over batch × timesteps) of each state's
+  highest similarity to any code. Higher ⇒ states are concentrated near
+  codes. Random-output baseline ≈ 0.0; perfect lock-on = 1.0.
+- `effective_codes` — `exp(H)` where `H` is the entropy of code-utilization
+  across the batch's final-timestep states. Values near `n_codes` ⇒
+  every code gets used; values near 1 ⇒ only one code wins everything
+  (mode collapse). For a class-balanced batch we'd want this near
+  `n_codes` (or `min(n_codes, n_classes)`).
+- `alpha`, `beta` — current pull strength and softmax sharpness.
 """
-function attention_score_stats(model, ps, st, x_b)
-    @assert length(model.layers) >= 2 "model must include encoder + attention layer"
+function attractor_diagnostics(model, ps, st, x_b)
+    @assert length(model.layers) >= 2 "model must include encoder + attractor"
     enc = model.layers[1]
     att = model.layers[2]
-    @assert att isa SSMSelfAttention "layer 2 must be SSMSelfAttention; got $(typeof(att))"
+    @assert att isa AttractorPhasorSSM "layer 2 must be AttractorPhasorSSM; got $(typeof(att))"
 
-    # Run encoder forward (no AD) to get phase tensor going into attention.
-    enc_out, _ = enc(x_b, ps.layer_1, st.layer_1)
+    enc_out, _ = enc(x_b, ps.layer_1, st.layer_1)        # (D, L, B) Phase
+    out, _     = att(enc_out, ps.layer_2, st.layer_2)    # (D, L, B) Phase
 
-    # Reach into the SingleHeadAttention container for q/k/v projections.
-    inner = att.inner
-    inner_ps = ps.layer_2.inner
-    inner_st = st.layer_2.inner
-    q, _ = inner.q_proj(enc_out, inner_ps.q_proj, inner_st.q_proj)
-    k, _ = inner.k_proj(enc_out, inner_ps.k_proj, inner_st.k_proj)
+    codes_phase = att.trainable_codes ? ps.layer_2.codes : st.layer_2.codes
+    codes_h     = Array(codes_phase)                      # (D, K) Phase on host
+    out_h       = Array(out)                              # (D, L, B) Phase on host
 
-    # Raw similarity (Real) and post-scale weights.
-    # Keep scale on the same device as raw (broadcasting CPU array against
-    # CuArray triggers a non-bitstype kernel error); only move final
-    # tensors to host for stat computation.
-    raw_dev    = PhasorNetworks.similarity_outer(q, k, dims = 2)            # (L_q, L_k, B)
-    scale_dev  = inner_ps.attention.scale                                    # length 1, on device
-    scaled_dev = exp.(scale_dev .* raw_dev) ./ Float32(size(raw_dev, 1))     # same shape
+    D, L, B = size(out_h)
+    K       = size(codes_h, 2)
 
-    raw_h    = Array(raw_dev)
-    sc_h     = Array(scaled_dev)
-    scale_h  = Array(scale_dev)
+    # Flatten time × batch into a single "sample" axis for stats.
+    states = reshape(out_h, D, L * B)                     # (D, L*B) Phase
+    sims   = similarity_outer(states, codes_h; dims = 2)  # (K, L*B) Real
+    max_sim = vec(maximum(sims; dims = 1))                # (L*B,)
+    mean_max_sim = mean(max_sim)
 
-    # per-query std across keys (averaged over batch)
-    per_q_std = mean(std(raw_h; dims = 2))
+    # Code utilization on FINAL timestep only (this is what readout sees).
+    final_states = out_h[:, end, :]                       # (D, B)
+    final_sims   = similarity_outer(final_states, codes_h; dims = 2)  # (K, B)
+    winners      = vec(getindex.(argmax(final_sims; dims = 1), 1))    # (B,)
+    counts       = [count(==(k), winners) for k in 1:K]
+    p            = counts ./ B
+    p_safe       = filter(>(0), p)
+    H_codes      = -sum(pi -> pi * log(pi), p_safe; init = 0.0)
+    eff_codes    = exp(H_codes)
 
-    # Effective number of keys per query via softmax entropy.
-    # softmax across the key axis (dim=2): P[q,k,b] = exp(raw)/Σ_k exp(raw)
-    # Use raw (not scaled) to avoid double-scaling — this measures
-    # selectivity intrinsic to the projection geometry.
-    m = maximum(raw_h; dims = 2)
-    expr = exp.(raw_h .- m)
-    P    = expr ./ sum(expr; dims = 2)
-    H    = -dropdims(sum(P .* log.(P .+ 1f-30); dims = 2); dims = 2)        # (L_q, B)
-    eff_keys = mean(exp.(H))
+    α = inv(one(Float32) + exp(-Array(ps.layer_2.log_alpha)[1]))
+    β = exp(Array(ps.layer_2.log_beta)[1])
 
-    return (
-        raw_min     = minimum(raw_h),  raw_max  = maximum(raw_h),
-        raw_mean    = mean(raw_h),     raw_std  = std(raw_h),
-        scaled_min  = minimum(sc_h),   scaled_max = maximum(sc_h),
-        scaled_mean = mean(sc_h),      scaled_std = std(sc_h),
-        per_query_std = Float32(per_q_std),
-        effective_keys = Float32(eff_keys),
-        scale         = Float32(scale_h[1]),
-    )
+    return (mean_max_sim = Float32(mean_max_sim),
+            effective_codes = Float32(eff_codes),
+            alpha = Float32(α),
+            beta  = Float32(β),
+            n_codes = K)
 end
 
 # ---------------------------------------------------------------------
@@ -357,28 +359,46 @@ end
 # ---------------------------------------------------------------------
 
 """
-    main_sfmnist(; D=128, B=64, n_epochs=10, lr=3e-3,
-                  n_train=10000, n_test=2000, use_cuda=true, seed=0)
+    main_sfmnist(; D=96, B=16, n_epochs=10, lr=1e-3, n_train=10000,
+                 n_test=2000, use_attractor=false, n_codes=10,
+                 attractor_log_neg_lambda=log(0.1), encoding=:phase,
+                 track_attractor=false, use_cuda=true, seed=0)
 
-Train flat-init and HiPPO-init PhasorResonant on sequential FashionMNIST
+Train flat-init and HiPPO-init phasor SSMs on sequential FashionMNIST
 and report per-epoch test accuracy for each mode.
+
+Defaults reflect what worked best in the May-2026 ablations:
+- `encoding = :phase` (PhasorDense Dirac path beats the ZOH PhasorResonant)
+- `lr = 1e-3` (less aggressive than the prior 3e-3, more stable trajectory)
+- `B = 16` (small enough that the optional AttractorPhasorSSM mid-layer's
+  per-step `enc` tape — `O(D·in·L·B)` — fits in a 35 GiB hard cap; bump
+  D=128, B=64 only after gradient checkpointing is added).
+
+`use_attractor = true` adds an `AttractorPhasorSSM(D=>D, n_codes)` between
+encoder and readout — selective recurrent persistence via Hopfield-style
+soft retrieval. See `build_sfmnist_model` for details.
+
+`track_attractor = true` snapshots `attractor_diagnostics` each epoch:
+mean max-similarity to any code (concentration), effective number of
+distinct codes used (mode collapse detector), and the live α / β values.
 """
-function main_sfmnist(; D::Int        = 128,
-                       B::Int        = 64,
+function main_sfmnist(; D::Int        = 96,
+                       B::Int        = 16,
                        n_epochs::Int = 10,
-                       lr::Real      = 3f-3,
+                       lr::Real      = 1f-3,
                        n_train::Int  = 10_000,
                        n_test::Int   = 2_000,
-                       use_attention::Bool = false,
-                       encoding::Symbol    = :zoh,
-                       init_scale::Real    = 3f0,
-                       track_scores::Bool  = false,
+                       use_attractor::Bool = false,
+                       n_codes::Int        = 10,
+                       attractor_log_neg_lambda::Real = log(0.1),
+                       encoding::Symbol    = :phase,
+                       track_attractor::Bool = false,
                        use_cuda::Bool = true,
                        seed::Int     = 0)
     rng  = Xoshiro(seed)
     gdev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
 
-    @info "config" D B n_epochs lr n_train n_test use_attention encoding init_scale device = string(gdev)
+    @info "config" D B n_epochs lr n_train n_test use_attractor n_codes encoding device = string(gdev)
 
     @info "loading FashionMNIST..."
     (Xtr, ytr), (Xte, yte) = load_fashionmnist(; n_train, n_test)
@@ -391,16 +411,17 @@ function main_sfmnist(; D::Int        = 128,
     for mode in (:flat, :hippo)
         @info "training" mode
         model = build_sfmnist_model(mode, D;
-                                     use_attention = use_attention,
+                                     use_attractor = use_attractor,
                                      encoding = encoding,
-                                     init_scale = init_scale)
+                                     n_codes = n_codes,
+                                     attractor_log_neg_lambda = attractor_log_neg_lambda)
         ps_cpu, st_cpu = Lux.setup(rng, model)
         ps = ps_cpu |> gdev
         st = st_cpu |> gdev
         opt_state = Optimisers.setup(Optimisers.Adam(Float32(lr)), ps)
 
-        # Held-out batch for score-stats snapshots (constant across epochs).
-        score_probe = (use_attention && track_scores) ?
+        # Held-out batch for attractor diagnostics (constant across epochs).
+        diag_probe = (use_attractor && track_attractor) ?
             (test_batches[1][1] |> gdev) : nothing
 
         accs = Float32[]
@@ -410,9 +431,9 @@ function main_sfmnist(; D::Int        = 128,
             push!(accs, test_acc)
             @info "epoch" mode epoch mean_loss = round(mean(losses), digits = 4) test_acc = round(test_acc, digits = 4)
 
-            if score_probe !== nothing
-                stats = attention_score_stats(model, ps, st, score_probe)
-                @info "scores" mode epoch scale=stats.scale raw_min=round(stats.raw_min, digits=3) raw_max=round(stats.raw_max, digits=3) raw_mean=round(stats.raw_mean, digits=3) raw_std=round(stats.raw_std, digits=4) per_q_std=round(stats.per_query_std, digits=4) eff_keys=round(stats.effective_keys, digits=2) scaled_min=round(stats.scaled_min, digits=5) scaled_max=round(stats.scaled_max, digits=5)
+            if diag_probe !== nothing
+                stats = attractor_diagnostics(model, ps, st, diag_probe)
+                @info "attractor" mode epoch alpha = round(stats.alpha, digits=3) beta = round(stats.beta, digits=3) mean_max_sim = round(stats.mean_max_sim, digits=3) effective_codes = round(stats.effective_codes, digits=2) n_codes = stats.n_codes
             end
         end
         results[mode] = accs
@@ -421,7 +442,7 @@ function main_sfmnist(; D::Int        = 128,
     println()
     @info "summary"
     println("  D = $D, B = $B, L = 784, n_train = $(length(ytr)), n_test = $(length(yte))")
-    println("  encoding = $encoding, use_attention = $use_attention, init_scale = $init_scale, lr = $lr")
+    println("  encoding = $encoding, use_attractor = $use_attractor, n_codes = $n_codes, lr = $lr")
     println("  chance accuracy = 0.1")
     for mode in (:flat, :hippo)
         accs = results[mode]

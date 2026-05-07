@@ -254,21 +254,18 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
         return normalize_to_unit_circle(z_new)
     end
 
-    # Non-mutating fold: accumulator is (z_current, list_of_outputs).
-    # `map` over `1:L` returns the list of per-step outputs, but since
-    # each step depends on the previous, we use a recursive fold.
-    function _scan(z, t)
-        if t > L
-            return (z, ())
-        end
-        z_next = _step(z, x[:, t, :])
-        rest_z, rest_outs = _scan(z_next, t + 1)
-        return (rest_z, (complex_to_angle(z_next), rest_outs...))
+    # AD-friendly mutable loop: Zygote.Buffer is the documented pattern
+    # for "fill an array sequentially while preserving gradient flow".
+    # The recursive-scan alternative blows up at L=784 (tuple-typed
+    # accumulator generates O(L) distinct types Julia spends forever
+    # specializing); explicit-loop with Buffer is O(L) work and stable.
+    Y = Buffer(similar(W_c, ComplexF32, D, L, B))
+    z = z0
+    for t in 1:L
+        z = _step(z, x[:, t, :])
+        Y[:, t, :] = z
     end
-
-    _, outs_tuple = _scan(z0, 1)
-    Y = stack(collect(outs_tuple); dims = 2)                     # (D, L, B) Phase
-    return Y, st
+    return complex_to_angle(copy(Y)), st                         # (D, L, B) Phase
 end
 
 # ---- Continuous dispatch: CurrentCall ---------------------------------
