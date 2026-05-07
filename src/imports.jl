@@ -13,7 +13,7 @@ using Interpolations: linear_interpolation
 using Statistics: cor, mean
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
-using NNlib: batched_mul
+using NNlib: batched_mul, softmax
 using FFTW  # registers CPU FFT methods with AbstractFFTs
 using AbstractFFTs: fft, ifft
 using Base: @kwdef

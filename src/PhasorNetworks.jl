@@ -106,6 +106,8 @@ MinPool,
 ResidualBlock,
 PhasorAttention,
 SingleHeadAttention,
+AttractorPhasorSSM,
+attractor_pull,
 train,
 soft_angle,
 default_bias,
@@ -140,6 +142,7 @@ include("vsa.jl")
 include("kernels.jl")
 include("network.jl")
 include("ssm.jl")
+include("attractor_ssm.jl")
 include("metrics.jl")
 
 end
