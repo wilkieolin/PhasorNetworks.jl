@@ -279,7 +279,7 @@ struct PhasorDense <: Lux.AbstractLuxLayer
     init_bias::Function
     init_mode::Symbol
     return_type::SolutionType
-    init_log_neg_lambda::Union{Float32, Nothing}  # nothing → use init_mode default
+    init_log_neg_lambda::Union{Vector{Float32}, Nothing}  # nothing → use init_mode default; otherwise per-channel override
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer},
@@ -290,7 +290,7 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     init_weight = nothing,
                     init = nothing,
                     init_mode::Symbol = :default,
-                    init_log_neg_lambda::Union{Real, Nothing} = nothing,
+                    init_log_neg_lambda::Union{Real, AbstractVector{<:Real}, Nothing} = nothing,
                     kwargs...)
     # Handle backward compatibility: 'init' kwarg maps to init_weight
     if init_weight === nothing && init !== nothing
@@ -303,6 +303,15 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                             "The :uniform mode was removed because it spread ω across " *
                             "channels, which breaks the per-channel ω rule. For multi-" *
                             "timescale dynamics use :hippo."))
+    out = shape[2]
+    lnl_vec = if init_log_neg_lambda === nothing
+        nothing
+    elseif init_log_neg_lambda isa Real
+        fill(Float32(init_log_neg_lambda), out)
+    else
+        @assert length(init_log_neg_lambda) == out "init_log_neg_lambda must have length $(out), got $(length(init_log_neg_lambda))"
+        Float32.(collect(init_log_neg_lambda))
+    end
     return PhasorDense(shape[1], shape[2],
                         activation,
                         use_bias,
@@ -310,21 +319,24 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                         init_bias,
                         init_mode,
                         return_type,
-                        init_log_neg_lambda === nothing ? nothing : Float32(init_log_neg_lambda))
+                        lnl_vec)
 end
 
 # Per-mode (log_neg_lambda, omega) initializer. ω is uniformly 2π across
 # channels in every mode (the per-channel ω rule); modes only differ in
-# how λ is laid out.
+# how λ is laid out. When `init_log_neg_lambda` is supplied (as a vector
+# from the constructor — even for a scalar override the constructor lifts
+# it to a per-channel vector), it overrides whichever mode-default would
+# apply.
 function _init_dynamics(l::PhasorDense)
     omega = fill(Float32(2π), l.out_dims)
-    log_neg_lambda = if l.init_mode == :hippo
+    log_neg_lambda = if l.init_log_neg_lambda !== nothing
+        copy(l.init_log_neg_lambda)
+    elseif l.init_mode == :hippo
         λ_init, _ = hippo_legs_diagonal(l.out_dims)
-        l.init_log_neg_lambda === nothing ?
-            log.(-λ_init) : fill(l.init_log_neg_lambda, l.out_dims)
+        log.(-λ_init)
     else  # :default
-        ll = l.init_log_neg_lambda === nothing ? Float32(log(0.2)) : l.init_log_neg_lambda
-        fill(ll, l.out_dims)
+        fill(Float32(log(0.2)), l.out_dims)
     end
     return log_neg_lambda, omega
 end
@@ -1491,7 +1503,7 @@ Returns:
 
 See also: [`attend`](@ref) for phase-based version
 """
-function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0f0, 10.0f0), return_solution::Bool = false, scale::AbstractArray=[1.0f0,])
+function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::SpikingArgs, tspan::Tuple{<:Real, <:Real}=(0.0f0, 10.0f0), return_solution::Bool = false, scale::AbstractArray=[3.0f0,])
     #compute the similarity between the spike trains
     #produces [time][b qt kt]
     scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
@@ -1513,7 +1525,7 @@ struct PhasorAttention <: Lux.AbstractLuxLayer
 end
 
 function PhasorAttention()
-    return PhasorAttention(1.0f0)
+    return PhasorAttention(3.0f0)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, attention::PhasorAttention)
