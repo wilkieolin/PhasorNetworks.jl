@@ -273,11 +273,16 @@ function attention_score_stats(model, ps, st, x_b)
     k, _ = inner.k_proj(enc_out, inner_ps.k_proj, inner_st.k_proj)
 
     # Raw similarity (Real) and post-scale weights.
-    raw    = PhasorNetworks.similarity_outer(q, k, dims = 2)              # (L_q, L_k, B)
-    scale  = Array(inner_ps.attention.scale)                                # length 1
-    scaled = exp.(scale .* raw) ./ Float32(size(raw, 1))                   # same shape
+    # Keep scale on the same device as raw (broadcasting CPU array against
+    # CuArray triggers a non-bitstype kernel error); only move final
+    # tensors to host for stat computation.
+    raw_dev    = PhasorNetworks.similarity_outer(q, k, dims = 2)            # (L_q, L_k, B)
+    scale_dev  = inner_ps.attention.scale                                    # length 1, on device
+    scaled_dev = exp.(scale_dev .* raw_dev) ./ Float32(size(raw_dev, 1))     # same shape
 
-    raw_h = Array(raw); sc_h = Array(scaled)
+    raw_h    = Array(raw_dev)
+    sc_h     = Array(scaled_dev)
+    scale_h  = Array(scale_dev)
 
     # per-query std across keys (averaged over batch)
     per_q_std = mean(std(raw_h; dims = 2))
@@ -299,7 +304,7 @@ function attention_score_stats(model, ps, st, x_b)
         scaled_mean = mean(sc_h),      scaled_std = std(sc_h),
         per_query_std = Float32(per_q_std),
         effective_keys = Float32(eff_keys),
-        scale         = Float32(scale[1]),
+        scale         = Float32(scale_h[1]),
     )
 end
 
