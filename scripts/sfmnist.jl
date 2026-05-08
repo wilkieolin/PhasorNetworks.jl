@@ -190,44 +190,54 @@ function _encoder_lnl(mode::Symbol, D::Int; L::Int = 784)
 end
 
 """
-    build_sfmnist_model(mode, D; L=784, use_attractor=false,
-                         encoding=:phase, n_codes=10,
-                         attractor_log_neg_lambda=log(0.1))
+    build_sfmnist_model(mode, D; L=784, n_layers=1, use_residual=false,
+                         use_attractor=false, encoding=:phase, n_codes=10,
+                         attractor_log_neg_lambda=log(0.1),
+                         mid_log_neg_lambda=nothing)
 
-Build a chain `Encoder → [AttractorPhasorSSM] → LastStepDense` for the
-chosen λ layout (`:flat` or `:hippo`). All layers share ω = 2π.
+Build `Encoder → (mid layers) → LastStepDense` for the chosen λ layout
+(`:flat` or `:hippo`). All phase-locked layers share ω = 2π.
 
-`encoding` selects the input front-end:
-- `:zoh`   — pixel `v ∈ [0,1]` → `exp(iπ·(2v-1))` complex sample, then
-  `PhasorResonant(1 => D)` does ZOH SSM.
-- `:phase` (default) — pixel `v` → Phase `v/2 ∈ [0, 0.5]` directly,
-  then `PhasorDense(1 => D)` integrates as a Dirac SSM (no separate
-  encoder layer; treats the pixel sequence as spike-time arrivals
-  into a single learnable SSM bank). Phase encoding consistently
-  outperformed ZOH in the May-2026 ablation (hippo final test_acc
-  0.347 vs 0.328 with much faster loss decay).
+# Mid-layer arrangement
 
-`use_attractor = true` inserts an `AttractorPhasorSSM(D => D, n_codes)`
-between encoder and readout. Each timestep of the encoder's phase
-output is mixed by the linear SSM half then nudged toward the nearest
-of `n_codes` learnable phasor codes via a Hopfield-style soft retrieval
-(the pull strength α and softmax sharpness β are also trainable). This
-provides selective, content-addressable persistence — the network can
-learn to lock the state onto code prototypes that correspond to class
-features rather than relying solely on the linear decay kernel. With
-`use_attractor = false` the chain is `Encoder → LastStepDense` only.
+Two mutually-exclusive options for what sits between encoder and readout:
 
-`attractor_log_neg_lambda` sets the mid-layer's per-channel decay rate
-(default `log(0.1)` = α=0.1, mild). The mid-layer doesn't need the
-slow `1/L` decay the encoder uses — it's processing the encoder's
-already-time-integrated output.
+- `n_layers ≥ 1` (default 1): a stack of `n_layers - 1` additional
+  `PhasorDense(D => D)` layers (the encoder counts as layer 1). When
+  `use_residual = true` each extra layer is wrapped in a
+  `ResidualBlock` so the forward pass is `y = v_bind(x, PhasorDense(x))`
+  — a phase-domain residual via `remap_phase(x + f(x))`. Cheap depth
+  for capacity; each extra layer is FFT-convolutional, parallel along
+  the time axis.
+
+- `use_attractor = true` (overrides `n_layers`): inserts a single
+  `AttractorPhasorSSM(D => D, n_codes)` for content-addressable
+  persistence. Sequential per-timestep, much slower wall-time. See
+  `attractor_log_neg_lambda` for its decay setting.
+
+# Encoder front-ends
+
+- `:zoh`   — pixel `v ∈ [0,1]` → `exp(iπ·(2v-1))` → `PhasorResonant`.
+- `:phase` (default) — pixel `v` → `Phase v/2` → `PhasorDense` Dirac SSM.
+
+# Mid-layer λ init
+
+`mid_log_neg_lambda` controls the per-channel decay for stacked mid
+layers. `nothing` (default) reuses the encoder's `_encoder_lnl(mode, D)`
+spread; pass a `Real` for uniform decay or a `Vector` for per-channel.
+The encoder retains its own `_encoder_lnl`-based init regardless.
 """
 function build_sfmnist_model(mode::Symbol, D::Int;
                               L::Int = 784,
+                              n_layers::Int = 1,
+                              use_residual::Bool = false,
                               use_attractor::Bool = false,
                               encoding::Symbol = :phase,
                               n_codes::Int = 10,
-                              attractor_log_neg_lambda::Real = log(0.1))
+                              attractor_log_neg_lambda::Real = log(0.1),
+                              mid_log_neg_lambda::Union{Real,AbstractVector{<:Real},Nothing} = nothing)
+    @assert n_layers >= 1 "n_layers must be ≥ 1 (the encoder counts as layer 1)"
+    @assert !(use_attractor && n_layers > 1) "use_attractor and n_layers>1 are mutually exclusive"
     lnl = _encoder_lnl(mode, D; L = L)
     encoder = if encoding === :zoh
         PhasorResonant(1 => D; init_log_neg_lambda = lnl)
@@ -236,14 +246,28 @@ function build_sfmnist_model(mode::Symbol, D::Int;
     else
         error("encoding must be :zoh or :phase, got :$encoding")
     end
+
     if use_attractor
         return Chain(encoder,
                      AttractorPhasorSSM(D => D, n_codes;
                                          init_log_neg_lambda = attractor_log_neg_lambda,
                                          trainable_codes = true),
                      LastStepDense(D, 10))
-    else
+    end
+
+    # Stacked mid layers (if any). Reuse the encoder's HiPPO-style λ
+    # spread by default so each mid layer carries multi-timescale memory
+    # of its own; caller can override with mid_log_neg_lambda.
+    mid_lnl = mid_log_neg_lambda === nothing ? lnl : mid_log_neg_lambda
+    if n_layers == 1
         return Chain(encoder, LastStepDense(D, 10))
+    else
+        mid_layers = ntuple(_ -> use_residual ?
+                                  ResidualBlock((D, D), normalize_to_unit_circle;
+                                                 init_log_neg_lambda = mid_lnl) :
+                                  PhasorDense(D => D; init_log_neg_lambda = mid_lnl),
+                            n_layers - 1)
+        return Chain(encoder, mid_layers..., LastStepDense(D, 10))
     end
 end
 
@@ -383,14 +407,17 @@ mean max-similarity to any code (concentration), effective number of
 distinct codes used (mode collapse detector), and the live α / β values.
 """
 function main_sfmnist(; D::Int        = 96,
-                       B::Int        = 16,
+                       B::Int        = 64,
                        n_epochs::Int = 10,
                        lr::Real      = 1f-3,
                        n_train::Int  = 10_000,
                        n_test::Int   = 2_000,
+                       n_layers::Int       = 1,
+                       use_residual::Bool  = false,
                        use_attractor::Bool = false,
                        n_codes::Int        = 10,
                        attractor_log_neg_lambda::Real = log(0.1),
+                       mid_log_neg_lambda  = nothing,
                        encoding::Symbol    = :phase,
                        track_attractor::Bool = false,
                        use_cuda::Bool = true,
@@ -398,7 +425,7 @@ function main_sfmnist(; D::Int        = 96,
     rng  = Xoshiro(seed)
     gdev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
 
-    @info "config" D B n_epochs lr n_train n_test use_attractor n_codes encoding device = string(gdev)
+    @info "config" D B n_epochs lr n_train n_test n_layers use_residual use_attractor n_codes encoding device = string(gdev)
 
     @info "loading FashionMNIST..."
     (Xtr, ytr), (Xte, yte) = load_fashionmnist(; n_train, n_test)
@@ -411,10 +438,13 @@ function main_sfmnist(; D::Int        = 96,
     for mode in (:flat, :hippo)
         @info "training" mode
         model = build_sfmnist_model(mode, D;
+                                     n_layers = n_layers,
+                                     use_residual = use_residual,
                                      use_attractor = use_attractor,
                                      encoding = encoding,
                                      n_codes = n_codes,
-                                     attractor_log_neg_lambda = attractor_log_neg_lambda)
+                                     attractor_log_neg_lambda = attractor_log_neg_lambda,
+                                     mid_log_neg_lambda = mid_log_neg_lambda)
         ps_cpu, st_cpu = Lux.setup(rng, model)
         ps = ps_cpu |> gdev
         st = st_cpu |> gdev
@@ -442,7 +472,7 @@ function main_sfmnist(; D::Int        = 96,
     println()
     @info "summary"
     println("  D = $D, B = $B, L = 784, n_train = $(length(ytr)), n_test = $(length(yte))")
-    println("  encoding = $encoding, use_attractor = $use_attractor, n_codes = $n_codes, lr = $lr")
+    println("  encoding = $encoding, n_layers = $n_layers, use_residual = $use_residual, use_attractor = $use_attractor, n_codes = $n_codes, lr = $lr")
     println("  chance accuracy = 0.1")
     for mode in (:flat, :hippo)
         accs = results[mode]

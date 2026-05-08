@@ -1426,7 +1426,7 @@ function ResidualBlock(dimensions::Tuple{Vararg{Int}}, activation::Function; kwa
     @assert length(dimensions) >= 2 "Must have at least 1 layer"
     #construct a Phasor MLP based on the given dimensions
     pairs = [dimensions[i] => dimensions[i+1] for i in 1:length(dimensions) - 1]
-    layers = [PhasorDense(pair, activation, kwargs...) for pair in pairs]
+    layers = [PhasorDense(pair, activation; kwargs...) for pair in pairs]
     ff = Chain(layers...)
 
     return ResidualBlock(ff)
