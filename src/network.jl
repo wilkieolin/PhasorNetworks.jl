@@ -381,14 +381,6 @@ function (a::PhasorDense)(x::AbstractArray{<:Complex}, params::LuxParams, state:
     return y, state
 end
 
-# Note: the 3D Complex dispatch — ZOH SSM integration on a continuous
-# complex sequence — used to live here. It has been promoted to its own
-# layer, [`PhasorResonant`](@ref) (or [`ResonantSTFT`](@ref) when ω
-# should be trainable). `PhasorDense` is now a phase-domain transform: it
-# expects inputs that have already been moved into the phase domain by an
-# encoder (e.g. `PhasorResonant`). The 2D Complex helper below is kept
-# for internal use by the 2D Phase dispatch.
-
 # ---- 2D Phase dispatch ----
 
 function (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
@@ -411,12 +403,21 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
                            params::LuxParams, state::NamedTuple)
     λ = -exp.(params.log_neg_lambda)
     ω = _get_omega(a, params, state)
+    L = size(x, 2)
 
     Z = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     if a.use_bias
-        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
-        Z = Z .+ reshape(bias_val, :, 1, 1)
+        # Per-period bias drive: bias enters as a constant kick at every
+        # period and is accumulated by the SSM kernel — the discrete
+        # equivalent of `bias_current` in the CurrentCall path. Without
+        # this scaling the bias is ~150× weaker than the accumulated
+        # signal at slow-decay encoder settings (α = 5/L), so silent
+        # neurons drift to the origin instead of defaulting to the
+        # bias-direction "wave" the static-MLP convention assumes.
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag       # (C,)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (C, L)
+        Z = Z .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # Skip normalization when the activation is normalize_to_unit_circle:
@@ -673,7 +674,8 @@ function (a::PhasorResonant)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::
 
     if a.use_bias
         bias_val = ps.bias_real .+ 1.0f0im .* ps.bias_imag
-        Z = Z .+ reshape(bias_val, :, 1, 1)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (C_out, L)
+        Z = Z .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # complex_to_angle is magnitude-independent, so when the activation is
@@ -827,14 +829,19 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, st
     # Temporal integration via causal convolution
     Z_sig = causal_conv(K, H)
 
-    # Frequency shift: re-encode at downstream carrier omega_out
-    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
-
-    # Apply bias (broadcast over time and batch)
+    # Per-period bias drive accumulated through the SSM kernel at the
+    # signal-compartment frequency `ω`, then carried through `_freq_shift`
+    # like the rest of the signal (matches the ODE semantics; bias is a
+    # constant current injected into the same dynamics, not a post-hoc
+    # offset).
     if a.use_bias
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
-        Z = Z .+ reshape(bias_val, :, 1, 1)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (n_freqs, L)
+        Z_sig = Z_sig .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
+
+    # Frequency shift: re-encode at downstream carrier omega_out
+    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
 
     Y = a.activation(Z)
     return Y, state
@@ -845,17 +852,19 @@ end
 function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
     λ = -exp.(params.log_neg_lambda)
     ω = params.omega
+    L = size(x, 2)
 
     # Dirac discretization: causal convolution on phase inputs
     Z_sig = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
-    # Frequency shift: re-encode at downstream carrier omega_out
-    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
-
     if a.use_bias
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
-        Z = Z .+ reshape(bias_val, :, 1, 1)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)
+        Z_sig = Z_sig .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
+
+    # Frequency shift: re-encode at downstream carrier omega_out
+    Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
 
     if a.activation === normalize_to_unit_circle
         return complex_to_angle(Z), state

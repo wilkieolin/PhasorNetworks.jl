@@ -77,6 +77,36 @@ function phasor_kernel(λ::AbstractVector, ω::AbstractVector, Δt::Real, L::Int
     return A_powers .* B_gain                  # C × L
 end
 
+"""
+    bias_kernel_accumulation(λ, ω, T, L) -> AbstractMatrix{ComplexF32}
+
+Period-by-period accumulation factor for a constant per-period drive
+through the resonant kernel. Returns `(C, L)` complex matrix where
+
+    G[c, m] = Σ_{n=0}^{m} exp(k_c · n · T)
+            = (1 - exp(k_c · (m+1) · T)) / (1 - exp(k_c · T))
+
+with `k_c = λ_c + i·ω_c`. Used to compute the contribution of a constant
+per-period bias `b[c]` to the SSM output as `bias_contrib[c, m] = b[c] · G[c, m]`
+— the discrete equivalent of injecting `bias_current` continuously in
+the ODE rather than adding `bias` once to the conv output. See
+`PhasorDense._forward_3d_dirac` for the use site.
+
+The closed form is well-defined for `λ < 0` (so |exp(k·T)| < 1, denominator nonzero).
+At |A| = 1 (purely oscillatory, λ = 0) the formula degenerates to `m+1` in the
+limit but is implemented as the literal ratio, which is fine for `λ_c < 0`.
+"""
+function bias_kernel_accumulation(λ::AbstractVector, ω::AbstractVector,
+                                  T::Real, L::Int)
+    k   = ComplexF32.(λ .+ im .* ω)                                    # (C,)
+    T_f = Float32(T)
+    A   = exp.(k .* T_f)                                                # (C,) per-period factor
+    ns_cpu = Float32.(1:L)                                              # (L,) — m+1 for m=0..L-1
+    ns = reshape(typeof(real.(k))(ns_cpu), 1, L)                        # (1, L) on-device
+    A_pow = exp.(k .* T_f .* ns)                                        # (C, L) = A^(m+1)
+    return (1f0 .- A_pow) ./ reshape(1f0 .- A, :, 1)                    # (C, L)
+end
+
 # ================================================================
 # 2. Causal Convolution
 # ================================================================
