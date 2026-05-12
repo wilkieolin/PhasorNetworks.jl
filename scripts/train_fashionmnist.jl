@@ -39,7 +39,7 @@ include("../src/PhasorNetworks.jl")
 using .PhasorNetworks
 
 # dependencies used in notebook
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays, CUDA
+using Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays, CUDA
 using ArgParse, JLD2, Dates
 using Random: Xoshiro
 
@@ -123,8 +123,8 @@ optimiser = get_optimizer(optimizer_name, lr)
 
 # load data
 println("Loading FashionMNIST...")
-train_data = MLDatasets.FashionMNIST(split=:train)
-test_data = MLDatasets.FashionMNIST(split=:test)
+train_data = fashion_mnist_data(:train)
+test_data = fashion_mnist_data(:test)
 train_loader = DataLoader(train_data, batchsize=batchsize)
 test_loader = DataLoader(test_data, batchsize=batchsize)
 

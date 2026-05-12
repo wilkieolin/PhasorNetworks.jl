@@ -29,7 +29,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using PhasorNetworks
 using Lux, Random, Optimisers, Zygote, Statistics
-using MLDatasets, MLUtils, OneHotArrays
+using MLUtils, OneHotArrays
 using CUDA, LuxCUDA
 using ArgParse
 
@@ -42,8 +42,8 @@ const DATA_CACHE = Ref{Any}(nothing)
 function get_data(; batchsize::Int=128)
     if DATA_CACHE[] === nothing
         println("Loading FashionMNIST...")
-        train_data = FashionMNIST(split=:train)
-        test_data  = FashionMNIST(split=:test)
+        train_data = fashion_mnist_data(:train)
+        test_data  = fashion_mnist_data(:test)
         x_train = Float32.(train_data.features)                   # 28 × 28 × 60000
         y_train = Float32.(onehotbatch(train_data.targets, 0:9))  # 10 × 60000
         x_test  = Float32.(test_data.features)

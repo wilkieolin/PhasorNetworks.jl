@@ -41,7 +41,6 @@
 # the attractor-mid-layer needs gradient checkpointing — TODO.
 
 using PhasorNetworks, Lux, Zygote, Optimisers, CUDA, LuxCUDA
-using MLDatasets: FashionMNIST
 using OneHotArrays: onehotbatch
 using Random: Xoshiro, AbstractRNG
 using Statistics: mean, std
@@ -78,8 +77,8 @@ Load FashionMNIST (downloads on first call). `Xtr/Xte` are
 `28 × 28 × N` Float32 in [0, 1]; labels are `Int` in `0..9`.
 """
 function load_fashionmnist(; n_train::Int = 10_000, n_test::Int = 2_000)
-    train = FashionMNIST(:train)
-    test  = FashionMNIST(:test)
+    train = fashion_mnist_data(:train)
+    test  = fashion_mnist_data(:test)
     n_train_avail = length(train.targets)
     n_test_avail  = length(test.targets)
     n_train = min(n_train, n_train_avail)
