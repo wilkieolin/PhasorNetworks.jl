@@ -386,12 +386,8 @@ end
 function (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
     xz = angle_to_complex(x)
     y, st_new = a(xz, params, state)
-    y_act = a.activation(y)
-    # Some activations (e.g. soft_angle) already return Phase; only convert
-    # complex outputs (e.g. normalize_to_unit_circle). Calling complex_to_angle
-    # on a Phase array would collapse every value to Phase(0)/Phase(1) via
-    # `angle(x::Real)`, destroying gradients.
-    y_phase = y_act isa AbstractArray{<:Phase} ? y_act : complex_to_angle(y_act)
+    y_normalized = a.activation(y)
+    y_phase = complex_to_angle(y_normalized)
     return y_phase, st_new
 end
 
