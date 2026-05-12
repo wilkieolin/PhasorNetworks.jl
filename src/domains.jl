@@ -122,7 +122,7 @@ function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real 
         s .= sigmoid_fast(3.0f0 .* m .- (r_hi - r_lo))
     end
 
-    return Phase.(s .* angle.(x) / pi_f32)
+    return s .* angle.(x) / pi_f32
 end
 
 
