@@ -7,7 +7,7 @@ julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --
 
 This script:
  1. Activates the project environment
- 2. Loads FashionMNIST using MLDatasets and creates DataLoaders
+ 2. Loads FashionMNIST via PhasorNetworks.fashion_mnist_data and creates DataLoaders
  3. Trains and evaluates a conventional Lux model and the PhasorNetworks model
 
 Notes:
@@ -184,10 +184,10 @@ println("\n=== Phasor network ===")
 import .PhasorNetworks: default_bias, Codebook
 p_model = Chain(FlattenLayer(),
                 LayerNorm((28^2,)),
-                x -> tanh.(x),
+                x -> Phase.(tanh.(x)),
                 x -> x,
-                PhasorDense(28^2 => 128, soft_angle, init_bias=default_bias),
-                PhasorDense(128 => 16, soft_angle, init_bias=default_bias),
+                PhasorDense(28^2 => 128, normalize_to_unit_circle, init_bias=default_bias),
+                PhasorDense(128 => 16, normalize_to_unit_circle, init_bias=default_bias),
                 Codebook(16 => 10))
 
 psp, stp = Lux.setup(args.rng, p_model)
