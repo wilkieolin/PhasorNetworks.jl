@@ -19,6 +19,5 @@ using AbstractFFTs: fft, ifft
 using Base: @kwdef
 using Zygote: withgradient, Buffer
 using Random: Xoshiro
-using WeightInitializers: ones32
 
 import LuxLib: dropout

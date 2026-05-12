@@ -186,8 +186,19 @@ function attractor_pull(z::AbstractMatrix{<:Complex},
                         codes_cplx::AbstractMatrix{<:Complex},
                         β)
     sims = similarity_outer(z, codes_cplx)        # (K, B) Real (CPU 2D Complex dispatch)
-    weights = softmax(β .* sims; dims = 1)        # (K, B)
+    weights = _softmax_dim1(β .* sims)            # (K, B); explicit to avoid cuDNN dispatch
     return codes_cplx * weights                   # (D, B)
+end
+
+# Explicit softmax over dim=1 — avoids NNlib's CuArray dispatch to
+# cuDNN, which trips a CUDACore/CUDA TaskLocalState type mismatch when
+# the active environment loads a different CUDA major version than
+# PhasorNetworks's compiled image. Pure broadcast/reduce works on both
+# CPU and any GPU array type without cuDNN.
+function _softmax_dim1(x::AbstractArray)
+    m  = maximum(x; dims = 1)
+    ex = exp.(x .- m)
+    return ex ./ sum(ex; dims = 1)
 end
 
 # ---- Discrete dispatch: Phase 3D --------------------------------------
@@ -215,8 +226,11 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
     ω_val  = st.omega                                           # (D,) Real
     k      = ComplexF32.(λ .+ 1im .* ω_val)                     # (D,) Cplx
     A_step = exp.(k .* l.period)                                # (D,) full-period decay
-    α      = _sigmoid(ps.log_alpha[1])                          # scalar in (0,1)
-    β      = exp(ps.log_beta[1])                                # scalar > 0
+    # Keep α and β as 1-element arrays so we can broadcast them on the
+    # same device as the state — extracting via [1] would trigger scalar
+    # getindex on a CuArray, which Zygote forbids in differentiable code.
+    α_arr  = _sigmoid.(ps.log_alpha)                            # (1,) in (0,1)
+    β_arr  = exp.(ps.log_beta)                                  # (1,) > 0
     W_c    = ComplexF32.(ps.weight)                             # (D, in_dims)
     bias_c = _get_bias(l, ps)                                   # nothing or (D,) Cplx
 
@@ -249,8 +263,8 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
     function _step(z, phases_t)
         h_t   = _step_kick(phases_t)
         z_lin = A_step .* z .+ h_t                               # (D, B) linear half
-        target = attractor_pull(z_lin, codes_cplx, β)            # (D, B) pull target
-        z_new  = (1 - α) .* z_lin .+ α .* target
+        target = attractor_pull(z_lin, codes_cplx, β_arr)        # (D, B) pull target
+        z_new  = (1 .- α_arr) .* z_lin .+ α_arr .* target
         return normalize_to_unit_circle(z_new)
     end
 
@@ -306,17 +320,19 @@ function (l::AttractorPhasorSSM)(x::CurrentCall,
             bias_val = p.bias_real .+ 1im .* p.bias_imag
             result = result .+ bias_current(bias_val, t, x.current.offset, spk_args)
         end
-        # Attractor pull (continuous form: α·(pull(z) − z))
-        α_eff = _sigmoid(p.log_alpha[1])
-        β_eff = exp(p.log_beta[1])
+        # Attractor pull (continuous form: α·(pull(z) − z)).
+        # Keep α/β as 1-element arrays — scalar getindex on CuArray
+        # parameters is forbidden by Zygote inside differentiable code.
+        α_eff_arr = _sigmoid.(p.log_alpha)
+        β_eff_arr = exp.(p.log_beta)
         if ndims(u) >= 2
-            target = attractor_pull(u, codes_cplx, β_eff)        # (D, B)
+            target = attractor_pull(u, codes_cplx, β_eff_arr)        # (D, B)
         else
             # 1D state: lift to (D, 1) for the pull, then drop back.
-            target_2d = attractor_pull(reshape(u, :, 1), codes_cplx, β_eff)
+            target_2d = attractor_pull(reshape(u, :, 1), codes_cplx, β_eff_arr)
             target = vec(target_2d)
         end
-        return result .+ α_eff .* (target .- u)
+        return result .+ α_eff_arr .* (target .- u)
     end
 
     prob = ODEProblem(dzdt, u0, tspan, ps)

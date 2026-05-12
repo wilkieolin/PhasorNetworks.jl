@@ -130,7 +130,10 @@ spiking_loss_and_accuracy,
 confusion_matrix,
 OvR_matrices,
 tpr_fpr,
-interpolate_roc
+interpolate_roc,
+
+#datasets
+fashion_mnist_data
 
 include("imports.jl")
 include("constants.jl")
@@ -144,5 +147,6 @@ include("network.jl")
 include("ssm.jl")
 include("attractor_ssm.jl")
 include("metrics.jl")
+include("datasets.jl")
 
 end

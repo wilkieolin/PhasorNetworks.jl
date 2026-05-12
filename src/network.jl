@@ -219,7 +219,7 @@ Dispatches on input type AND dimensionality:
 - 2D Phase `(C, B)` → angle_to_complex → 2D complex → activation → complex_to_angle
 - 3D Phase `(C, L, B)` → Dirac discretization with causal convolution → complex_to_angle
 - SpikingCall → convert to CurrentCall, delegate
-- CurrentCall → single-stage ODE `dz/dt = k·z + W·I(t)`, sampled at period boundaries
+- CurrentCall → single-stage ODE `dz/dt = k·z + W·I(t)`
 
 A 2D Complex helper dispatch is kept as an internal building block for the
 2D Phase path (it does the matmul + bias step on already-complex data); it
@@ -446,20 +446,10 @@ end
 # where k_c = λ_c + iω_c is the per-channel complex eigenvalue.
 # This is the continuous-time equivalent of the discrete causal convolution
 # used in the 3D complex/Phase dispatch paths.
-#
-# For SSM-mode layers (init_mode != :default) with multi-period inputs,
-# the solution is sampled at period boundaries to produce a (C_out, L, B)
-# phase/spiking output. Default-mode layers use per-solver-step output
-# (vector-of-states from the ODE solve) — preserved for the static-MLP
-# spiking correlation tests that index the final solver step.
 
 function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
     spk_args = x.spk_args
     tspan = x.t_span
-    L = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
-
-    # SSM-mode: sample at period boundaries for sequential output.
-    use_period_sampling = L > 1 && a.init_mode != :default
 
     sample_I = x.current.current_fn(Float32(tspan[1]))
     out_shape = ndims(sample_I) >= 2 ? (a.out_dims, size(sample_I)[2:end]...) : (a.out_dims,)
@@ -491,45 +481,21 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return sol, state
     end
 
-    if use_period_sampling
-        # Multi-period SSM: sample at period boundaries → (C_out, L, B) output
-        T = spk_args.t_period
-        sample_times = Float32.([l * T for l in 1:L])
-        samples = [sol(t) for t in sample_times]
-
-        if ndims(samples[1]) >= 2
-            Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in samples]...; dims=2)
-        else
-            Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
-        end
-
-        Y = a.activation(Z)
-
-        if a.return_type.type == :phase
-            return complex_to_angle(Y), state
-        else  # :spiking
-            phases = complex_to_angle(Y)
-            train = ssm_phases_to_train(phases, spk_args=spk_args)
-            return SpikingCall(train, spk_args, tspan), state
-        end
-    else
-        # Single-period: legacy per-solver-step output
-        if a.return_type.type == :phase
-            u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
-            y = a.activation.(u)
-            phase = complex_to_angle.(y)
-            return phase, state
-        elseif a.return_type.type == :current
-            i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
-            next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
-                                    spk_args,
-                                    tspan)
-            return next_call, state
-        else # :spiking
-            train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
-            next_call = SpikingCall(train, spk_args, tspan)
-            return next_call, state
-        end
+    if a.return_type.type == :phase
+        u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
+        y = a.activation.(u)
+        phase = complex_to_angle.(y)
+        return phase, state
+    elseif a.return_type.type == :current
+        i_fn = t -> potential_to_current(sol(t), spk_args=spk_args)
+        next_call = CurrentCall(LocalCurrent(i_fn, x.current.shape, x.current.offset + spiking_offset(spk_args)),
+                                spk_args,
+                                tspan)
+        return next_call, state
+    else # :spiking
+        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+        next_call = SpikingCall(train, spk_args, tspan)
+        return next_call, state
     end
 end
 
