@@ -11,7 +11,7 @@ hippo_legs_diagonal, psk_encode) are imported from PhasorNetworks.
 
 using PhasorNetworks
 using Lux, Random, Optimisers, Zygote, Statistics
-using MLDatasets, MLUtils, OneHotArrays
+using MLUtils, OneHotArrays
 using CUDA, LuxCUDA
 using ArgParse
 
@@ -110,8 +110,8 @@ function main()
     rng = Xoshiro(seed)
 
     println("Loading FashionMNIST...")
-    train_data = FashionMNIST(split=:train)
-    test_data  = FashionMNIST(split=:test)
+    train_data = fashion_mnist_data(:train)
+    test_data  = fashion_mnist_data(:test)
 
     x_train = Float32.(train_data.features)                   # 28 × 28 × 60000
     y_train = Float32.(onehotbatch(train_data.targets, 0:9))  # 10 × 60000

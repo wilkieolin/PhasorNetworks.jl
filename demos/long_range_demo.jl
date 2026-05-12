@@ -36,7 +36,7 @@ Usage:
 
 using PhasorNetworks
 using Lux, Random, Optimisers, Zygote, Statistics
-using MLDatasets, MLUtils, OneHotArrays
+using MLUtils, OneHotArrays
 using CUDA, LuxCUDA
 using ArgParse
 using Printf
@@ -189,8 +189,8 @@ Returns (train_loader, test_loader, L, C_in).
 """
 function load_sequential_fmnist(; batchsize::Int=64, pixels_per_step::Int=28)
     println("Loading FashionMNIST...")
-    train_data = FashionMNIST(split=:train)
-    test_data  = FashionMNIST(split=:test)
+    train_data = fashion_mnist_data(:train)
+    test_data  = fashion_mnist_data(:test)
 
     n_pixels = 784
     @assert n_pixels % pixels_per_step == 0 "784 must be divisible by pixels_per_step"
