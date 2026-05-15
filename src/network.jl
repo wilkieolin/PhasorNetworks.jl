@@ -217,7 +217,13 @@ trainable) as the encoder upstream.
 
 Dispatches on input type AND dimensionality:
 - 2D Phase `(C, B)` → angle_to_complex → 2D complex → activation → complex_to_angle
-- 3D Phase `(C, L, B)` → Dirac discretization with causal convolution → complex_to_angle
+- 3D Phase `(C, L, B)` → Dirac discretization with causal convolution
+  → derotation to static phase frame (`−conj(·)` at integer T with shared
+  ω = 2π, matching `unrotate_solution`) → activation → complex_to_angle.
+  The output frame matches the 2D Phase MLP and the ODE-via-`unrotate_solution`
+  pair, so 3D Phase Dirac, 2D Phase static, and SpikingCall ODE all return
+  comparable phases. (Pre-2026-05-15 this dispatch returned rotating-frame
+  phases — see `docs/three_view_mismatch_analysis.md` §4.1 for context.)
 - SpikingCall → convert to CurrentCall, delegate
 - CurrentCall → single-stage ODE `dz/dt = k·z + W·I(t)`
 
@@ -438,6 +444,21 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
         G = bias_kernel_accumulation(λ, ω, 1f0, L)                        # (C, L)
         Z = Z .+ reshape(b_eff, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
+
+    # Frame correction (docs/three_view_mismatch_analysis.md §4.1):
+    # `causal_conv_dirac` accumulates the spike-time → period-end carrier
+    # rotation `exp(iω·dt)` into Z (and the bias accumulator above carries
+    # the matching rotation for `b`). To recover the **static phase frame**
+    # at integer sample times t = n·T (the same convention the 2D Phase
+    # MLP and the ODE-via-`unrotate_solution` pair use), apply the library
+    # unrotation. With shared ω = 2π and T = 1 it reduces to `−conj(.)`:
+    # `phase_to_potential(0, n·T) · conj(z) = exp(iπ) · conj(z) = −conj(z)`.
+    # `−conj(.)` commutes with the magnitude-only activations used here
+    # (identity, normalize_to_unit_circle, soft_normalize_to_unit_circle),
+    # so applying it before vs after the activation gives the same final
+    # phase; we apply it before, mirroring `unrotate_solution` which
+    # derotates the raw potential.
+    Z = -conj.(Z)
 
     # Skip normalization when the activation is normalize_to_unit_circle:
     # the function divides through a positive real (whether |z| or
@@ -696,7 +717,12 @@ downstream carrier `omega_out` via frequency-shift modulation:
 
 Dispatches on input dimensionality (3D only — STFT is inherently temporal):
 - 3D complex `(C, L, B)` → weight + causal_conv + freq_shift + activation
-- 3D Phase `(C, L, B)` → causal_conv_dirac + freq_shift + complex_to_angle
+- 3D Phase `(C, L, B)` → causal_conv_dirac + freq_shift + derotation
+  (`−conj(·)` at the downstream `omega_out` carrier) + activation +
+  complex_to_angle. The Phase output is in the static phase frame,
+  matching the convention of downstream `PhasorDense` layers and the
+  ODE-via-`unrotate_solution` pair. See
+  `docs/three_view_mismatch_analysis.md` §4.1 for the rationale.
 
 # Fields
 - `in_dims::Int`: Input feature dimension
@@ -860,6 +886,15 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
 
     # Frequency shift: re-encode at downstream carrier omega_out
     Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
+
+    # Frame correction (docs/three_view_mismatch_analysis.md §4.1):
+    # match the static phase frame used by the downstream phase-locked
+    # layers and the 2D Phase MLP. After `_freq_shift`, the carrier is
+    # `omega_out` (default `2π`); at integer T with `omega_out·T = 2π`
+    # the library unrotation reduces to `−conj(.)`. Same rationale as
+    # `PhasorDense._forward_3d_dirac` — see that function for the full
+    # commentary.
+    Z = -conj.(Z)
 
     if a.activation === normalize_to_unit_circle
         return complex_to_angle(Z), state

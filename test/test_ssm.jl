@@ -258,11 +258,15 @@ function dirac_discretization_tests()
             # Dirac discrete path (single-oscillator)
             y_dirac, _ = layer(phases, ps, st)
 
-            # Manual computation: same formula, verify we get identical results
+            # Manual computation: same formula, verify we get identical results.
+            # Mirror the layer's §4.1 frame correction by applying `-conj(.)` to
+            # the raw Dirac potential before normalization — the layer derotates
+            # to the static phase frame at integer T (with shared ω = 2π,
+            # `unrotate_solution` reduces to `-conj(.)`).
             λ = -exp.(ps.log_neg_lambda)
             ω = st.omega
             Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, 1f0)
-            y_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
+            y_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
 
             @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
 
@@ -936,22 +940,26 @@ function ssm_spiking_correlation_tests()
         sc = SpikingCall(train, spk_args, tspan_spk)
         sol, _ = layer_pot(sc, ps, st)
 
-        # Sample at L period boundaries, no unrotation, so the result
-        # lives in the same rotating frame as `phases_dirac` — see
-        # docs/three_view_mismatch_analysis.md §4.1 for the frame story.
+        # Sample at L period boundaries with library unrotation so the
+        # result lives in the **static phase frame** — matching the
+        # post-§4.1 `phases_dirac` (which the layer now derotates to the
+        # static frame internally). See docs/three_view_mismatch_analysis.md
+        # §4.1 for the frame story.
         phases_spiking = sample_phases_at_periods(sol, L, spk_args;
                                                    activation = normalize_to_unit_circle,
-                                                   unrotate = false)
+                                                   unrotate = true)
 
         @testset "output shapes match" begin
             @test size(phases_dirac) == size(phases_spiking)
         end
 
         @testset "Dirac matches manual causal_conv_dirac" begin
+            # `-conj.(Z_manual)` mirrors the layer's §4.1 derotation
+            # to the static phase frame.
             λ_c = -exp.(ps.log_neg_lambda)
             ω_c = st.omega
             Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, 1f0)
-            phases_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
+            phases_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
             @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end
 
@@ -963,11 +971,10 @@ function ssm_spiking_correlation_tests()
         @testset "spiking ODE correlates with Dirac" begin
             c = cor_realvals(vec(Float32.(phases_dirac)),
                              vec(Float32.(phases_spiking)))
-            # Same frame on both sides; only solver discretization and
-            # the finite-width spike kernel separate them. Empirically
-            # ρ ≈ 0.97–1.00 per `test/scratch/post_fix_check.jl`; the
-            # 0.3 floor is generous to keep the test robust to solver
-            # tweaks.
+            # Both sides in the static phase frame after §4.1; only
+            # solver discretization and the finite-width spike kernel
+            # separate them. Empirically ρ ≈ 0.97–1.00; the 0.3 floor
+            # is generous to keep the test robust to solver tweaks.
             @test c > 0.3
         end
     end

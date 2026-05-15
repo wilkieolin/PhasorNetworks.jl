@@ -521,12 +521,13 @@ output, or to feed a downstream consumer that expects an
   what `PhasorDense`'s `:phase` dispatch does internally.
 - `unrotate::Bool = false`: When `true`, applies
   [`unrotate_solution`](@ref) so the resulting phases live in the
-  **static phase frame** (matches the 2D Phase MLP and the library
-  ODE convention). When `false` (default), phases live in the
-  **rotating frame at the sample time** — matching the
-  `causal_conv_dirac` / 3D Phase Dirac dispatch's native frame, so
-  `unrotate = false` is the right choice for direct comparison
-  against the discrete Dirac output.
+  **static phase frame** — matching the 2D Phase MLP, the
+  ODE-via-`unrotate_solution` pair, and the post-§4.1 3D Phase Dirac
+  dispatch (`PhasorDense._forward_3d_dirac`). Use `true` for direct
+  comparison against the layer's 3D Phase output. When `false`
+  (default), phases live in the **rotating frame at the sample
+  time** — useful for inspecting the ODE state without applying the
+  derotation step.
 - `offset::Real = 0.0f0`: Time offset added to the sample times.
 
 # Returns
@@ -540,9 +541,10 @@ layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
 ps, st = Lux.setup(rng, layer)
 sol, _ = layer(spiking_call, ps, st)
 phases = sample_phases_at_periods(sol, L, spk_args;
-                                  activation = normalize_to_unit_circle)
-# `phases` is (C_out, L, B) Phase, in the rotating frame — directly
-# comparable to a `causal_conv_dirac`-style 3D Phase output.
+                                  activation = normalize_to_unit_circle,
+                                  unrotate = true)
+# `phases` is (C_out, L, B) Phase, in the static frame — directly
+# comparable to a (post-§4.1) `PhasorDense` 3D Phase Dirac output.
 ```
 
 See also: [`ssm_extract_phases`](@ref) (returns complex without phase
