@@ -583,7 +583,13 @@ trainable frequency decomposition); use `PhasorResonant` everywhere else.
   matching the `t_period = 1` spiking convention). Constant by design —
   per-channel ω would desynchronize the phase carrier and break HD-VSA
   invariance with downstream layers.
-- `use_bias`: optional complex bias added after the convolution.
+- `use_bias`: optional complex bias treated as a **constant complex
+  current** (continuous-signal / ZOH semantics). Per-period
+  contribution is `b · B · G[c, m]` where `B = (exp(k·T)−1)/k` is the
+  same ZOH input gain `phasor_kernel` applies to the signal —
+  contrast with `PhasorDense`'s 3D Phase Dirac dispatch, which
+  interprets bias as a phantom spike with `arg(b)` timing. See
+  `docs/three_view_mismatch_analysis.md` §4.3.
 - `init_weight`: weight init `(rng, out, in) -> Matrix`. Default
   `glorot_uniform`.
 - `init_bias`: bias init `(rng, dims) -> ComplexF32 array`. Default
@@ -679,9 +685,21 @@ function (a::PhasorResonant)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::
     Z = causal_conv(K, H)
 
     if a.use_bias
-        bias_val = ps.bias_real .+ 1.0f0im .* ps.bias_imag
-        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (C_out, L)
-        Z = Z .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
+        # Continuous-current bias semantics (docs/three_view_mismatch_analysis.md
+        # §4.3): `b` is a constant complex current added to the input current
+        # at every period. Under ZOH, the recurrence z[n+1] = A·z[n] + B·H[n]
+        # with H[n] += b gives the closed-form bias contribution
+        #     Z_bias[c, m] = b[c] · B_c · G[c, m] = b[c] · (A_c^(m+1) − 1)/k_c
+        # — the same `B = (exp(k·T)−1)/k` ZOH input gain that `phasor_kernel`
+        # applies to the signal. Without the `B` factor the bias is wrong by
+        # ~|k|/|A−1| ≈ 50× in magnitude and ~arg(B) ≈ 0.01·π in phase
+        # at default decay (λ = −0.2, ω = 2π, T = 1).
+        bias_val = ps.bias_real .+ 1.0f0im .* ps.bias_imag                   # (C_out,)
+        k_c   = ComplexF32.(λ .+ 1im .* ω)                                   # (C_out,)
+        B_gain = (exp.(k_c .* 1f0) .- 1f0) ./ k_c                            # (C_out,) ZOH input gain
+        b_eff = B_gain .* bias_val                                           # (C_out,)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                           # (C_out, L)
+        Z = Z .+ reshape(b_eff, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # complex_to_angle is magnitude-independent, so when the activation is
@@ -728,7 +746,15 @@ Dispatches on input dimensionality (3D only — STFT is inherently temporal):
 - `in_dims::Int`: Input feature dimension
 - `n_freqs::Int`: Number of frequency analysis channels (output dimension)
 - `activation::Function`: Normalization function (Complex → Complex)
-- `use_bias::Bool`: Whether to apply complex bias
+- `use_bias::Bool`: Whether to apply complex bias. Bias semantics
+  differ between the two dispatches:
+    - 3D Complex (continuous-signal / ZOH): `b` is a constant complex
+      current, accumulated as `b · B · G[c, m]` with the ZOH input
+      gain `B = (exp(k·T)−1)/k`.
+    - 3D Phase (Dirac): `b` is a phantom spike with timing
+      `t_s = phase_to_time(arg(b))`, accumulated as
+      `|b|·exp(k·dt(b)) · G[c, m]`.
+  See `docs/three_view_mismatch_analysis.md` §3 and §4.3.
 - `init_weight::Function`: Weight initializer `(rng, out, in) -> Matrix`
 - `init_bias::Function`: Bias initializer `(rng, dims) -> ComplexF32 array`
 - `omega_lo::Float32`: Lower bound for omega initialization
@@ -840,15 +866,21 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, st
     # Temporal integration via causal convolution
     Z_sig = causal_conv(K, H)
 
-    # Per-period bias drive accumulated through the SSM kernel at the
-    # signal-compartment frequency `ω`, then carried through `_freq_shift`
-    # like the rest of the signal (matches the ODE semantics; bias is a
-    # constant current injected into the same dynamics, not a post-hoc
-    # offset).
+    # Continuous-current bias semantics (docs/three_view_mismatch_analysis.md
+    # §4.3) — same as PhasorResonant's 3D Complex dispatch. Bias is a
+    # constant complex current per frequency channel; the ZOH input gain
+    # `B = (exp(k·T)−1)/k` must be applied before the per-period
+    # accumulator, matching the gain `phasor_kernel` applies to the signal.
+    # `_freq_shift` below is a phase modulation that commutes with the
+    # bias addition, so this lands the bias correctly at the downstream
+    # carrier `omega_out` along with the signal.
     if a.use_bias
-        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
-        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (n_freqs, L)
-        Z_sig = Z_sig .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag           # (n_freqs,)
+        k_c   = ComplexF32.(λ .+ 1im .* ω)                                   # (n_freqs,)
+        B_gain = (exp.(k_c .* 1f0) .- 1f0) ./ k_c                            # (n_freqs,)
+        b_eff = B_gain .* bias_val                                           # (n_freqs,)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                           # (n_freqs, L)
+        Z_sig = Z_sig .+ reshape(b_eff, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # Frequency shift: re-encode at downstream carrier omega_out

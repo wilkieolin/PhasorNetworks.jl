@@ -33,6 +33,7 @@ function ssm_tests()
         normalize_to_unit_circle_hard_mode_tests()
         soft_normalize_to_unit_circle_zero_tests()
         phasor_stft_sparse_input_tests()
+        zoh_bias_continuous_current_tests()
     end
 end
 
@@ -1368,5 +1369,107 @@ function phasor_stft_sparse_input_tests()
         @test sum(isinf, gs[1].log_neg_lambda) == 0
         # Gradient should still carry signal (non-zero where active region drove output).
         @test sum(abs, gs[1].weight) > 0
+    end
+end
+
+"""
+Pin the §4.3 ZOH-bias semantics: in `PhasorResonant` and `ResonantSTFT`'s
+3D Complex dispatches, bias is treated as a continuous complex current.
+The closed-form per-period contribution at sample `m` is
+
+    Z_bias[c, m]  =  b · B_c · G[c, m]
+                  =  b · (A_c^(m+1) − 1) / k_c
+
+where `B_c = (exp(k_c·T)−1)/k_c` is the ZOH input gain (same factor
+`phasor_kernel` applies to the signal) and `A_c = exp(k_c·T)`. This
+test bias-only-probes both layers (zero weights, nonzero bias) and
+asserts that the layer's complex output matches the analytical
+reference within solver tolerance. Pre-§4.3 the layers used `b · G`
+without the `B` factor, so this test would catch that regression.
+
+`PhasorResonant` always passes through `complex_to_angle` so we can
+only check the phase direction (magnitude information is discarded by
+the unit-circle activation). For magnitude validation we use
+`ResonantSTFT(...; activation = identity)` with `omega_lo = omega_hi
+= omega_out` so `_freq_shift` is a no-op and the raw `Z_bias` is
+visible at the layer output.
+"""
+function zoh_bias_continuous_current_tests()
+    @testset "ZOH bias = continuous current (§4.3)" begin
+        rng = Xoshiro(0)
+        T = 1f0
+        L, B = 4, 1
+        n = 4
+
+        # ---- ResonantSTFT bias-only probe (raw complex output) ----
+        @testset "ResonantSTFT analytical bias-only match" begin
+            ω_const = Float32(2π)
+            log_λ   = Float32(log(0.2))
+            layer = ResonantSTFT(1 => n, identity;
+                                 use_bias = true,
+                                 omega_lo = ω_const,
+                                 omega_hi = ω_const,
+                                 omega_out = ω_const,
+                                 init_log_neg_lambda = log_λ)
+            ps, st = Lux.setup(rng, layer)
+            br, bi = 0.3f0, 0.4f0
+            ps = merge(ps, (weight   = zeros(Float32, n, 1),
+                             bias_real = fill(br, n),
+                             bias_imag = fill(bi, n)))
+
+            x = zeros(ComplexF32, 1, L, B)
+            y, _ = layer(x, ps, st)              # (n, L, B) ComplexF32
+
+            λ = -exp.(ps.log_neg_lambda)
+            ω = ps.omega
+            k = ComplexF32.(λ .+ 1im .* ω)
+            A = exp.(k .* T)
+            b = ComplexF32(br + bi*1im)
+
+            # Analytical reference: b · B · G[c, m] = b · (A^(m+1) − 1)/k
+            ref = [b * (A[c]^(m+1) - 1f0) / k[c] for c in 1:n, m in 0:L-1]
+            ref_3d = reshape(ref, n, L, 1)
+
+            # Both magnitude and phase must match within solver tolerance.
+            @test maximum(abs.(y .- ref_3d)) < 1f-5
+            # Sanity: bias contribution grows monotonically over periods at
+            # this λ — non-trivial reference, not a degenerate zero.
+            mags = [mean(abs.(y[:, m, :])) for m in 1:L]
+            @test issorted(mags)
+            @test mags[end] > 1f-2
+        end
+
+        # ---- PhasorResonant bias-only probe (Phase output) ----
+        @testset "PhasorResonant analytical bias-only direction" begin
+            ω_const = Float32(2π)
+            log_λ   = Float32(log(0.2))
+            layer = PhasorResonant(1 => n;
+                                   omega = ω_const,
+                                   use_bias = true,
+                                   init_log_neg_lambda = log_λ)
+            ps, st = Lux.setup(rng, layer)
+            br, bi = 0.3f0, 0.4f0
+            ps = merge(ps, (weight   = zeros(Float32, n, 1),
+                             bias_real = fill(br, n),
+                             bias_imag = fill(bi, n)))
+
+            x = zeros(ComplexF32, 1, L, B)
+            y, _ = layer(x, ps, st)              # (n, L, B) Phase
+
+            λ = -exp.(ps.log_neg_lambda)
+            ω = zero(λ) .+ st.omega
+            k = ComplexF32.(λ .+ 1im .* ω)
+            A = exp.(k .* T)
+            b = ComplexF32(br + bi*1im)
+
+            ref_complex = [b * (A[c]^(m+1) - 1f0) / k[c] for c in 1:n, m in 0:L-1]
+            ref_phase = complex_to_angle(reshape(ref_complex, n, L, 1))
+
+            # Phase output is wrapped in [-1, 1]; compare via modular arc.
+            arc = let d = mod.(Float32.(y) .- Float32.(ref_phase) .+ 1f0, 2f0) .- 1f0
+                abs.(d)
+            end
+            @test maximum(arc) < 1f-4
+        end
     end
 end
