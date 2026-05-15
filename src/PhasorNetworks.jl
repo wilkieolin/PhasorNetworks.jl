@@ -89,6 +89,7 @@ SSMSelfAttention,
 MakeSpikingSSM,
 ssm_phases_to_train,
 ssm_extract_phases,
+sample_phases_at_periods,
 reconstruct_from_current,
 
 #network

@@ -234,6 +234,15 @@ is not part of the documented forward-pass surface.
 - `init_bias::Function`: Bias initializer `(rng, dims) -> ComplexF32 array`
 - `init_mode::Symbol`: Initialization mode for dynamics (`:default` or `:hippo`)
 - `return_type::SolutionType`: Output format for spiking inputs
+  (`:phase`, `:potential`, `:current`, `:spiking`). For `:phase` over a
+  `SpikingCall`/`CurrentCall` input, the layer returns the **dense
+  per-save-point** Phase trajectory of the ODE solver
+  (`Vector{Matrix{Phase}}` of length `≈ L·T/dt + 1`), not a
+  `(C_out, L, B)` tensor — the dense form preserves sub-period
+  transients. To obtain `(C_out, L, B)` per-period phases (e.g. to
+  compare against the discrete Dirac path or feed a downstream
+  consumer that expects a Phase tensor), pull the raw `ODESolution`
+  via `:potential` and call [`sample_phases_at_periods`](@ref).
 - `init_log_neg_lambda::Union{Float32, Nothing}`: Optional uniform override
   for the initial value of `log_neg_lambda`. When `nothing` (default), each
   `init_mode` uses its own preset (see *Init Modes* below). Useful at long

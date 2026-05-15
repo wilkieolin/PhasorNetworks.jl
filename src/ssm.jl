@@ -484,6 +484,98 @@ function ssm_extract_phases(sol, L::Int, t_period::Float32, activation::Function
     return activation(Z)
 end
 
+"""
+    sample_phases_at_periods(sol, L::Int, spk_args::SpikingArgs;
+                              activation = identity,
+                              unrotate::Bool = false,
+                              offset::Real = 0.0f0) -> AbstractArray{<:Phase}
+
+Interpolate an ODE solution (or any callable returning the per-time
+membrane potential) at the L period boundaries
+`Float32(n) * spk_args.t_period + offset`, optionally apply
+[`unrotate_solution`](@ref) to put the samples in the static phase
+frame, then apply `activation` and [`complex_to_angle`](@ref) to
+return a Phase tensor.
+
+This is the recommended way to extract per-period phases from a
+`PhasorDense` (or `PhasorConv`) layer running with
+`return_type = SolutionType(:potential)`. The layer's `:phase`
+return type is intentionally the **dense per-save-point trajectory**
+of the ODE solver — it carries sub-period information that
+period-boundary sampling at the layer would discard. When you do
+want per-period phases (e.g. to compare against the discrete Dirac
+output, or to feed a downstream consumer that expects an
+`(C_out, L, B)` Phase tensor), pull the raw `ODESolution` via
+`:potential` and call this helper.
+
+# Arguments
+- `sol`: ODE solution (interpolatable at arbitrary times — typically
+  an `ODESolution` from `DifferentialEquations.solve`, but any
+  callable `t -> potential` works).
+- `L::Int`: Number of period boundaries to sample.
+- `spk_args::SpikingArgs`: Provides `t_period`.
+
+# Keyword arguments
+- `activation = identity`: Applied to the sampled complex potentials
+  before phase extraction. Pass `normalize_to_unit_circle` to match
+  what `PhasorDense`'s `:phase` dispatch does internally.
+- `unrotate::Bool = false`: When `true`, applies
+  [`unrotate_solution`](@ref) so the resulting phases live in the
+  **static phase frame** (matches the 2D Phase MLP and the library
+  ODE convention). When `false` (default), phases live in the
+  **rotating frame at the sample time** — matching the
+  `causal_conv_dirac` / 3D Phase Dirac dispatch's native frame, so
+  `unrotate = false` is the right choice for direct comparison
+  against the discrete Dirac output.
+- `offset::Real = 0.0f0`: Time offset added to the sample times.
+
+# Returns
+A Phase tensor of shape `(C_out, L, B)` for 2D per-time potentials
+(the typical batched case), or `(C_out, L)` for 1D potentials.
+
+# Example
+```julia
+layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                    return_type = SolutionType(:potential))
+ps, st = Lux.setup(rng, layer)
+sol, _ = layer(spiking_call, ps, st)
+phases = sample_phases_at_periods(sol, L, spk_args;
+                                  activation = normalize_to_unit_circle)
+# `phases` is (C_out, L, B) Phase, in the rotating frame — directly
+# comparable to a `causal_conv_dirac`-style 3D Phase output.
+```
+
+See also: [`ssm_extract_phases`](@ref) (returns complex without phase
+conversion or unrotation), [`reconstruct_from_current`](@ref)
+(re-solves a bare oscillator and additionally deconvolves causal
+accumulation — used by SSM attention spiking dispatch).
+"""
+function sample_phases_at_periods(sol, L::Int, spk_args::SpikingArgs;
+                                   activation = identity,
+                                   unrotate::Bool = false,
+                                   offset::Real = 0.0f0)
+    T = spk_args.t_period
+    sample_ts = Float32[Float32(n) * T + Float32(offset) for n in 1:L]
+
+    samples = [sol(t) for t in sample_ts]
+
+    if unrotate
+        samples = unrotate_solution(samples, sample_ts;
+                                    spk_args = spk_args, offset = offset)
+    end
+
+    # Stack into (C_out, L, B) for 2D per-time potentials, or
+    # (C_out, L) for 1D — same convention as ssm_extract_phases.
+    if ndims(samples[1]) == 1
+        Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
+    else
+        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in samples]...; dims = 2)
+    end
+
+    Y = activation(Z)
+    return complex_to_angle(Y)
+end
+
 # ---- Reconstruct 3D complex from CurrentCall ----
 
 """

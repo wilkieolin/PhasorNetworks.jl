@@ -804,10 +804,19 @@ function ssm_spiking_dispatch_tests()
         sc = SpikingCall(train, spk_args, tspan_spk)
 
         @testset "PhasorDense SSM SpikingCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
+            # `:phase` from a SpikingCall returns the dense per-save-point
+            # ODE trajectory by design (preserves sub-period transients).
+            # For per-period (C_out, L, B) phases — the canonical "compare
+            # to the discrete Dirac path" view — request `:potential` and
+            # use `sample_phases_at_periods`.
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:hippo, use_bias=false,
+                                return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
-            y, st_new = layer(sc, ps, st)
+            sol, st_new = layer(sc, ps, st)
+            y = sample_phases_at_periods(sol, L, spk_args;
+                                          activation = normalize_to_unit_circle)
 
             @test size(y) == (C_out, L, B)
             @test eltype(y) <: Phase
@@ -815,11 +824,15 @@ function ssm_spiking_dispatch_tests()
         end
 
         @testset "PhasorDense SSM CurrentCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:hippo, use_bias=false,
+                                return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
             cc = CurrentCall(sc)
-            y, st_new = layer(cc, ps, st)
+            sol, st_new = layer(cc, ps, st)
+            y = sample_phases_at_periods(sol, L, spk_args;
+                                          activation = normalize_to_unit_circle)
 
             @test size(y) == (C_out, L, B)
             @test eltype(y) <: Phase
@@ -897,21 +910,38 @@ function ssm_spiking_correlation_tests()
         C_in, C_out = 4, 8
         L, B = 8, 3
 
-        # Phase-returning layer for both Dirac and spiking comparison
-        layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:hippo, use_bias=false, return_type=SolutionType(:phase))
-        ps, st = Lux.setup(rng, layer)
+        # Two views of the same layer differing only in `return_type`:
+        #   - `:phase`     for the discrete 3D Dirac path on `phases_in`
+        #   - `:potential` for the spiking ODE path on the SpikingCall
+        # `Lux.setup` is called once because parameters and state don't
+        # depend on `return_type` (verified by inspection of
+        # `initialparameters` / `initialstates` for PhasorDense).
+        layer_phase = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                  init_mode=:hippo, use_bias=false,
+                                  return_type=SolutionType(:phase))
+        layer_pot   = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                  init_mode=:hippo, use_bias=false,
+                                  return_type=SolutionType(:potential))
+        ps, st = Lux.setup(rng, layer_phase)
 
         # Random phase input
         phases_in = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
 
-        # Dirac convolution (exact analytical)
-        phases_dirac, _ = layer(phases_in, ps, st)
+        # Dirac convolution (exact analytical, rotating-frame output)
+        phases_dirac, _ = layer_phase(phases_in, ps, st)
 
         # Spiking ODE (single-stage: dz/dt = k·z + W·I(t))
         train = ssm_phases_to_train(phases_in, spk_args=spk_args)
         tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
         sc = SpikingCall(train, spk_args, tspan_spk)
-        phases_spiking, _ = layer(sc, ps, st)
+        sol, _ = layer_pot(sc, ps, st)
+
+        # Sample at L period boundaries, no unrotation, so the result
+        # lives in the same rotating frame as `phases_dirac` — see
+        # docs/three_view_mismatch_analysis.md §4.1 for the frame story.
+        phases_spiking = sample_phases_at_periods(sol, L, spk_args;
+                                                   activation = normalize_to_unit_circle,
+                                                   unrotate = false)
 
         @testset "output shapes match" begin
             @test size(phases_dirac) == size(phases_spiking)
@@ -933,9 +963,11 @@ function ssm_spiking_correlation_tests()
         @testset "spiking ODE correlates with Dirac" begin
             c = cor_realvals(vec(Float32.(phases_dirac)),
                              vec(Float32.(phases_spiking)))
-            # The single-stage ODE should correlate positively with the
-            # exact Dirac result. The gap comes from the finite-width spike
-            # kernel and ODE solver temporal discretization.
+            # Same frame on both sides; only solver discretization and
+            # the finite-width spike kernel separate them. Empirically
+            # ρ ≈ 0.97–1.00 per `test/scratch/post_fix_check.jl`; the
+            # 0.3 floor is generous to keep the test robust to solver
+            # tweaks.
             @test c > 0.3
         end
     end
