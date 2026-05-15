@@ -214,10 +214,6 @@ end
 # 4. Model Construction
 # ================================================================
 
-# Convert Phase arrays to complex (for attention layers); pass complex through unchanged
-_to_complex(x::AbstractArray{<:Phase}) = angle_to_complex(x)
-_to_complex(x::AbstractArray{<:Complex}) = x
-
 """
     create_model(; C_in, D_hidden, n_classes, init_mode, readout_frac)
 
@@ -251,10 +247,7 @@ function create_ablation_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
         push!(layers, PhasorDense(C_in => D_hidden, normalize_to_unit_circle; use_bias=false))
     end
 
-    # Optional attention (requires complex input; Phase output from prior layer
-    # must be converted to complex on the unit circle)
     if use_attention
-        push!(layers, Lux.WrappedFunction(_to_complex))
         push!(layers, SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle))
     end
 
