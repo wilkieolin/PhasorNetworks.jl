@@ -7,51 +7,6 @@
 # This file keeps: SSMReadout, attention layers, encoding, spiking helpers,
 # and a backward-compatible PhasorSSM(...) constructor function.
 
-# ================================================================
-# 1. PhasorSSM Backward-Compatible Constructor
-# ================================================================
-
-"""
-    PhasorSSM(in_dims => out_dims, activation; init_omega_range, init, return_type)
-
-Backward-compatible constructor that returns a `PhasorDense` with SSM-appropriate defaults.
-
-This function exists for backward compatibility. New code should use `PhasorDense` directly
-with `init_mode=:uniform` or `init_mode=:hippo`.
-
-# Arguments
-- `dims::Pair{Int,Int}` — Channel dimensions (same as `PhasorDense(in => out)`).
-- `activation` — Applied after temporal integration. Default `normalize_to_unit_circle`.
-- `init_omega_range` — Initial spread of angular frequencies. Default `(0.2, 2.5)`.
-- `init` — Parameter initialization: `:uniform` or `:hippo`.
-- `return_type` — Output format. Default `SolutionType(:phase)`.
-
-# Returns
-A `PhasorDense` layer configured for SSM use (no bias, uniform/hippo init).
-"""
-function PhasorSSM(dims::Pair{Int,Int}, act=normalize_to_unit_circle;
-                   init_omega_range=(0.2f0, 2.5f0), init=:default,
-                   return_type::SolutionType=SolutionType(:phase))
-    @assert init in (:default, :hippo) "init must be :default or :hippo " *
-        "(:uniform was removed: it spread ω across channels, breaking the per-channel ω rule)"
-    Base.depwarn("PhasorSSM is deprecated, use PhasorDense with init_mode instead", :PhasorSSM)
-    # `init_omega_range` is no longer used (per-channel ω rule means ω = 2π
-    # for every channel) but the kwarg is preserved as a no-op for callers
-    # that still pass it.
-    return PhasorDense(dims, act;
-                       init_mode=init,
-                       use_bias=false,
-                       return_type=return_type)
-end
-
-# Parameterlength for backward compat (PhasorDense doesn't define this)
-function Lux.parameterlength(l::PhasorDense)
-    n = l.out_dims * l.in_dims + l.out_dims  # weight + log_neg_lambda
-    if l.use_bias
-        n += 2 * l.out_dims  # bias_real + bias_imag
-    end
-    return n
-end
 
 # ================================================================
 # 2. SSM Readout Layer (Codebook-First)

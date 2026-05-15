@@ -408,16 +408,26 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
     Z = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     if a.use_bias
-        # Per-period bias drive: bias enters as a constant kick at every
-        # period and is accumulated by the SSM kernel — the discrete
-        # equivalent of `bias_current` in the CurrentCall path. Without
-        # this scaling the bias is ~150× weaker than the accumulated
-        # signal at slow-decay encoder settings (α = 5/L), so silent
-        # neurons drift to the origin instead of defaulting to the
-        # bias-direction "wave" the static-MLP convention assumes.
+        # Per-period bias drive accumulated through the SSM kernel —
+        # the discrete equivalent of `bias_current` in the CurrentCall
+        # path. The bias is encoded with the **same** spike-time
+        # semantics as the data input: a complex bias `b` is
+        # interpreted as a phantom spike at time
+        # `t_s = phase_to_time(arg(b)) = T·(arg(b)/π/2 + 0.5)` with
+        # magnitude `|b|`, which the receiving oscillator integrates
+        # over the remaining `dt(b) = T·(0.5 − arg(b)/π/2)`. Without
+        # the `exp(k·dt(b))` factor the bias would land in a different
+        # sub-frame than the signal (signal carries `exp(k·dt(θ_in))`
+        # via `causal_conv_dirac`, bias carried only the raw `b`),
+        # which then mismatches `bias_current` after `unrotate_solution`
+        # in the ODE path. See `docs/three_view_mismatch_analysis.md`.
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag       # (C,)
-        G = bias_kernel_accumulation(λ, ω, 1f0, L)                       # (C, L)
-        Z = Z .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
+        bphase = angle.(bias_val) ./ Float32(π)                           # (C,) ∈ [-1,1]
+        dt_b = 0.5f0 .- bphase ./ 2f0                                     # (C,) (T = 1)
+        k_c  = ComplexF32.(λ .+ 1im .* ω)                                 # (C,)
+        b_eff = abs.(bias_val) .* exp.(k_c .* dt_b)                       # (C,)
+        G = bias_kernel_accumulation(λ, ω, 1f0, L)                        # (C, L)
+        Z = Z .+ reshape(b_eff, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # Skip normalization when the activation is normalize_to_unit_circle:
@@ -824,9 +834,19 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
     Z_sig = causal_conv_dirac(x, params.weight, λ, ω, 1f0)
 
     if a.use_bias
+        # Same spike-time bias encoding as PhasorDense._forward_3d_dirac:
+        # interpret bias `b` as a phantom spike at
+        # `t_s = phase_to_time(arg(b))` with magnitude `|b|`, integrated
+        # by each frequency channel's own (λ_f, ω_f) for the remaining
+        # `dt(b) = T·(0.5 − arg(b)/π/2)`. See
+        # `docs/three_view_mismatch_analysis.md`.
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        bphase = angle.(bias_val) ./ Float32(π)
+        dt_b = 0.5f0 .- bphase ./ 2f0
+        k_c  = ComplexF32.(λ .+ 1im .* ω)
+        b_eff = abs.(bias_val) .* exp.(k_c .* dt_b)
         G = bias_kernel_accumulation(λ, ω, 1f0, L)
-        Z_sig = Z_sig .+ reshape(bias_val, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
+        Z_sig = Z_sig .+ reshape(b_eff, :, 1, 1) .* reshape(G, size(G, 1), size(G, 2), 1)
     end
 
     # Frequency shift: re-encode at downstream carrier omega_out
