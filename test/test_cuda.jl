@@ -51,8 +51,18 @@ function cuda_core_tests()
     @testset "CUDA Core Functionality Tests" begin
         sol_cpu, err_cpu = bundling_test(spk_args_cuda, "cpu")
         sol_gpu, err_gpu = bundling_test(spk_args_cuda, "gpu")
-        
-        max_comparative_error = maximum(err_cpu .- err_gpu)
+
+        # CPU and GPU bundle the same spike train through the same ODE; their
+        # phase outputs should agree. But phases live on a circle of period 2
+        # (units of π), so a raw subtraction `err_cpu .- err_gpu` is wrong at
+        # the wrap point: a CPU phase of `+1` and a GPU phase of `−1` are the
+        # *same* angle (π), differing only in branch choice. Use the existing
+        # `arc_error` (sin(π·δ)) which is the canonical circular distance —
+        # smooth, zero at δ = 0, and zero at δ = ±2 (full wrap). Without this,
+        # the 22 degenerate grid points (where the static bundle is identically
+        # zero — antipodal phases summing to 0 + 0i, e.g. x=0.5/y=−0.5) flip
+        # sign on round-off and produce spurious ~2.0 errors.
+        max_comparative_error = maximum(abs.(arc_error(Float32.(err_cpu) .- Float32.(err_gpu))))
         @test max_comparative_error < 1e-3
     end
 end
