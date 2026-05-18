@@ -742,10 +742,34 @@ Dispatches on input dimensionality (3D only — STFT is inherently temporal):
   ODE-via-`unrotate_solution` pair. See
   `docs/three_view_mismatch_analysis.md` §4.1 for the rationale.
 
+# Activation modes
+
+The post-`_freq_shift` complex output `Z` is mapped to the unit circle via
+one of two modes, selected at construction:
+
+- **Trainable SLERP (default, `activation = nothing`)** — applies
+  `soft_normalize_to_unit_circle(Z, r_lo, r_hi)` using per-channel trainable
+  thresholds. The thresholds live in the layer's parameters as
+  `log_r_lo, log_r_gap` (vectors of length `n_freqs`), with the
+  positivity-preserving parameterization
+
+      r_lo = exp(log_r_lo),     r_hi = r_lo + exp(log_r_gap)
+
+  so `r_hi > r_lo > 0` is preserved by construction. The SLERP gate
+  collapses sub-threshold channels to the silent reference `1 + 0im` and
+  passes through phase on resonant channels, with a sigmoid blend in the
+  transition. See `soft_normalize_to_unit_circle` and `demos/resonant_stft_behavior.ipynb`.
+
+- **Legacy fixed activation (`activation::Function` passed positionally)** —
+  applies the supplied function to `Z` with no trainable threshold params.
+  Used by tests that need raw complex output (`identity`) or fixed
+  normalization (`normalize_to_unit_circle`).
+
 # Fields
 - `in_dims::Int`: Input feature dimension
 - `n_freqs::Int`: Number of frequency analysis channels (output dimension)
-- `activation::Function`: Normalization function (Complex → Complex)
+- `activation::Union{Nothing, Function}`: `nothing` ⇒ trainable SLERP;
+  otherwise a Complex → Complex function applied to `Z` (legacy path).
 - `use_bias::Bool`: Whether to apply complex bias. Bias semantics
   differ between the two dispatches:
     - 3D Complex (continuous-signal / ZOH): `b` is a constant complex
@@ -764,16 +788,18 @@ Dispatches on input dimensionality (3D only — STFT is inherently temporal):
   for every channel (default `log(0.1)` ⇒ `λ = -0.1`). Override at long
   sequence lengths `L` where `λ · L < log(eps(Float32)) ≈ -88` would cause
   `phasor_kernel` to underflow.
+- `init_r_lo::Float32`, `init_r_hi::Float32`: Initial SLERP thresholds when
+  trainable SLERP is active. Ignored when `activation` is a `Function`.
 
 # State
 - `omega_out` — Float32, downstream carrier frequency (fixed)
 
-See also: [`PhasorDense`](@ref)
+See also: [`PhasorDense`](@ref), [`soft_normalize_to_unit_circle`](@ref)
 """
 struct ResonantSTFT <: Lux.AbstractLuxLayer
     in_dims::Int
     n_freqs::Int
-    activation::Function
+    activation::Union{Nothing, Function}
     use_bias::Bool
     init_weight::Function
     init_bias::Function
@@ -781,20 +807,26 @@ struct ResonantSTFT <: Lux.AbstractLuxLayer
     omega_hi::Float32
     omega_out::Float32
     init_log_neg_lambda::Float32
+    init_r_lo::Float32
+    init_r_hi::Float32
 end
 
 function ResonantSTFT(shape::Pair{<:Integer,<:Integer},
-                    activation = normalize_to_unit_circle;
+                    activation::Union{Nothing, Function} = nothing;
                     use_bias::Bool = false,
                     init_weight = nothing,
                     init_bias = default_bias,
                     omega_lo::Real = 0.2f0,
                     omega_hi::Real = 2.5f0,
                     omega_out::Real = Float32(2π),
-                    init_log_neg_lambda::Real = log(0.1))
+                    init_log_neg_lambda::Real = log(0.1),
+                    init_r_lo::Real = 0.1f0,
+                    init_r_hi::Real = 0.6f0)
     if init_weight === nothing
         init_weight = glorot_uniform
     end
+    init_r_hi > init_r_lo > 0 || throw(ArgumentError(
+        "ResonantSTFT requires 0 < init_r_lo < init_r_hi (got $init_r_lo, $init_r_hi)"))
     return ResonantSTFT(shape[1], shape[2],
                       activation,
                       use_bias,
@@ -803,7 +835,9 @@ function ResonantSTFT(shape::Pair{<:Integer,<:Integer},
                       Float32(omega_lo),
                       Float32(omega_hi),
                       Float32(omega_out),
-                      Float32(init_log_neg_lambda))
+                      Float32(init_log_neg_lambda),
+                      Float32(init_r_lo),
+                      Float32(init_r_hi))
 end
 
 # Frequency-shift modulation: re-encode from per-channel omega to uniform omega_out
@@ -832,6 +866,14 @@ function Lux.initialparameters(rng::AbstractRNG, l::ResonantSTFT)
                                          bias_imag = Float32.(imag.(bias))))
     end
 
+    if l.activation === nothing
+        # Trainable SLERP thresholds; positivity-preserving via
+        # r_lo = exp(log_r_lo), r_hi = r_lo + exp(log_r_gap).
+        log_r_lo  = fill(Float32(log(l.init_r_lo)), l.n_freqs)
+        log_r_gap = fill(Float32(log(l.init_r_hi - l.init_r_lo)), l.n_freqs)
+        parameters = merge(parameters, (log_r_lo = log_r_lo, log_r_gap = log_r_gap))
+    end
+
     return parameters
 end
 
@@ -844,7 +886,19 @@ function Lux.parameterlength(l::ResonantSTFT)
     if l.use_bias
         n += 2 * l.n_freqs
     end
+    if l.activation === nothing
+        n += 2 * l.n_freqs                              # log_r_lo + log_r_gap
+    end
     return n
+end
+
+# Apply the trainable-SLERP activation given the layer params reshape-broadcasted
+# over the (n_freqs, L, B) output. Kept inline so both dispatches stay terse.
+@inline function _apply_trainable_slerp(Z::AbstractArray{<:Complex, 3}, params)
+    n = size(Z, 1)
+    r_lo = exp.(reshape(params.log_r_lo, n, 1, 1))
+    r_hi = r_lo .+ exp.(reshape(params.log_r_gap, n, 1, 1))
+    return soft_normalize_to_unit_circle(Z, r_lo, r_hi)
 end
 
 # ---- 3D Complex dispatch ----
@@ -886,7 +940,7 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Complex, 3}, params::LuxParams, st
     # Frequency shift: re-encode at downstream carrier omega_out
     Z = _freq_shift(Z_sig, ω, state.omega_out, 1f0)
 
-    Y = a.activation(Z)
+    Y = a.activation === nothing ? _apply_trainable_slerp(Z, params) : a.activation(Z)
     return Y, state
 end
 
@@ -928,7 +982,10 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
     # commentary.
     Z = -conj.(Z)
 
-    if a.activation === normalize_to_unit_circle
+    if a.activation === nothing
+        Y = _apply_trainable_slerp(Z, params)
+        return complex_to_angle(Y), state
+    elseif a.activation === normalize_to_unit_circle
         return complex_to_angle(Z), state
     else
         Y = a.activation(Z)

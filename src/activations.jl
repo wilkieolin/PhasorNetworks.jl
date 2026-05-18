@@ -192,6 +192,109 @@ function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real =
     return cos.(blend .* θ) .+ im .* sin.(blend .* θ)
 end
 
+"""
+    soft_normalize_to_unit_circle(z, r_lo, r_hi)
+
+Positional-argument form for use with **trainable thresholds**. `r_lo` and
+`r_hi` may be scalars or arrays broadcasting with `z` (e.g. a length-`C`
+vector reshaped to `(C, 1, 1)` to apply a per-channel gate over `(C, L, B)`
+data). Semantics match the kwargs form; the difference is that the
+companion `rrule` for this method also propagates gradients into `r_lo`
+and `r_hi`, so they can sit in a Lux layer's `parameters` and be trained
+end-to-end.
+
+For the math and stability rationale see the kwargs version above.
+"""
+function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex},
+                                       r_lo::Union{Real, AbstractArray},
+                                       r_hi::Union{Real, AbstractArray})
+    rl = Float32.(r_lo)
+    rh = Float32.(r_hi)
+    midpoint = (rl .+ rh) ./ 2f0
+    k = 6f0 ./ (rh .- rl)
+    r = abs.(z)
+    safe_r = max.(r, 1f-10)
+    blend = sigmoid_fast.(k .* (r .- midpoint))
+    unit_z = z ./ safe_r
+    θ = atan.(imag.(unit_z), real.(unit_z))
+    return cos.(blend .* θ) .+ im .* sin.(blend .* θ)
+end
+
+# Closed-form pullback for the positional (trainable-threshold) form.
+# Forward: y = exp(i·φ),  φ = blend(r, r_lo, r_hi) · θ(z),
+#   blend = σ(u),  u = k · (r − m),  k = 6/(r_hi − r_lo),  m = (r_lo + r_hi)/2
+#   θ     = atan(imag(z/safe_r), real(z/safe_r))
+#
+# dz follows the kwargs-version derivation (k σ' is ∂blend/∂r).
+# For the thresholds:
+#   ∂k/∂r_lo =  k² / 6,   ∂k/∂r_hi = −k² / 6
+#   ∂m/∂r_lo =  ∂m/∂r_hi = 0.5
+#   ∂u/∂r_lo =  (k²/6)·(r−m) − 0.5·k
+#   ∂u/∂r_hi = −(k²/6)·(r−m) − 0.5·k
+# and ∂φ/∂r_• = θ · σ'(u) · ∂u/∂r_•.
+# Per-element contributions are reduced (summed) to match the shapes of
+# `r_lo` and `r_hi` — handles both scalar thresholds (sum over all elements)
+# and broadcasted per-channel vectors (sum over the broadcast-1 dims).
+function ChainRulesCore.rrule(::typeof(soft_normalize_to_unit_circle),
+                              z::AbstractArray{<:Complex},
+                              r_lo::Union{Real, AbstractArray},
+                              r_hi::Union{Real, AbstractArray})
+    rl = Float32.(r_lo)
+    rh = Float32.(r_hi)
+    midpoint = (rl .+ rh) ./ 2f0
+    k = 6f0 ./ (rh .- rl)
+    th = 1f-10
+
+    r = abs.(z)
+    safe_r = max.(r, th)
+    u = k .* (r .- midpoint)
+    blend = sigmoid_fast.(u)
+    unit_z = z ./ safe_r
+    θ = atan.(imag.(unit_z), real.(unit_z))
+    y = cos.(blend .* θ) .+ im .* sin.(blend .* θ)
+
+    function soft_normalize_to_unit_circle_pos_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        active = r .> th
+        dLdφ = imag.(ȳ .* conj.(y))                          # real
+        σ_deriv = blend .* (1f0 .- blend)                    # σ'(u)
+
+        # ---- dz (matches the kwargs-version derivation) ----
+        blend_deriv_r = k .* σ_deriv                         # ∂blend/∂r
+        coeff = (θ .* blend_deriv_r .* safe_r .+ 1f0im .* blend) ./ (safe_r .^ 2)
+        dz_active = dLdφ .* z .* coeff
+        dz = ifelse.(active, dz_active, zero(eltype(z)))
+
+        # ---- dr_lo, dr_hi ----
+        kk_over_6 = (k .* k) ./ 6f0
+        gap_term  = kk_over_6 .* (r .- midpoint)             # (k²/6)·(r−m)
+        du_drlo   =   gap_term .- 0.5f0 .* k
+        du_drhi   =  -gap_term .- 0.5f0 .* k
+        common    = ifelse.(active, dLdφ .* σ_deriv .* θ, zero(eltype(blend)))
+        per_drlo  = common .* du_drlo
+        per_drhi  = common .* du_drhi
+
+        dr_lo = _reduce_to_shape(per_drlo, r_lo)
+        dr_hi = _reduce_to_shape(per_drhi, r_hi)
+        return (NoTangent(), dz, dr_lo, dr_hi)
+    end
+    return y, soft_normalize_to_unit_circle_pos_pullback
+end
+
+# Reduce a per-element gradient array to the shape of `target`, by summing
+# over dimensions on which `target` is a singleton (or trailing). Handles
+# both scalar (Real) and array targets — scalars get the full sum.
+_reduce_to_shape(grad::AbstractArray, ::Real) = sum(grad)
+function _reduce_to_shape(grad::AbstractArray, target::AbstractArray)
+    dims_to_sum = Tuple(i for i in 1:ndims(grad)
+                         if i > ndims(target) || size(target, i) == 1)
+    result = isempty(dims_to_sum) ? grad : sum(grad; dims=dims_to_sum)
+    if ndims(target) < ndims(result)
+        result = dropdims(result; dims=Tuple(ndims(target)+1:ndims(result)))
+    end
+    return result
+end
+
 # Closed-form pullback for soft_normalize_to_unit_circle.
 #
 # Forward: y = exp(i · φ),  φ = blend(r) · θ(z),
