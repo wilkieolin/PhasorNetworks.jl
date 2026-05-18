@@ -2,9 +2,9 @@
 #
 # These functions are intended to be passed as the `activation` argument to
 # layers like `PhasorDense`, `PhasorConv`, `PhasorResonant`, `ResonantSTFT`,
-# `PhasorFixed`, `PhasorSSM`, and the `SSM*Attention` family. They take a
-# complex-valued input (typically the post-`W·x + bias` linear output of a
-# layer) and return a complex-valued output suitable for the next stage.
+# `PhasorFixed`, and the `SSM*Attention` family. They take a complex-valued
+# input (typically the post-`W·x + bias` linear output of a layer) and return
+# a complex-valued output suitable for the next stage.
 #
 # Pure domain conversions (`angle_to_complex`, `complex_to_angle`,
 # `cmpx_to_realvec`, `realvec_to_cmpx`, spike helpers, etc.) live in

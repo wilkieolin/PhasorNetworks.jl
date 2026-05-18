@@ -74,7 +74,6 @@ similarity_loss,
 codebook_loss,
 
 #ssm
-PhasorSSM,
 SSMReadout,
 phasor_kernel,
 causal_conv,

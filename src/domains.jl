@@ -797,6 +797,37 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     return phase
 end
 
+"""
+    unrotate_solution(potentials, ts; spk_args::SpikingArgs, offset=0.0f0, bias=nothing)
+
+Remove the global oscillator rotation from a sampled ODE trajectory so the
+resulting potentials live in the **static phase frame** — the convention used
+by the 2D Phase MLP and the post-§4.1 3D Phase Dirac dispatch.
+
+For each sample time `t`, computes a reference phasor `current_zeros[t]`
+representing zero phase at that moment (via [`phase_to_potential`](@ref)),
+then returns `current_zeros .* conj.(potentials)`. After this step, the angle
+of each potential reflects the input phase rather than the oscillator's
+natural rotation at sample time.
+
+# Arguments
+- `potentials::AbstractVector{<:AbstractArray}` — per-sample membrane
+  potentials (e.g. `sol.u`).
+- `ts::AbstractVector` — sample times aligned with `potentials` (e.g. `sol.t`).
+
+# Keyword arguments
+- `spk_args::SpikingArgs` — supplies `t_period` for the reference phasor.
+- `offset::Real = 0.0f0` — time offset added to the reference phasor evaluation.
+- `bias::Union{Nothing, AbstractArray{<:Complex}} = nothing` — optional complex
+  offset added to each potential before derotation (shifts the origin in the
+  complex plane).
+
+# Returns
+A vector of arrays with the same shape as `potentials`, derotated into the
+static phase frame.
+
+See also: [`sample_phases_at_periods`](@ref), [`potential_to_phase`](@ref).
+"""
 function unrotate_solution(potentials::AbstractVector{<:AbstractArray}, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     current_zeros = similar(potentials[1], ComplexF32, (length(ts)))
 

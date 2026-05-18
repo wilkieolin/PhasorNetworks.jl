@@ -509,7 +509,8 @@ end
 
 2-D complex variant: wraps as 3-D with a singleton batch axis, delegates to
 the 3-D path, then squeezes and transposes to match the CPU real-valued 2-D
-convention `(N, M)` (see [`similarity_outer(::AbstractArray{<:Real,2}, ...)`](@ref)).
+convention `(N, M)` — see the `AbstractArray{<:Real,2}` method of
+[`similarity_outer`](@ref).
 """
 function similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
     dims in (1, 2) || error("dims must be 1 or 2 for 2D arrays")
