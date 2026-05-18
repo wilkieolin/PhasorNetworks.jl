@@ -52,7 +52,9 @@ the bare linear SSM cannot express.
   near linear-only.
 - `init_log_beta::Real = log(8.0)` — initial value of `log_beta`
   (exponentiated to `β ≈ 8.0` softmax sharpness).
-- `period::Real = 1.0` — discrete sample interval `T`.
+- `spk_args::SpikingArgs = SpikingArgs()` — shared dynamics. The discrete
+  sample interval is `T = spk_args.t_period`, and the shared carrier is
+  `ω = period_to_angfreq(spk_args.t_period)` (per-channel ω rule).
 - `trainable_codes::Bool = true` — codes in `params` (true) or `state`
   (false).
 
@@ -66,7 +68,9 @@ the bare linear SSM cannot express.
 | `log_alpha` | scalar Float32 | params |
 | `log_beta` | scalar Float32 | params |
 | `codes` | `(state_dims, n_codes)` Phase | params if `trainable_codes`, else state |
-| `omega` | `(state_dims,)` Float32 | state (per-channel ω rule, frozen at 2π) |
+
+`ω` and `T` are derived on demand from `spk_args.t_period` and are not
+stored separately.
 """
 struct AttractorPhasorSSM <: Lux.AbstractLuxLayer
     in_dims::Int
@@ -79,8 +83,8 @@ struct AttractorPhasorSSM <: Lux.AbstractLuxLayer
     init_log_neg_lambda::Union{Vector{Float32}, Nothing}
     init_log_alpha::Float32
     init_log_beta::Float32
-    period::Float32
     trainable_codes::Bool
+    spk_args::SpikingArgs
 end
 
 function AttractorPhasorSSM(shape::Pair{<:Integer,<:Integer}, n_codes::Integer;
@@ -91,8 +95,8 @@ function AttractorPhasorSSM(shape::Pair{<:Integer,<:Integer}, n_codes::Integer;
                              init_log_neg_lambda::Union{Real,AbstractVector{<:Real},Nothing} = nothing,
                              init_log_alpha::Real = log(0.4),
                              init_log_beta::Real = log(8.0),
-                             period::Real = 1.0,
-                             trainable_codes::Bool = true)
+                             trainable_codes::Bool = true,
+                             spk_args::SpikingArgs = SpikingArgs())
     init_codes in (:random, :orthogonal) ||
         throw(ArgumentError("init_codes must be :random or :orthogonal, got :$init_codes"))
     state_dims = shape[2]
@@ -108,12 +112,12 @@ function AttractorPhasorSSM(shape::Pair{<:Integer,<:Integer}, n_codes::Integer;
                                use_bias, init_weight, init_bias,
                                init_codes, lnl_vec,
                                Float32(init_log_alpha), Float32(init_log_beta),
-                               Float32(period), trainable_codes)
+                               trainable_codes, spk_args)
 end
 
 function Base.show(io::IO, l::AttractorPhasorSSM)
     print(io, "AttractorPhasorSSM($(l.in_dims) => $(l.state_dims), $(l.n_codes); ")
-    print(io, "init_codes=:$(l.init_codes), trainable_codes=$(l.trainable_codes), period=$(l.period))")
+    print(io, "init_codes=:$(l.init_codes), trainable_codes=$(l.trainable_codes), t_period=$(l.spk_args.t_period))")
 end
 
 # ---- Lux interface -----------------------------------------------------
@@ -144,11 +148,10 @@ function Lux.initialparameters(rng::AbstractRNG, l::AttractorPhasorSSM)
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::AttractorPhasorSSM)
-    omega = fill(Float32(2π), l.state_dims)
     if l.trainable_codes
-        return (omega = omega,)
+        return NamedTuple()
     else
-        return (omega = omega, codes = _init_codes(rng, l))
+        return (codes = _init_codes(rng, l),)
     end
 end
 
@@ -223,9 +226,10 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
     @assert size(x, 1) == in_dims "input channel mismatch: $(size(x,1)) vs $(in_dims)"
 
     λ      = -exp.(ps.log_neg_lambda)                          # (D,) Real
-    ω_val  = st.omega                                           # (D,) Real
-    k      = ComplexF32.(λ .+ 1im .* ω_val)                     # (D,) Cplx
-    A_step = exp.(k .* l.period)                                # (D,) full-period decay
+    T      = l.spk_args.t_period
+    ω_val  = period_to_angfreq(l.spk_args.t_period)             # scalar Real
+    k      = ComplexF32.(λ .+ 1im .* ω_val)                     # (D,) Cplx (ω broadcasts)
+    A_step = exp.(k .* T)                                       # (D,) full-period decay
     # Keep α and β as 1-element arrays so we can broadcast them on the
     # same device as the state — extracting via [1] would trigger scalar
     # getindex on a CuArray, which Zygote forbids in differentiable code.
@@ -247,7 +251,7 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
     # Per-period Dirac kick for output channel D, given input phases (in_dims, B).
     function _step_kick(phases_t::AbstractMatrix)
         # phases_t :: (in_dims, B) Phase
-        dt_t = l.period .* (0.5f0 .- Float32.(phases_t) ./ 2f0)  # (in_dims, B) Float32
+        dt_t = T .* (0.5f0 .- Float32.(phases_t) ./ 2f0)        # (in_dims, B) Float32
         # _exp_kdt expects rank-3 inputs: k as (D,1,1), dt as (1,in,B).
         enc  = _exp_kdt(reshape(k, D, 1, 1),
                         reshape(dt_t, 1, in_dims, B))            # (D, in_dims, B)
@@ -292,6 +296,10 @@ end
 
 function (l::AttractorPhasorSSM)(x::CurrentCall,
                                   ps::LuxParams, st::NamedTuple)
+    # Split of concerns:
+    #   l.spk_args  — dynamics (ω) for `k = λ + iω`.
+    #   x.spk_args  — simulation-time concerns (solver, bias_current,
+    #                 t_period for sample times, unrotate_solution).
     spk_args = x.spk_args
     tspan    = x.t_span
     L        = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
@@ -309,7 +317,7 @@ function (l::AttractorPhasorSSM)(x::CurrentCall,
     codes_phase = _get_codes(l, ps, st)
     codes_cplx  = angle_to_complex(codes_phase)
 
-    ω_val = st.omega
+    ω_val = period_to_angfreq(l.spk_args.t_period)
 
     function dzdt(u, p, t)
         λ = -exp.(p.log_neg_lambda)

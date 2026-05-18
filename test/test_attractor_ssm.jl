@@ -69,7 +69,7 @@ function test_attractor_pure_convergence()
                                     trainable_codes = false)
         ps, st = Lux.setup(rng, layer)
         # Override the freshly-initialised state codes with our test codes.
-        st = (omega = st.omega, codes = codes)
+        st = (codes = codes,)
 
         # Build an input that's all-zero so W·I makes no contribution.
         # We bootstrap z(0) by driving with the noisy clean phases as the
@@ -145,7 +145,7 @@ function test_attractor_pattern_completion()
                                     init_log_beta  = log(8f0),
                                     trainable_codes = false)
             ps, st = Lux.setup(rng, l)
-            st = (omega = st.omega, codes = codes)                              # pin the same codes
+            st = (codes = codes,)                              # pin the same codes
             return l, ps, st
         end
 

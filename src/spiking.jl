@@ -386,10 +386,9 @@ Expects `params` to contain:
 - `log_neg_lambda` — (out,) log-parameterized decay rates
 - `bias_real`, `bias_imag` — (out,) complex bias (when use_bias=true)
 
-And `state` to contain:
-- `omega` — (out,) angular frequencies (per-channel ω rule: every entry
-  is `2π` for normal phase-locked layers; only `ResonantSTFT` carries
-  a heterogeneous spread).
+ω is derived from `layer.spk_args.t_period` via [`period_to_angfreq`](@ref);
+the layer's `spk_args` is the canonical source for dynamics (ω, T), while
+`x.spk_args` drives the simulation (solver, bias_current, etc.).
 """
 function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
     return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args)
@@ -405,11 +404,12 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
     end
 
     has_bias = use_bias && haskey(params, :bias_real)
+    # ω from layer.spk_args is the dynamics source (per-channel ω rule);
+    # spk_args (from the CurrentCall) drives the solver only.
+    ω_val = period_to_angfreq(layer.spk_args.t_period)
 
     function dzdt(u, p, t)
         λ = -exp.(p.log_neg_lambda)
-        # ω lives in state across all phase-locked layers (per-channel ω rule).
-        ω_val = state.omega
         k = ComplexF32.(λ .+ im .* ω_val)
         I_transformed = p.weight * x.current_fn(t)
         result = k .* u .+ I_transformed

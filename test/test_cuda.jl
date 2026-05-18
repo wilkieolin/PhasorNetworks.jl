@@ -3,11 +3,11 @@
 
 using CUDA
 using Adapt
-using DifferentialEquations # For Heun solver
+using DifferentialEquations: Tsit5
 
 function cuda_core_tests()
-    spk_args_cuda = SpikingArgs(solver = Heun(),
-                solver_args = Dict(:adaptive => false, 
+    spk_args_cuda = SpikingArgs(solver = Tsit5(),
+                solver_args = Dict(:adaptive => false,
                                 :dt => 0.01),
                                 threshold = 0.001)
     

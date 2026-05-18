@@ -237,7 +237,7 @@ function dirac_discretization_tests()
             # ω = 2π (per-channel ω rule).
             x_cmpx = angle_to_complex(phases)
             resonant = PhasorResonant(C_in => C_out, normalize_to_unit_circle;
-                                      omega = st.omega[1],
+                                      spk_args = layer_ssm.spk_args,
                                       init_log_neg_lambda = ps.log_neg_lambda[1])
             ps_r, st_r = Lux.setup(rng, resonant)
             y_cmpx, _ = resonant(x_cmpx, ps_r, st_r)
@@ -265,8 +265,9 @@ function dirac_discretization_tests()
             # to the static phase frame at integer T (with shared ω = 2π,
             # `unrotate_solution` reduces to `-conj(.)`).
             λ = -exp.(ps.log_neg_lambda)
-            ω = st.omega
-            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, 1f0)
+            ω = zero(λ) .+ period_to_angfreq(layer.spk_args.t_period)
+            T = layer.spk_args.t_period
+            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, T)
             y_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
 
             @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
@@ -315,9 +316,10 @@ function phasor_ssm_layer_tests()
         # Parameter shapes
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
-        # Per-channel ω rule: ω is a single scalar shared across channels.
-        @test st.omega isa Real
-        @test st.omega ≈ Float32(2π)
+        # Per-channel ω rule: ω is derived from spk_args.t_period (shared
+        # scalar across channels). State is empty after the refactor.
+        @test st == NamedTuple()
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # parameterlength
         @test Lux.parameterlength(layer) == out_dim * in_dim + out_dim
@@ -335,14 +337,16 @@ function phasor_ssm_layer_tests()
         y2, _ = layer(x2, ps, st)
         @test Float32.(y) != Float32.(y2)
 
-        # Custom (single) omega — every channel shares the same carrier.
-        layer_om = PhasorResonant(in_dim => out_dim; omega = 1.5f0)
-        @test layer_om.omega ≈ 1.5f0
+        # Custom (single) ω — every channel shares the same carrier, derived
+        # from spk_args.t_period.
+        custom_spk = SpikingArgs(t_period = 2π / 1.5f0)
+        layer_om = PhasorResonant(in_dim => out_dim; spk_args = custom_spk)
+        @test period_to_angfreq(layer_om.spk_args.t_period) ≈ 1.5f0
         _, st_om = Lux.setup(rng, layer_om)
-        @test st_om.omega ≈ 1.5f0
+        @test st_om == NamedTuple()
 
-        # Default omega is 2π (per-channel ω rule).
-        @test layer.omega ≈ Float32(2π)
+        # Default ω is 2π (per-channel ω rule, t_period = 1).
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # Per-channel multi-timescale λ via init_log_neg_lambda vector.
         lnl_vec = collect(range(log(0.01), log(0.5); length=out_dim))
@@ -962,8 +966,9 @@ function ssm_spiking_correlation_tests()
             # `-conj.(Z_manual)` mirrors the layer's §4.1 derotation
             # to the static phase frame.
             λ_c = -exp.(ps.log_neg_lambda)
-            ω_c = st.omega
-            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, 1f0)
+            ω_c = zero(λ_c) .+ period_to_angfreq(layer_pot.spk_args.t_period)
+            T_c = layer_pot.spk_args.t_period
+            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, T_c)
             phases_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
             @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end
@@ -1040,9 +1045,9 @@ function phasor_stft_tests()
         @test size(ps.log_neg_lambda) == (n_freqs,)
         @test size(ps.omega) == (n_freqs,)
 
-        # State: omega_out is fixed
-        @test haskey(st, :omega_out)
-        @test st.omega_out ≈ Float32(2π)
+        # State is empty after the refactor; ω_out is derived from spk_args.
+        @test st == NamedTuple()
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # Omega initialized as uniform spread
         @test ps.omega[1] ≈ 0.2f0
@@ -1084,17 +1089,20 @@ function phasor_stft_tests()
         @test all(isfinite, grads[1].log_neg_lambda)
         @test all(isfinite, grads[1].omega)
 
-        # Frequency shift identity: when omega_out == omega, shift is no-op
-        st_match = (omega_out = ps.omega[1],)
-        layer_id = ResonantSTFT(in_dim => 1, identity; omega_lo=ps.omega[1], omega_hi=ps.omega[1])
-        ps_id, _ = Lux.setup(rng, layer_id)
-        # Override omega to match omega_out exactly
-        ps_id = merge(ps_id, (omega = Float32[st_match.omega_out],))
+        # Frequency shift identity: when ω_out == ω, shift is no-op.
+        # Pick a per-channel ω equal to the layer's spk_args carrier (2π by
+        # default), so `_freq_shift` produces an identity rotation.
+        ω_target = period_to_angfreq(SpikingArgs().t_period)
+        layer_id = ResonantSTFT(in_dim => 1, identity; omega_lo=ω_target, omega_hi=ω_target)
+        ps_id, st_id = Lux.setup(rng, layer_id)
+        # Override omega to match ω_out exactly
+        ps_id = merge(ps_id, (omega = Float32[ω_target],))
         x_small = randn(rng, ComplexF32, in_dim, L, B)
-        y_shift, _ = layer_id(x_small, ps_id, st_match)
+        y_shift, _ = layer_id(x_small, ps_id, st_id)
         # Build expected output without shift (standard causal conv)
         λ_id = -exp.(ps_id.log_neg_lambda)
-        K_id = phasor_kernel(λ_id, ps_id.omega, 1f0, L)
+        T_id = layer_id.spk_args.t_period
+        K_id = phasor_kernel(λ_id, ps_id.omega, T_id, L)
         xr = reshape(x_small, in_dim, L * B)
         Hr = complex.(ps_id.weight * real.(xr), ps_id.weight * imag.(xr))
         H_id = reshape(Hr, 1, L, B)
@@ -1395,8 +1403,9 @@ without the `B` factor, so this test would catch that regression.
 only check the phase direction (magnitude information is discarded by
 the unit-circle activation). For magnitude validation we use
 `ResonantSTFT(...; activation = identity)` with `omega_lo = omega_hi
-= omega_out` so `_freq_shift` is a no-op and the raw `Z_bias` is
-visible at the layer output.
+= ω_out` (where ω_out is derived from spk_args.t_period) so
+`_freq_shift` is a no-op and the raw `Z_bias` is visible at the
+layer output.
 """
 function zoh_bias_continuous_current_tests()
     @testset "ZOH bias = continuous current (§4.3)" begin
@@ -1409,11 +1418,12 @@ function zoh_bias_continuous_current_tests()
         @testset "ResonantSTFT analytical bias-only match" begin
             ω_const = Float32(2π)
             log_λ   = Float32(log(0.2))
+            # Default SpikingArgs.t_period = 1, so ω_out = 2π = ω_const,
+            # making `_freq_shift` an identity.
             layer = ResonantSTFT(1 => n, identity;
                                  use_bias = true,
                                  omega_lo = ω_const,
                                  omega_hi = ω_const,
-                                 omega_out = ω_const,
                                  init_log_neg_lambda = log_λ)
             ps, st = Lux.setup(rng, layer)
             br, bi = 0.3f0, 0.4f0
@@ -1445,10 +1455,9 @@ function zoh_bias_continuous_current_tests()
 
         # ---- PhasorResonant bias-only probe (Phase output) ----
         @testset "PhasorResonant analytical bias-only direction" begin
-            ω_const = Float32(2π)
             log_λ   = Float32(log(0.2))
+            # Default SpikingArgs.t_period = 1 → ω = 2π.
             layer = PhasorResonant(1 => n;
-                                   omega = ω_const,
                                    use_bias = true,
                                    init_log_neg_lambda = log_λ)
             ps, st = Lux.setup(rng, layer)
@@ -1461,7 +1470,7 @@ function zoh_bias_continuous_current_tests()
             y, _ = layer(x, ps, st)              # (n, L, B) Phase
 
             λ = -exp.(ps.log_neg_lambda)
-            ω = zero(λ) .+ st.omega
+            ω = zero(λ) .+ period_to_angfreq(layer.spk_args.t_period)
             k = ComplexF32.(λ .+ 1im .* ω)
             A = exp.(k .* T)
             b = ComplexF32(br + bi*1im)
