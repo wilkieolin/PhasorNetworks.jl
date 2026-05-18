@@ -850,8 +850,12 @@ function ssm_spiking_dispatch_tests()
             ps, st = Lux.setup(rng, layer)
 
             sol, st_new = layer(sc, ps, st)
-            # Returns ODE solution of single-stage system (C_out, B)
-            @test !(sol isa AbstractArray)
+            # Returns the raw ODE solution — a time-indexed, interpolable
+            # SciML object (NOT a final-state snapshot). Note: current SciML
+            # makes ODESolution <: AbstractArray (it acts as a vector of u's
+            # indexed by step), so the meaningful distinguishing check is
+            # "is it a timeseries solution", not "is it not an array".
+            @test sol isa SciMLBase.AbstractTimeseriesSolution
             sampled = sol(tspan_spk[2])
             @test sampled isa AbstractArray
             @test size(sampled) == (C_out, B)
