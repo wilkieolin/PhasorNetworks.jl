@@ -372,11 +372,15 @@ $(Q^{*}, X)\mapsto Y\in[-1,1]^{D\times L\times B}$ defined by
        \in [-1,1],
        \label{eq:lca-score} \\
   \tilde s_{a h}^{(l,b)}
-    &= \frac{1}{\nh}\exp\!\bigl(\beta\,s_{a h}^{(l,b)}\bigr),
+    &= \frac{1}{A}\exp\!\bigl(\beta\,s_{a h}^{(l,b)}\bigr),
        \label{eq:lca-scale} \\
+  R_{:,h,l,b}
+    &= \sum_{a=1}^{A} \tilde s_{a h}^{(l,b)}\,
+       e^{\im\pi Q^{*}_{:,a,h}}
+       \in \C^{\Dh},
+       \label{eq:lca-retrieve} \\
   \tilde Y_{:,h,l,b}
-    &= \sum_{a=1}^{A}\sum_{h'=1}^{\nh} \tilde s_{a h'}^{(l,b)}
-       \cdot M_{a h h'}\cdot e^{\im\pi V_{:,h',l,b}}
+    &= e^{\im\pi V_{:,h,l,b}} \odot R_{:,h,l,b}
        \in \C^{\Dh},
        \label{eq:lca-mix} \\
   Y_{:,l,b}
@@ -384,11 +388,27 @@ $(Q^{*}, X)\mapsto Y\in[-1,1]^{D\times L\times B}$ defined by
          \tfrac{1}{\pi}\arg \tilde Y_{:,:,l,b}\bigr),
        \label{eq:lca-reduce}
 \end{align}
-where $M\in\R^{A\times \nh\times \nh}$ is a trainable head-mixing
-weight (default $M_{a h h'} = \delta_{h h'}/A$, in which case
-\eqref{eq:lca-mix} collapses to $\tfrac{1}{A}\sum_a \tilde s_{a h}\,
-e^{\im\pi V_{:,h,l,b}}$).
+where $\odot$ denotes element-wise complex multiplication (Hadamard
+product) and the retrieved memory $R_{:,h,l,b}$ is a
+similarity-weighted bundle of the per-head anchors.
 \end{definition}
+
+\begin{remark}[Why bind, instead of bundle V directly?]\label{rem:lca-binding}
+A naive variant of~\eqref{eq:lca-mix} would bundle
+$V_{:,h,l,b}$ directly, weighted by the per-anchor scores
+$\tilde s_{a h}^{(l,b)}$:
+\(
+  \tilde Y^{\mathrm{naive}}_{:,h,l,b}
+  = \bigl(\sum_a \tilde s_{a h}^{(l,b)}\bigr)\cdot e^{\im\pi V_{:,h,l,b}}.
+\)
+Since the parenthesised factor is a real positive scalar, this assignment
+leaves $\arg \tilde Y^{\mathrm{naive}}_{:,h,l,b} =
+\pi\,V_{:,h,l,b}$ unchanged --- the attention scores affect only
+amplitude, and the layer reduces to identity in phase. The binding form
+\eqref{eq:lca-mix} repairs the degeneracy by retrieving a phasor (the
+anchor bundle~$R$) and binding it onto~$V$, so the per-anchor scores
+shape the output's phase.
+\end{remark}
 
 The construction mirrors LSA but with the per-slice query replaced by
 the fixed anchor bank. The score matrix has shape
@@ -429,51 +449,90 @@ pointwise in $l$, and the surrounding SSM is unchanged.
 
 \begin{remark}[Cost]
 LCA's parallel-mode complexity is $O(A\,\nh\,\Dh\,L\,B)$, linear in
-every dimension. The trainable anchor bank costs $A\,D$ parameters
-(plus $A\,\nh^2$ for $M$ if used).
+every dimension. The trainable anchor bank costs $A\,D$ parameters.
 \end{remark}
 
-\subsection{LCA as a modern Hopfield retrieval}
+\begin{remark}[Optional trainable head-mix]\label{rem:lca-trainable-mix}
+A natural extension promotes the per-head bundle
+of~\eqref{eq:lca-retrieve} to a learned cross-head mix:
+\(
+  R^{(M)}_{:,h,l,b}
+  = \sum_{a, h'} M_{a h h'}\,\tilde s_{a h'}^{(l,b)}\,e^{\im\pi Q^{*}_{:,a,h'}},
+\)
+with $M\in\R^{A\times \nh\times \nh}$ trainable. The default $M_{a h h'}
+= \delta_{h h'}/A$ recovers~\eqref{eq:lca-retrieve}. The added cost is
+$A\,\nh^2$ parameters and a $\Dh\,A\,\nh^2\,L\,B$ contraction. We leave
+this ablation to future work.
+\end{remark}
+
+
+\subsection{LCA as a modern Hopfield retrieval (with input binding)}
 
 Substituting~\eqref{eq:lca-score} into~\eqref{eq:lca-scale} and
 identifying $\beta$ as an inverse temperature yields the score
 \[
   \tilde s_{a h}^{(l,b)}
-    = \frac{1}{\nh}\exp\!\Bigl(
+    = \frac{1}{A}\exp\!\Bigl(
         \frac{\beta}{\Dh}\sum_{c=1}^{\Dh}
           \cos\!\bigl(\pi(Q^{*}_{c,a,h} - K_{c,h,l,b})\bigr)\Bigr).
 \]
 This is the modern Hopfield update of~\cite{hopfield-is-all-you-need}
 restricted to the unit torus and using the Fourier-HRR inner product
 $\tfrac{1}{\Dh}\langle Q^{*}_{:,a,h}, K_{:,h,l,b}\rangle$ in place of
-the Euclidean inner product. When $V = K$ and $M = \delta_{h h'}/A$,
-the mix~\eqref{eq:lca-mix} reproduces the Hopfield retrieval rule
-$\xi^{\mathrm{new}} = X\,\mathrm{softmax}(\beta\,X^\top\xi)$ with
-$X$ playing the role of stored patterns.
+the Euclidean inner product. The retrieval~\eqref{eq:lca-retrieve}
+returns the softmax-weighted anchor bundle $R_{:,h,l,b}$; the
+mix~\eqref{eq:lca-mix} binds that bundle into the input value
+$V_{:,h,l,b}$ via element-wise complex multiplication.
 
-\begin{proposition}[Anchors as stored patterns]\label{prop:lca-hopfield}
+\begin{proposition}[Anchors as stored patterns under input binding]\label{prop:lca-hopfield}
 Define the per-head pattern matrix $\Xi_h \in \C^{\Dh \times A}$ with
-columns $\Xi_{:,a,h} = e^{\im\pi Q^{*}_{:,a,h}}$, and assume
-$V = K$ and $M_{a h h'} = \delta_{h h'}/A$. Then
+columns $\Xi_{:,a,h} = e^{\im\pi Q^{*}_{:,a,h}}$, and let
+$\mathrm{HopRet}_h(K) \in \C^{\Dh}$ denote the modern-Hopfield retrieval
+of~\cite{hopfield-is-all-you-need} applied per head with stored patterns
+$\Xi_h$, query $e^{\im\pi K_{:,h,l,b}}$, inverse temperature $\beta$,
+and the Fourier-HRR inner product. Then
 \[
   \tilde Y_{:,h,l,b}
-  = \frac{1}{\nh A}\,\Xi_h \cdot \exp\!\bigl(\beta\,
-       \mathrm{Re}\,\Xi_h^{\dagger}\,e^{\im\pi K_{:,h,l,b}} / \Dh\bigr),
+  = e^{\im\pi V_{:,h,l,b}} \odot \mathrm{HopRet}_h(K),
 \]
-which is the modern-Hopfield retrieval rule
-of~\cite{hopfield-is-all-you-need} with stored patterns $\Xi_h$ and
-query $e^{\im\pi K_{:,h,l,b}}$, up to the per-head normalization
-factor $1/(\nh A)$.
+\ie, LCA realises a Hopfield retrieval whose result is bound onto the
+input value $V$. Equivalently, the per-channel output phase decomposes
+as
+\[
+  Y_{:,h,l,b}
+  = V_{:,h,l,b}
+  \;\oplus\; \tfrac{1}{\pi}\arg \mathrm{HopRet}_h(K),
+\]
+where $\oplus$ denotes phase addition $\bmod\,2$ on $[-1,1]$
+(\cite{phasor-ssm-derivation}, eq.~(17)).
 \end{proposition}
 
 \begin{proof}
 Substitute the Fourier-HRR similarity~\eqref{eq:lca-score} into
-\eqref{eq:lca-mix} and collect terms. The real part of
-$\Xi_h^{\dagger}\,e^{\im\pi K_{:,h,l,b}}$ is exactly $\Dh \cdot
-\sm(Q^{*}_{:,a,h}, K_{:,h,l,b})$, so the exponential reproduces
-\eqref{eq:lca-scale}. The contraction $\Xi_h \cdot (\cdot)$ then
-realizes \eqref{eq:lca-mix} under $V=K$.
+\eqref{eq:lca-scale}. The real part of $\Xi_h^{\dagger}\,
+e^{\im\pi K_{:,h,l,b}}$ equals $\Dh \cdot
+\sm(Q^{*}_{:,a,h}, K_{:,h,l,b})$ component-wise, so the per-anchor
+exponential reproduces $\tilde s_{a h}^{(l,b)}$. The bundle
+\eqref{eq:lca-retrieve} is then exactly the column-contraction
+$\Xi_h \cdot \tilde s_{:,h}^{(l,b)}$, which is the modern-Hopfield
+retrieval rule of~\cite{hopfield-is-all-you-need}. The binding step
+\eqref{eq:lca-mix} multiplies elementwise by $e^{\im\pi V_{:,h,l,b}}$;
+under the unit-torus convention this is phase addition.
 \end{proof}
+
+\begin{remark}[Limit cases]\label{rem:lca-hopfield-limits}
+Two special cases are worth noting:
+\begin{itemize}[nosep,leftmargin=*]
+  \item $V \equiv 0$ (identity input value): the binding factor is
+        unity, and LCA reduces to pure modern-Hopfield retrieval ---
+        the output phase is $\tfrac{1}{\pi}\arg \mathrm{HopRet}_h(K)$.
+  \item $\beta\to\infty$ (winner-take-all): $\tilde s_{a^{\star} h}\to 1/A$
+        for the closest anchor $a^{\star}$ and $\to 0$ elsewhere, so
+        $R_{:,h,l,b} \to A^{-1}\,e^{\im\pi Q^{*}_{:,a^{\star}, h}}$
+        and the output phase becomes $V_{:,h,l,b}$ bound with the
+        winning anchor's phase.
+\end{itemize}
+\end{remark}
 
 Equivalently, LCA inherits modern Hopfield's exponential pattern
 capacity ($A_{\max}\sim e^{c\Dh}$, see~\cite{hopfield-is-all-you-need},
@@ -524,11 +583,13 @@ has retrieval rule
 $\xi^{\mathrm{new}} = X\,\mathrm{softmax}(\beta\,X^\top\xi)$, which
 coincides with the transformer attention update when $X$ is the matrix
 of key/value vectors. Proposition~\ref{prop:lca-hopfield} establishes
-that LCA realizes this update with stored patterns $\Xi_h$ on the unit
-torus and the Fourier-HRR inner product as similarity. The
-unit-modulus restriction is the same one used throughout
-\cite{phasor-ssm-derivation}, \S4, and preserves Plate's binding/bundling
-algebra~\cite{hrr}.
+that the inner bundle $R_{:,h,l,b}$ of LCA realises this update with
+stored patterns $\Xi_h$ on the unit torus and the Fourier-HRR inner
+product as similarity; LCA then binds the retrieved memory onto the
+input value $V$, recovering the pure Hopfield-retrieval rule in the
+limit $V \equiv 0$. The unit-modulus restriction is the same one used
+throughout \cite{phasor-ssm-derivation}, \S4, and preserves Plate's
+binding/bundling algebra~\cite{hrr}.
 
 \subsection{HD computing attention precedents}
 
@@ -566,16 +627,18 @@ and they coincide at every lattice point $l T$
 \begin{definition}[Phasor LCA layer]
 A Phasor Local Cross-Attention layer is parameterized by an anchor
 bank $Q^{*}\in[-1,1]^{D\times A}$, two PhasorDense projections
-$\Pi_K, \Pi_V$ of width $D$, a head-mix tensor $M\in\R^{A\times \nh\times \nh}$
-(default $\delta_{h h'}/A$), a scale $\beta\in\R_+$, and the carrier
+$\Pi_K, \Pi_V$ of width $D$, a scale $\beta\in\R_+$, and the carrier
 $\omega = 2\pi/T$. It acts on $X\in[-1,1]^{D\times L\times B}$ via
 \eqref{eq:lca-score}--\eqref{eq:lca-reduce}, broadcast over $(l, b)$.
 It admits the three views of
 \eqref{eq:lca-discrete}--\eqref{eq:lca-parallel}, which coincide at
-every lattice point $l T$ (Proposition~\ref{prop:lca-equiv}). When
-$V = K$ and $M$ is the default, it reduces to a modern-Hopfield
-pattern retrieval on the unit torus with stored patterns $\Xi_h$
-(Proposition~\ref{prop:lca-hopfield}).
+every lattice point $l T$ (Proposition~\ref{prop:lca-equiv}). It
+realises a modern-Hopfield retrieval on the unit torus with stored
+patterns $\Xi_h$, whose output is bound onto the input value $V$
+(Proposition~\ref{prop:lca-hopfield}); the pure Hopfield-retrieval
+limit is recovered when $V \equiv 0$. An optional trainable head-mix
+$M$ generalises~\eqref{eq:lca-retrieve}; see
+Remark~\ref{rem:lca-trainable-mix}.
 \end{definition}
 
 \medskip

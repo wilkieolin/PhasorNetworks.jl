@@ -374,6 +374,326 @@ function _apply_phase_activation(activation, y::AbstractArray{<:Phase, 3})
 end
 
 # ================================================================
+# 6b. Phasor Local Self-Attention (LSA)
+# ================================================================
+
+"""
+    PhasorLSA(in_dims => d_model, n_heads, activation; init_scale=3f0, init_mode=:hippo, spk_args=SpikingArgs())
+
+Local Self-Attention layer for the Phasor SSM. Computes the attention
+score *across heads* (axis `H`) instead of *across time* (axis `L`), so
+the operation is pointwise in `L` and inherits the three-mode
+(discrete / continuous / parallel) equivalence of the surrounding
+state-space layers. See `docs/local_attention_derivation.tex` for the
+formal definitions and the equivalence proof.
+
+Input is projected through three `PhasorDense` layers (Q, K, V), then
+reshaped from `(D, L, B)` to `(D_h, H, L, B)`. A head-axis Fourier-HRR
+score `(H, H, L, B)` is computed via
+[`similarity_outer_heads`](@ref), scaled exponentially, and used to mix
+the V tensor in the complex domain. Output shape: `(D, L, B)` Phase.
+
+# Arguments
+- `in_dims => d_model` — Input and output channel widths. `d_model`
+  must be divisible by `n_heads`.
+- `n_heads::Int` — Number of attention heads.
+- `activation` — Phase-space activation applied to the output. Default
+  `normalize_to_unit_circle`.
+
+# Keyword arguments
+- `init_scale::Real = 3f0` — Initial value of the trainable scalar
+  `β` (the exponential's inverse temperature).
+- `init_mode::Symbol = :hippo` — `PhasorDense` λ-initialization mode.
+- `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics
+  for the projections.
+
+# Trainable parameters
+- `q_proj`, `k_proj`, `v_proj` — bias-free `PhasorDense` parameter
+  trees (`weight`, `log_neg_lambda`).
+- `scale` — 1-element `Vector{Float32}`.
+"""
+struct PhasorLSA <: Lux.AbstractLuxLayer
+    in_dims::Int
+    d_model::Int
+    n_heads::Int
+    activation::Function
+    q_proj::PhasorDense
+    k_proj::PhasorDense
+    v_proj::PhasorDense
+    init_scale::Float32
+end
+
+function PhasorLSA(dims::Pair{Int,Int}, n_heads::Int,
+                   act = normalize_to_unit_circle;
+                   init_scale::Real = 3f0,
+                   init_mode::Symbol = :hippo,
+                   spk_args::SpikingArgs = SpikingArgs())
+    in_dims, d_model = dims.first, dims.second
+    @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
+    q = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    k = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    v = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    return PhasorLSA(in_dims, d_model, n_heads, act, q, k, v, Float32(init_scale))
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorLSA)
+    return (q_proj = Lux.initialparameters(rng, l.q_proj),
+            k_proj = Lux.initialparameters(rng, l.k_proj),
+            v_proj = Lux.initialparameters(rng, l.v_proj),
+            scale  = Float32[l.init_scale])
+end
+
+function Lux.initialstates(rng::AbstractRNG, l::PhasorLSA)
+    return (q_proj = Lux.initialstates(rng, l.q_proj),
+            k_proj = Lux.initialstates(rng, l.k_proj),
+            v_proj = Lux.initialstates(rng, l.v_proj))
+end
+
+function Lux.parameterlength(l::PhasorLSA)
+    return Lux.parameterlength(l.q_proj) +
+           Lux.parameterlength(l.k_proj) +
+           Lux.parameterlength(l.v_proj) + 1
+end
+
+# Internal helper: bundle V over heads using the head-similarity weights.
+#   Vc       :: (Dh, H, L, B) Complex
+#   weights  :: (H, H, L, B) Real,  weights[h, h', l, b] = w_{h h'}^{(l,b)}
+# Returns Y :: (Dh, H, L, B) Complex with
+#   Y[:, h, l, b] = Σ_{h'} weights[h, h', l, b] · Vc[:, h', l, b].
+function _lsa_head_mix(Vc::AbstractArray{<:Complex, 4}, weights::AbstractArray{<:Real, 4})
+    Dh, H, L, B = size(Vc)
+    Vc_r = reshape(Vc, Dh, H, L * B)                              # (Dh, H, L*B)
+    # batched_mul on the last axis: (Dh, H) * (H, H) → (Dh, H) per (l, b).
+    # The Vc factor's second axis is h'; weights' first axis (after transposing
+    # along (1,2)) is h' → align so the contraction sums over h'.
+    W_r  = reshape(permutedims(weights, (2, 1, 3, 4)), H, H, L * B)
+    Y_r  = batched_mul(Vc_r, W_r)                                 # (Dh, H, L*B)
+    return reshape(Y_r, Dh, H, L, B)
+end
+
+# (i) 3D Phase — the workhorse path.
+function (l::PhasorLSA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+    Q, _ = l.q_proj(x, ps.q_proj, st.q_proj)             # (D, L, B) Phase
+    K, _ = l.k_proj(x, ps.k_proj, st.k_proj)
+    V, _ = l.v_proj(x, ps.v_proj, st.v_proj)
+
+    D, L, B = size(Q)
+    H  = l.n_heads
+    Dh = l.d_model ÷ H
+    Qh = reshape(Q, Dh, H, L, B)
+    Kh = reshape(K, Dh, H, L, B)
+    Vh = reshape(V, Dh, H, L, B)
+
+    scores  = similarity_outer_heads(Qh, Kh)             # (H, H, L, B) Float32
+    weights = exp.(ps.scale .* scores) ./ Float32(H)      # (H, H, L, B)
+
+    Vc = angle_to_complex(Vh)                             # (Dh, H, L, B) Complex
+    Y  = _lsa_head_mix(Vc, weights)                       # (Dh, H, L, B) Complex
+    Y  = reshape(Y, D, L, B)
+    Y_phase = complex_to_angle(Y)                         # (D, L, B) Phase
+
+    return _apply_phase_activation(l.activation, Y_phase), st
+end
+
+# (ii) 2D Phase — single-slice; wrap to 3D with L=1.
+function (l::PhasorLSA)(x::AbstractArray{<:Phase, 2}, ps::LuxParams, st::NamedTuple)
+    x3 = reshape(x, size(x, 1), 1, size(x, 2))
+    y3, st2 = l(x3, ps, st)
+    return dropdims(y3, dims=2), st2
+end
+
+# (iii) Complex 3D back-compat — trampoline through Phase 3D.
+function (l::PhasorLSA)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    y_phase, st2 = l(complex_to_angle(x), ps, st)
+    return angle_to_complex(y_phase), st2
+end
+
+# (iv) SpikingCall — trampoline to CurrentCall.
+function (l::PhasorLSA)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    return l(CurrentCall(x), ps, st)
+end
+
+# (v) CurrentCall — reconstruct 3D phase from the ODE solution, then 3D path.
+function (l::PhasorLSA)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    L = round(Int, (x.t_span[2] - x.t_span[1]) / x.spk_args.t_period)
+    z_3d = reconstruct_from_current(x, L, x.spk_args)
+    return l(z_3d, ps, st)
+end
+
+# ================================================================
+# 6c. Phasor Local Cross-Attention (LCA)
+# ================================================================
+
+"""
+    PhasorLCA(in_dims => d_model, n_heads, n_anchors, activation; init_scale=3f0, init_mode=:hippo, spk_args=SpikingArgs())
+
+Local Cross-Attention layer with a trainable phase anchor bank. Computes
+a Hopfield-style content-addressable lookup against the anchors and
+applies the retrieved bundle as a *binding rotation* to an input-derived
+value. The score is computed across heads at each `(l, b)` slice — like
+[`PhasorLSA`](@ref), the operation is pointwise in `L` and inherits the
+three-mode equivalence of the surrounding state-space layers.
+
+# Forward (Phase 3D)
+
+1. `K = k_proj(x)` and `V = v_proj(x)`, both `(D, L, B)` Phase, via
+   bias-free [`PhasorDense`](@ref) projections.
+2. Reshape `K`, `V` → `(D_h, H, L, B)`; reshape the trainable anchor
+   bank `(D, A) → (D_h, H, A)`.
+3. Score `(A, H, L, B)` via [`similarity_outer_heads`](@ref):
+   `s[a, h, l, b] = sim(anchor[:, h, a], K[:, h, l, b])`.
+4. Weights `w = exp(β · s) / A` (per-anchor; the per-head divisor is
+   implicit in the bundle).
+5. Per `(h, l, b)`, bundle the anchors in the complex domain:
+   `Bundle[:, h, l, b] = Σ_a w[a, h, l, b] · exp(iπ · anchor[:, h, a])`.
+6. **Bind V with the anchor bundle**:
+   `Y_complex[:, h, l, b] = exp(iπ · V[:, h, l, b]) ⊙ Bundle[:, h, l, b]`
+   (element-wise complex multiplication = phase addition; the canonical
+   VSA binding operation).
+7. Reshape `(D_h, H, L, B)` → `(D, L, B)`, extract phase, apply
+   activation.
+
+# Design notes
+
+This binding form is non-degenerate (distinct `(l, b)` produce distinct
+output phases) because the anchor bundle is itself a complex-domain
+weighted superposition over `a`. Setting V to a zero phase recovers the
+pure Hopfield-retrieval form of `docs/local_attention_derivation.tex`,
+Proposition 3. A future ablation may add (i) a separate trainable V
+anchor bank, or (ii) a trainable `(A, H, H)` head-mix tensor `M` for
+richer cross-head interaction.
+
+# Arguments
+- `in_dims => d_model` — Input and output channel widths. `d_model`
+  must be divisible by `n_heads`.
+- `n_heads::Int` — Number of attention heads.
+- `n_anchors::Int` — Size of the stored anchor bank `A`.
+- `activation` — Phase-space activation applied to the output. Default
+  `normalize_to_unit_circle`.
+
+# Keyword arguments
+- `init_scale::Real = 3f0` — Initial value of the trainable scalar `β`.
+- `init_mode::Symbol = :hippo` — `PhasorDense` λ-init mode.
+- `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics.
+
+# Trainable parameters
+- `k_proj`, `v_proj` — bias-free `PhasorDense` parameter trees.
+- `anchors` — `(D, A)` Phase.
+- `scale` — 1-element `Vector{Float32}`.
+"""
+struct PhasorLCA <: Lux.AbstractLuxLayer
+    in_dims::Int
+    d_model::Int
+    n_heads::Int
+    n_anchors::Int
+    activation::Function
+    k_proj::PhasorDense
+    v_proj::PhasorDense
+    init_scale::Float32
+end
+
+function PhasorLCA(dims::Pair{Int,Int}, n_heads::Int, n_anchors::Int,
+                   act = normalize_to_unit_circle;
+                   init_scale::Real = 3f0,
+                   init_mode::Symbol = :hippo,
+                   spk_args::SpikingArgs = SpikingArgs())
+    in_dims, d_model = dims.first, dims.second
+    @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
+    k = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    v = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    return PhasorLCA(in_dims, d_model, n_heads, n_anchors, act, k, v, Float32(init_scale))
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorLCA)
+    anchors = Phase.(2f0 .* rand(rng, Float32, l.d_model, l.n_anchors) .- 1f0)
+    return (k_proj  = Lux.initialparameters(rng, l.k_proj),
+            v_proj  = Lux.initialparameters(rng, l.v_proj),
+            anchors = anchors,
+            scale   = Float32[l.init_scale])
+end
+
+function Lux.initialstates(rng::AbstractRNG, l::PhasorLCA)
+    return (k_proj = Lux.initialstates(rng, l.k_proj),
+            v_proj = Lux.initialstates(rng, l.v_proj))
+end
+
+function Lux.parameterlength(l::PhasorLCA)
+    return Lux.parameterlength(l.k_proj) +
+           Lux.parameterlength(l.v_proj) +
+           l.d_model * l.n_anchors + 1
+end
+
+# Internal helper: bundle anchors per head, per (l, b), weighted by attention scores.
+#   Ac :: (Dh, H, A)        Complex anchor bank
+#   w  :: (A, H, L, B)      Real weights
+# Returns B :: (Dh, H, L, B) Complex with
+#   B[:, h, l, b] = Σ_a w[a, h, l, b] · Ac[:, h, a].
+#
+# Implementation: arrange head as the batched dim of NNlib.batched_mul, so each
+# head computes its own (Dh, A) × (A, L*B) → (Dh, L*B) contraction.
+function _lca_anchor_mix(Ac::AbstractArray{<:Complex, 3}, w::AbstractArray{<:Real, 4})
+    Dh, H, A = size(Ac)
+    L, B = size(w, 3), size(w, 4)
+    Ac_b = permutedims(Ac, (1, 3, 2))                            # (Dh, A, H)
+    w_b  = reshape(permutedims(w, (1, 3, 4, 2)), A, L * B, H)    # (A,  L*B, H)
+    Y_b  = batched_mul(Ac_b, w_b)                                # (Dh, L*B, H)
+    Y    = reshape(Y_b, Dh, L, B, H)
+    return permutedims(Y, (1, 4, 2, 3))                          # (Dh, H, L, B)
+end
+
+# (i) 3D Phase — the workhorse path.
+function (l::PhasorLCA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+    K, _ = l.k_proj(x, ps.k_proj, st.k_proj)              # (D, L, B) Phase
+    V, _ = l.v_proj(x, ps.v_proj, st.v_proj)
+
+    D, L, B = size(K)
+    H  = l.n_heads
+    Dh = l.d_model ÷ H
+    A  = l.n_anchors
+
+    Kh        = reshape(K, Dh, H, L, B)
+    Vh        = reshape(V, Dh, H, L, B)
+    Anchors_h = reshape(ps.anchors, Dh, H, A)
+
+    scores  = similarity_outer_heads(Anchors_h, Kh)       # (A, H, L, B)
+    weights = exp.(ps.scale .* scores) ./ Float32(A)      # (A, H, L, B)
+
+    Ac     = angle_to_complex(Anchors_h)                  # (Dh, H, A) Complex
+    Bundle = _lca_anchor_mix(Ac, weights)                 # (Dh, H, L, B) Complex
+    Vc     = angle_to_complex(Vh)                         # (Dh, H, L, B) Complex
+    Y      = Vc .* Bundle                                 # element-wise binding
+    Y      = reshape(Y, D, L, B)
+    Y_phase = complex_to_angle(Y)
+
+    return _apply_phase_activation(l.activation, Y_phase), st
+end
+
+# (ii) 2D Phase — single-slice; wrap to 3D with L=1.
+function (l::PhasorLCA)(x::AbstractArray{<:Phase, 2}, ps::LuxParams, st::NamedTuple)
+    x3 = reshape(x, size(x, 1), 1, size(x, 2))
+    y3, st2 = l(x3, ps, st)
+    return dropdims(y3, dims=2), st2
+end
+
+# (iii) Complex 3D back-compat — trampoline through Phase 3D.
+function (l::PhasorLCA)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    y_phase, st2 = l(complex_to_angle(x), ps, st)
+    return angle_to_complex(y_phase), st2
+end
+
+# (iv) SpikingCall — trampoline to CurrentCall.
+function (l::PhasorLCA)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    return l(CurrentCall(x), ps, st)
+end
+
+# (v) CurrentCall — reconstruct 3D phase from the ODE solution, then 3D path.
+function (l::PhasorLCA)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    L = round(Int, (x.t_span[2] - x.t_span[1]) / x.spk_args.t_period)
+    z_3d = reconstruct_from_current(x, L, x.spk_args)
+    return l(z_3d, ps, st)
+end
+
+# ================================================================
 # 7. SSM Spiking Infrastructure
 # ================================================================
 

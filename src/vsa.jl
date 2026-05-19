@@ -627,6 +627,73 @@ end
 #Note - additional definitions for similarity_outer included in gpu.jl
 
 """
+    similarity_outer_heads(q, k) -> AbstractArray{Float32}
+
+Head-axis pairwise Fourier-HRR similarity for the local attention layers
+(`PhasorLSA`, `PhasorLCA`). Computes interference-based similarity scores
+between phase vectors of length `D_h`, contracting only the per-head
+channel axis, with the time and batch axes broadcast through. See
+`docs/local_attention_derivation.tex` (eqs. lsa-score, lca-score) for the
+formal definition.
+
+# Methods
+
+## LSA: `(D_h, H, L, B) × (D_h, H, L, B) → (H, H, L, B)`
+
+`s[h, h', l, b] = sim(q[:, h, l, b], k[:, h', l, b])`. The score is the
+Fourier-HRR similarity restricted to the per-head subspace.
+
+## LCA: `(D_h, H, A) × (D_h, H, L, B) → (A, H, L, B)`
+
+`s[a, h, l, b] = sim(q[:, h, a], k[:, h, l, b])` where `q` is a
+time-invariant anchor bank of `A` patterns per head. Implemented as
+`H` independent calls to [`_similarity_outer_canonical_complex`](@ref)
+(one per head) followed by a stack-and-permute.
+
+Reuses `_similarity_outer_canonical_complex` and inherits its closed-form
+rrule, so this primitive is end-to-end differentiable without manual rule
+definitions.
+"""
+function similarity_outer_heads(q::AbstractArray{<:Phase, 4},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, L, B = size(q)
+    @assert size(k) == size(q) "shape mismatch in LSA similarity_outer_heads: q=$(size(q)), k=$(size(k))"
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, L, B)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    Aq = reshape(qc, Dh, H, L * B)                  # (Dh, H, L*B) canonical layout
+    Bk = reshape(kc, Dh, H, L * B)
+
+    s = _similarity_outer_canonical_complex(Aq, Bk) # (H, H, L*B)
+    return reshape(s, H, H, L, B)
+end
+
+function similarity_outer_heads(q::AbstractArray{<:Phase, 3},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, A = size(q)
+    @assert size(k, 1) == Dh "channel-per-head mismatch: q has Dh=$Dh, k has $(size(k,1))"
+    @assert size(k, 2) == H  "head count mismatch: q has H=$H, k has $(size(k,2))"
+    L, B = size(k, 3), size(k, 4)
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, A)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    # Per-head independent (A, L*B) scores: each h gets its own canonical call.
+    # map (not comprehension) keeps Zygote happy and works on GPU CuArrays.
+    per_head = map(1:H) do h
+        Aq_h = reshape(qc[:, h, :],       Dh, A,     1)   # (Dh, A,   1)
+        Bk_h = reshape(kc[:, h, :, :],    Dh, L * B, 1)   # (Dh, L*B, 1)
+        s = _similarity_outer_canonical_complex(Aq_h, Bk_h)  # (A, L*B, 1)
+        reshape(s, A, L, B)                                  # (A, L, B)
+    end
+
+    # Stack on a new trailing axis → (A, L, B, H); permute → (A, H, L, B).
+    stacked = stack(per_head)                       # (A, L, B, H)
+    return permutedims(stacked, (1, 4, 2, 3))       # (A, H, L, B)
+end
+
+"""
     v_unbind(x::AbstractArray, y::AbstractArray) -> AbstractArray
     v_unbind(x::SpikingTypes, y::SpikingTypes; kwargs...) -> SpikingTypes
 
