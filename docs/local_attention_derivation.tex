@@ -1,0 +1,679 @@
+% Local Self-Attention and Local Cross-Attention for the Phasor SSM —
+% derivation document, companion to phasor_ssm_derivation.tex.
+% Compile standalone: pdflatex local_attention_derivation.tex
+%                     pdflatex local_attention_derivation.tex    (second pass for refs)
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\nh}{H}              % number of heads
+\newcommand{\Dh}{D_{\mathrm{h}}} % per-head channel width
+\newcommand{\sm}{\operatorname{sim}}
+\newcommand{\eg}{e.g.}
+\newcommand{\ie}{i.e.}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\title{Local Self- and Cross-Attention\\
+for the Phasor State-Space Model}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+The Phasor SSM~\cite{phasor-ssm-derivation} represents every layer as a
+diagonal complex state-space model and admits three equivalent
+computational views: a recurrent discrete update, a continuous-time ODE,
+and a causal convolution evaluated via FFT. The existing attention
+primitives in the architecture (\texttt{PhasorAttention},
+\texttt{SSMSelfAttention}, \texttt{SSMCrossAttention}) compute their
+similarity score \emph{across time}, producing an $L\times L$ score
+matrix that fuses information from every time slice at once. This
+operation is intrinsically non-causal, so the attention layers cannot be
+written as a per-slice discrete update, breaking the three-view
+equivalence enjoyed by \texttt{PhasorDense} and \texttt{PhasorConv}.
+
+We propose two attention primitives---\textbf{Local Self-Attention}
+(LSA) and \textbf{Local Cross-Attention} (LCA)---that lift the
+similarity computation off the time axis and onto a \emph{head} axis.
+Each layer is defined on a single time slice and broadcast trivially
+across time; the resulting layers inherit the three-view equivalence of
+the surrounding SSM. We give the discrete, continuous, and parallel
+forms, prove their equivalence, and relate the construction to local
+attention variants in transformers~\cite{longformer,efficient-transformers}
+and to modern Hopfield networks~\cite{hopfield-is-all-you-need}.
+\end{abstract}
+
+%======================================================================
+\section{Motivation: the across-time score is non-causal}\label{sec:motivation}
+%======================================================================
+
+A Phasor SSM layer satisfies the per-channel equation
+\begin{equation}\label{eq:ssm-base}
+  \frac{\dd z_c}{\dd t} = k_c\,z_c(t) + \sum_j W_{cj}\,I_j(t),
+  \qquad k_c = \lambda_c + \im\omega,
+\end{equation}
+where $\omega = 2\pi/T$ is the carrier shared by every channel of the
+layer (the per-channel-$\omega$ rule, see~\cite{phasor-ssm-derivation},
+\S3.5--3.7). After Dirac discretization with step $T$, the layer admits
+the three equivalent forms
+\begin{equation}\label{eq:ssm-three-views}
+  z_c[n+1] = A_c\,z_c[n] + H_c[n], \qquad
+  z_c = K_c * H_c, \qquad
+  \frac{\dd z_c}{\dd t} = k_c\,z_c + W_c \cdot I(t),
+\end{equation}
+with $A_c = e^{k_c T}$, $B_c = (A_c-1)/k_c$, $K_c[n] = A_c^n$ for Dirac
+inputs.
+
+Vanilla self-attention, given a Phase tensor
+$X\in[-1,1]^{C\times L\times B}$ and per-batch query/key/value
+projections of the same shape, computes
+\begin{equation}\label{eq:vanilla-attention}
+  S_{l m}^{(b)} = \sm\bigl(Q_{:,l,b},\, K_{:,m,b}\bigr)
+       \in \R^{L\times L\times B},
+\end{equation}
+\ie, a similarity between every pair of time slices. The score
+$S_{l m}^{(b)}$ depends on $K_{:,m,b}$ for all $m$ including $m > l$, so
+the operation is non-causal in time. Equivalently, the value mix
+\(
+Y_{:,l,b} = \sum_m V_{:,m,b}\,\bar S_{lm}^{(b)}
+\)
+is a contraction of $V$ along the time axis, which removes time as an
+ambient dimension of the output.
+
+These two properties have a single consequence: there is no per-slice
+recurrence $z[l+1] = F(z[l], x[l])$ that reproduces vanilla attention.
+Without such a recurrence, the layer cannot participate in the
+discrete/continuous/parallel equivalence
+of~\eqref{eq:ssm-three-views}, and so cannot be deployed on a spiking
+substrate, nor as a streaming online operator, nor as a parallel
+prefix scan.
+
+Our remedy: replace the across-time similarity~\eqref{eq:vanilla-attention}
+with an across-\emph{head} similarity. The score matrix becomes
+$\R^{\nh\times \nh\times L\times B}$ (LSA) or
+$\R^{A\times \nh\times L\times B}$ (LCA, with $A$ stored anchors), and
+its computation factors slice-by-slice in $l$. The layer is then a
+pointwise-in-$l$ map, trivially compatible with each of the three SSM
+views.
+
+\begin{remark}[Why this restriction is desirable]
+Removing cross-time information flow from the attention block does not
+remove cross-time computation from the model: the surrounding linear
+SSM still propagates state through time via $A_c$, and the
+HiPPO-initialized leakage spectrum supplies multi-timescale
+memory~\cite{hippo}. Local attention therefore forces representation
+learning to occur \emph{within} each phase code (\ie, in the
+HD-VSA-typed channel space) rather than by re-routing previously stored
+information across time slices. This is consistent with the Fourier
+HRR algebra of~\cite{phasor-ssm-derivation}, \S4.
+\end{remark}
+
+%======================================================================
+\section{Notation carried from the SSM derivation}\label{sec:notation}
+%======================================================================
+
+We use the symbols of~\cite{phasor-ssm-derivation} throughout:
+\begin{itemize}[nosep,leftmargin=*]
+  \item $C$ --- channel count of the surrounding SSM. Inside the
+        head decomposition we write $D = C$ to match the conventional
+        attention notation.
+  \item $L$ --- sequence length, $B$ --- batch size.
+  \item $\nh$ --- number of heads; per-head channel width
+        $\Dh = D/\nh$, assumed integer.
+  \item $A$ --- number of stored anchors (LCA only).
+  \item $k_c = \lambda_c + \im\omega$ --- per-channel complex
+        eigenvalue, with the carrier $\omega = 2\pi/T$ shared across
+        channels of a given layer.
+  \item Discrete kernels $A_c = e^{k_c T}$ (Dirac) or $e^{k_c\dt}$
+        (ZOH), $B_c = (A_c-1)/k_c$, $K_c[n] = A_c^n\,(B_c)$.
+  \item Phase variable $\theta_c\in[-1,1]$, related to the complex
+        potential by $z_c = r_c\,e^{\im\pi\theta_c}$.
+  \item $\sm(\bm\theta_1,\bm\theta_2) = \tfrac{1}{D}\sum_{c=1}^{D}
+        \cos\!\bigl(\pi(\theta_{1,c} - \theta_{2,c})\bigr)$, the
+        Fourier-HRR similarity of~\cite{phasor-ssm-derivation}, eq.~(22).
+\end{itemize}
+
+A Phase array of shape $(D, L, B)$ denotes
+$\theta\in[-1,1]^{D\times L\times B}$ with $D$ the channel axis, $L$
+the time axis, $B$ the batch axis. We write
+$\theta_{:, l, b}\in[-1,1]^D$ for the slice at time $l$ and batch
+index $b$.
+
+%======================================================================
+\section{Multi-head phase projections}\label{sec:multihead}
+%======================================================================
+
+Let $X\in[-1,1]^{D\times L\times B}$ be an input phase tensor. We
+define query, key, and value tensors by three head-wise PhasorDense
+projections (\cite{phasor-ssm-derivation}, \S3.2), each producing a
+tensor of shape $(D, L, B)$:
+\begin{equation}\label{eq:qkv-proj}
+  Q = \mathrm{PhasorDense}_Q(X), \quad
+  K = \mathrm{PhasorDense}_K(X), \quad
+  V = \mathrm{PhasorDense}_V(X).
+\end{equation}
+The projections operate in Phase 3D (Dirac) mode: each output channel
+evolves under the layer's per-channel $\lambda_c$ and the shared
+carrier $\omega$.
+
+We reshape the channel axis of $Q$, $K$, $V$ into $(\Dh, \nh)$:
+\begin{equation}\label{eq:reshape-heads}
+  Q,K,V\colon (D, L, B) \;\longmapsto\; (\Dh, \nh, L, B), \qquad
+  D = \Dh\cdot \nh.
+\end{equation}
+The reshape is purely a view; it does not reorder phase data and does
+not change the underlying carrier. We denote a single head's slice at
+time $l$ as $Q_{:,h,l,b}\in[-1,1]^{\Dh}$.
+
+\begin{remark}[Compatibility with the per-channel-$\omega$ rule]
+The PhasorDense projections preserve the carrier $\omega$; the reshape
+of~\eqref{eq:reshape-heads} only groups channels. Therefore every head
+$h$ shares the same $\omega$, and head-wise Fourier-HRR similarity is
+well-defined. The per-head leakage $\lambda_{:,h}$ may differ across
+heads---this is a multi-timescale variation in line with HiPPO
+initialization~\cite{hippo} and does not desynchronize the
+representation.
+\end{remark}
+
+%======================================================================
+\section{Local Self-Attention}\label{sec:lsa}
+%======================================================================
+
+\subsection{Per-slice definition}
+
+\begin{definition}[Local Self-Attention]\label{def:lsa}
+Fix a time slice $l$ and a batch index $b$. Let $Q,K,V$ be the
+head-reshaped tensors of~\eqref{eq:reshape-heads} with shape
+$(\Dh, \nh, L, B)$ and let $\beta\in\R$ be a scalar scale parameter.
+\emph{Local Self-Attention} is the map
+\[
+  \mathrm{LSA}_{l,b}\colon
+    (Q_{:,:,l,b},\,K_{:,:,l,b},\,V_{:,:,l,b})
+    \longmapsto Y_{:,l,b}\in[-1,1]^D
+\]
+defined by
+\begin{align}
+  s_{h h'}^{(l,b)}
+    &= \sm\!\bigl(Q_{:,h,l,b},\, K_{:,h',l,b}\bigr)
+       \in [-1, 1],
+       \label{eq:lsa-score} \\
+  \tilde s_{h h'}^{(l,b)}
+    &= \frac{1}{\nh}\,\exp\!\bigl(\beta\,s_{h h'}^{(l,b)}\bigr),
+       \label{eq:lsa-scale} \\
+  \tilde Y_{:,h,l,b}
+    &= \sum_{h'=1}^{\nh} \tilde s_{h h'}^{(l,b)}
+       \cdot e^{\im\pi V_{:,h',l,b}}
+       \in \C^{\Dh},
+       \label{eq:lsa-mix} \\
+  Y_{:,l,b}
+    &= \texttt{reshape}_{(\Dh,\nh)\to D}\!\bigl(
+         \tfrac{1}{\pi}\arg \tilde Y_{:,:,l,b}\bigr)
+       \in [-1,1]^D.
+       \label{eq:lsa-reduce}
+\end{align}
+The map is broadcast independently over $l\in\{1,\dots,L\}$ and
+$b\in\{1,\dots,B\}$ to produce a full output of shape $(D, L, B)$.
+\end{definition}
+
+The score~\eqref{eq:lsa-score} is the Fourier-HRR similarity
+between two phase vectors of length $\Dh$; it lives in $[-1, 1]$ with
+$+1$ at coincidence and $-1$ at antipode. Equation~\eqref{eq:lsa-scale}
+applies the scaled exponential used by \texttt{score\_scale}
+(\cite{phasor-ssm-derivation} companion code, \texttt{src/network.jl})
+and yields a non-negative row-stochastic-up-to-normalization weighting
+across the second head index $h'$. The mix~\eqref{eq:lsa-mix} is a
+bundling (complex addition) in the sense of \cite{phasor-ssm-derivation},
+\S4.2, weighted by the head-similarity scores. Equation~\eqref{eq:lsa-reduce}
+extracts phase via $\arg$ and reshapes back to $(D, L, B)$.
+
+\subsection{Three execution modes}
+
+Because $\mathrm{LSA}_{l,b}$ depends only on slice $l$, the layer
+composes with the surrounding SSM in all three views of~\eqref{eq:ssm-three-views}.
+Let $f_\beta\colon[-1,1]^{D\times B}\to[-1,1]^{D\times B}$ denote the
+slice-restricted LSA map at a fixed $\beta$.
+
+\paragraph{Discrete (recurrent).}
+With an enclosing Phasor SSM layer of per-channel eigenvalues $k_c$ and
+discrete transition $A_c = e^{k_c T}$,
+\begin{equation}\label{eq:lsa-discrete}
+  z_c[l+1] = A_c\,z_c[l] + \sum_j W_{cj}\,e^{\im\pi\,f_\beta(x[l])_j},
+\end{equation}
+where $x[l]\in[-1,1]^{D\times B}$ is the input slice at time $l$.
+This is identical to~\eqref{eq:ssm-three-views} with the input phase
+replaced by $f_\beta(x[l])$, applied slice-by-slice.
+
+\paragraph{Continuous (ODE).}
+Let $\tilde X(t)\in[-1,1]^{D\times B}$ be a continuous-time
+interpolation of the input phase slices. The continuous LSA-driven SSM
+satisfies
+\begin{equation}\label{eq:lsa-continuous}
+  \frac{\dd z_c}{\dd t}
+    = k_c\,z_c(t) + \sum_j W_{cj}\,I_j(t),
+  \qquad I_j(t) = e^{\im\pi\,f_\beta(\tilde X(t))_j},
+\end{equation}
+which is the input-replacement version of~\eqref{eq:ssm-base}.
+
+\paragraph{Parallel.}
+Define the input-replaced sequence
+\(
+  \hat X[l] = f_\beta(x[l])
+\)
+for $l=0,\dots,L-1$ and form the Dirac encoding
+$\hat H_c[l] = \sum_j W_{cj}\,e^{k_c\,\delta t_{j}[l]}$ on the slice
+$\hat X[l]$. Then
+\begin{equation}\label{eq:lsa-parallel}
+  z_c = K_c * \hat H_c,
+  \qquad K_c[n] = A_c^n,
+\end{equation}
+matching~\eqref{eq:ssm-three-views}.
+
+\begin{proposition}[Three-view equivalence for LSA]\label{prop:lsa-equiv}
+Let $(z^{(\mathrm{rec})}, z^{(\mathrm{conv})}, z^{(\mathrm{ode})})$
+denote the outputs of~\eqref{eq:lsa-discrete}, \eqref{eq:lsa-parallel},
+and~\eqref{eq:lsa-continuous} respectively, with the convention
+$\tilde X(l\,T) = x[l]$ on the sample lattice. Then
+\[
+  z^{(\mathrm{rec})}[l] = z^{(\mathrm{conv})}[l]
+  = z^{(\mathrm{ode})}(l\,T),
+  \qquad l = 0, 1, \dots, L-1.
+\]
+\end{proposition}
+
+\begin{proof}
+The map $f_\beta$ acts pointwise in $l$, so the sequence
+$\hat X[l] = f_\beta(x[l])$ is well-defined and the encoding
+$\hat H_c[l]$ depends only on $\hat X[l]$ via the Dirac formula
+(\cite{phasor-ssm-derivation} eq.~(13)). With this encoding,
+\eqref{eq:lsa-discrete} and \eqref{eq:lsa-parallel} reduce exactly to
+the Dirac discrete recurrence and the Dirac causal convolution of
+\cite{phasor-ssm-derivation}, \S3.3 (\eqref{eq:ssm-three-views} above),
+which are equivalent by that paper's Proposition on
+view-equivalence (\eqref{eq:ssm-three-views} unrolls into the causal
+convolution algebraically).
+
+For the continuous--discrete equivalence, restrict the LSA-driven ODE
+of~\eqref{eq:lsa-continuous} to a single period $[l T,(l+1)T)$. On this
+interval, $\tilde X(t)$ takes the constant value $x[l]$ (by the
+zero-order interpolation convention), so the forcing
+$I_j(t) = e^{\im\pi f_\beta(x[l])_j}$ is the Dirac response of the same
+slice, and integration over the period reproduces the recurrence
+\eqref{eq:lsa-discrete} with $A_c = e^{k_c T}$ (\cite{phasor-ssm-derivation},
+\S3.3, Dirac discretization).
+\end{proof}
+
+\subsection{Connection to Fourier HRR}
+
+The LSA score~\eqref{eq:lsa-score} computes the cosine similarity of
+two unit-modulus complex vectors of length $\Dh$; this is the
+Fourier-HRR similarity of \cite{phasor-ssm-derivation}, eq.~(22),
+restricted to a per-head subspace. The mix~\eqref{eq:lsa-mix} is the
+bundling operation of \cite{phasor-ssm-derivation}, eq.~(18), weighted
+by the exponentiated similarity scores. The reshape and $\arg$
+of~\eqref{eq:lsa-reduce} reproduce the
+phase-extraction nonlinearity of \cite{phasor-ssm-derivation},
+\S3.5---\ie, LSA is a similarity-weighted bundle in HD-VSA space,
+performed once per time slice.
+
+\begin{proposition}[LSA as interference-weighted bundle]\label{prop:lsa-hd}
+Let $s = (\tilde s_{h h'}^{(l,b)})_{h,h'=1}^{\nh}\in\R^{\nh\times \nh}$
+be the row-normalized score matrix of~\eqref{eq:lsa-scale} and let
+$V_h = e^{\im\pi V_{:,h,l,b}}\in\C^{\Dh}$. Then
+\[
+  \tilde Y_{:,h,l,b} = (V \cdot s^\top)_{:,h}
+  = \texttt{bundle}_{h'}\!\bigl(s_{h h'}\cdot V_{h'}\bigr),
+\]
+where $\texttt{bundle}$ is the Fourier-HRR bundling of
+\cite{phasor-ssm-derivation}, eq.~(18). Thus LSA is the
+similarity-weighted superposition of head-restricted Fourier-HRR
+vectors, exactly mirroring the temporal-bundling form of
+\cite{phasor-ssm-derivation}, eq.~(21), but on the head axis.
+\end{proposition}
+
+\begin{proof}
+Direct from~\eqref{eq:lsa-mix} and the definition of bundling as
+complex addition.
+\end{proof}
+
+%======================================================================
+\section{Local Cross-Attention}\label{sec:lca}
+%======================================================================
+
+\subsection{Per-slice definition with stored anchors}
+
+\begin{definition}[Local Cross-Attention]\label{def:lca}
+Let $Q^{*}\in[-1,1]^{D\times A}$ be a bank of \emph{anchor phase
+vectors} (trainable, time-invariant), and let $X\in[-1,1]^{D\times L\times B}$
+be the input. Reshape $Q^{*}$ to $(\Dh, \nh, A)$ and project $X$ to
+$K, V\colon (\Dh, \nh, L, B)$ via PhasorDense as
+in~\eqref{eq:qkv-proj}--\eqref{eq:reshape-heads}.
+\emph{Local Cross-Attention} is the map
+$(Q^{*}, X)\mapsto Y\in[-1,1]^{D\times L\times B}$ defined by
+\begin{align}
+  s_{a h}^{(l,b)}
+    &= \sm\!\bigl(Q^{*}_{:,a,h},\, K_{:,h,l,b}\bigr)
+       \in [-1,1],
+       \label{eq:lca-score} \\
+  \tilde s_{a h}^{(l,b)}
+    &= \frac{1}{\nh}\exp\!\bigl(\beta\,s_{a h}^{(l,b)}\bigr),
+       \label{eq:lca-scale} \\
+  \tilde Y_{:,h,l,b}
+    &= \sum_{a=1}^{A}\sum_{h'=1}^{\nh} \tilde s_{a h'}^{(l,b)}
+       \cdot M_{a h h'}\cdot e^{\im\pi V_{:,h',l,b}}
+       \in \C^{\Dh},
+       \label{eq:lca-mix} \\
+  Y_{:,l,b}
+    &= \texttt{reshape}_{(\Dh,\nh)\to D}\!\bigl(
+         \tfrac{1}{\pi}\arg \tilde Y_{:,:,l,b}\bigr),
+       \label{eq:lca-reduce}
+\end{align}
+where $M\in\R^{A\times \nh\times \nh}$ is a trainable head-mixing
+weight (default $M_{a h h'} = \delta_{h h'}/A$, in which case
+\eqref{eq:lca-mix} collapses to $\tfrac{1}{A}\sum_a \tilde s_{a h}\,
+e^{\im\pi V_{:,h,l,b}}$).
+\end{definition}
+
+The construction mirrors LSA but with the per-slice query replaced by
+the fixed anchor bank. The score matrix has shape
+$(A, \nh, L, B)$ instead of $(\nh, \nh, L, B)$; the cost per slice is
+$O(A\,\nh\,\Dh)$, linear in every dimension.
+
+\subsection{Three execution modes}
+
+The LCA map is again pointwise in $l$. The three views are exactly as
+for LSA, replacing $f_\beta(x[l])$ with $g_\beta(x[l]; Q^{*})$
+throughout:
+\begin{align}
+  &\textbf{Discrete:} \quad
+    z_c[l+1] = A_c\,z_c[l] + \sum_j W_{cj}\,
+      e^{\im\pi\,g_\beta(x[l]; Q^{*})_j},
+       \label{eq:lca-discrete} \\
+  &\textbf{Continuous:} \quad
+    \frac{\dd z_c}{\dd t} = k_c\,z_c(t) + \sum_j W_{cj}\,
+      e^{\im\pi\,g_\beta(\tilde X(t); Q^{*})_j},
+       \label{eq:lca-continuous} \\
+  &\textbf{Parallel:} \quad
+    z_c = K_c * \hat H_c,
+    \quad \hat H_c[l] = \sum_j W_{cj}\,
+      e^{k_c\,\delta t_j(g_\beta(x[l]; Q^{*}))}.
+       \label{eq:lca-parallel}
+\end{align}
+
+\begin{proposition}[Three-view equivalence for LCA]\label{prop:lca-equiv}
+The discrete, parallel, and (sampled) continuous outputs of LCA agree
+at every lattice point $l T$, $l = 0,\dots,L-1$.
+\end{proposition}
+
+\begin{proof}
+Identical to the proof of Proposition~\ref{prop:lsa-equiv}: the anchor
+bank $Q^{*}$ is time-invariant so $g_\beta(\cdot; Q^{*})$ remains
+pointwise in $l$, and the surrounding SSM is unchanged.
+\end{proof}
+
+\begin{remark}[Cost]
+LCA's parallel-mode complexity is $O(A\,\nh\,\Dh\,L\,B)$, linear in
+every dimension. The trainable anchor bank costs $A\,D$ parameters
+(plus $A\,\nh^2$ for $M$ if used).
+\end{remark}
+
+\subsection{LCA as a modern Hopfield retrieval}
+
+Substituting~\eqref{eq:lca-score} into~\eqref{eq:lca-scale} and
+identifying $\beta$ as an inverse temperature yields the score
+\[
+  \tilde s_{a h}^{(l,b)}
+    = \frac{1}{\nh}\exp\!\Bigl(
+        \frac{\beta}{\Dh}\sum_{c=1}^{\Dh}
+          \cos\!\bigl(\pi(Q^{*}_{c,a,h} - K_{c,h,l,b})\bigr)\Bigr).
+\]
+This is the modern Hopfield update of~\cite{hopfield-is-all-you-need}
+restricted to the unit torus and using the Fourier-HRR inner product
+$\tfrac{1}{\Dh}\langle Q^{*}_{:,a,h}, K_{:,h,l,b}\rangle$ in place of
+the Euclidean inner product. When $V = K$ and $M = \delta_{h h'}/A$,
+the mix~\eqref{eq:lca-mix} reproduces the Hopfield retrieval rule
+$\xi^{\mathrm{new}} = X\,\mathrm{softmax}(\beta\,X^\top\xi)$ with
+$X$ playing the role of stored patterns.
+
+\begin{proposition}[Anchors as stored patterns]\label{prop:lca-hopfield}
+Define the per-head pattern matrix $\Xi_h \in \C^{\Dh \times A}$ with
+columns $\Xi_{:,a,h} = e^{\im\pi Q^{*}_{:,a,h}}$, and assume
+$V = K$ and $M_{a h h'} = \delta_{h h'}/A$. Then
+\[
+  \tilde Y_{:,h,l,b}
+  = \frac{1}{\nh A}\,\Xi_h \cdot \exp\!\bigl(\beta\,
+       \mathrm{Re}\,\Xi_h^{\dagger}\,e^{\im\pi K_{:,h,l,b}} / \Dh\bigr),
+\]
+which is the modern-Hopfield retrieval rule
+of~\cite{hopfield-is-all-you-need} with stored patterns $\Xi_h$ and
+query $e^{\im\pi K_{:,h,l,b}}$, up to the per-head normalization
+factor $1/(\nh A)$.
+\end{proposition}
+
+\begin{proof}
+Substitute the Fourier-HRR similarity~\eqref{eq:lca-score} into
+\eqref{eq:lca-mix} and collect terms. The real part of
+$\Xi_h^{\dagger}\,e^{\im\pi K_{:,h,l,b}}$ is exactly $\Dh \cdot
+\sm(Q^{*}_{:,a,h}, K_{:,h,l,b})$, so the exponential reproduces
+\eqref{eq:lca-scale}. The contraction $\Xi_h \cdot (\cdot)$ then
+realizes \eqref{eq:lca-mix} under $V=K$.
+\end{proof}
+
+Equivalently, LCA inherits modern Hopfield's exponential pattern
+capacity ($A_{\max}\sim e^{c\Dh}$, see~\cite{hopfield-is-all-you-need},
+Theorem 3), modulo the unit-torus restriction; we leave a precise
+capacity bound as future work.
+
+%======================================================================
+\section{Comparison with related local-attention constructions}
+\label{sec:related}
+%======================================================================
+
+\subsection{Window-restricted local attention}
+
+Sliding-window transformer attention~\cite{longformer,longformer-followups}
+reduces vanilla attention's $O(L^2)$ cost to $O(L\,w)$ by restricting
+the time-axis softmax to a window of width $w$. The score
+remains across-time and depends on $w$ future-and-past slices, so the
+operation is non-causal except in the unidirectional variant. Our LSA
+differs structurally: it eliminates the time axis from the score
+entirely, replacing it with a head axis of size $\nh^2$. The per-slice
+cost is $O(\nh^2\,\Dh)$, independent of $L$, and the layer is
+\emph{strictly local in time}---it depends on no other time slice.
+This is a stronger restriction than windowed attention and a stronger
+guarantee for spiking deployment, where causal locality is a hardware
+prerequisite.
+
+\subsection{State-space attention}
+
+Mamba's selective state-space model~\cite{mamba} makes the SSM
+transition $A_c$ input-dependent. RetNet~\cite{retnet} chunks
+retention into per-block recurrences. S5~\cite{s5} pairs a diagonal
+SSM with a linear-attention output projection. All three blend SSM and
+attention by making transition parameters depend on the input. Our
+construction does the opposite: the SSM transition is fixed (constant
+$k_c$ as in~\cite{phasor-ssm-derivation}), and the attention is
+applied pointwise in time. The two design axes are orthogonal; LSA/LCA
+could in principle be composed with selective-state mechanisms,
+though we do not pursue that here.
+
+\subsection{Modern Hopfield networks}
+
+\cite{hopfield-is-all-you-need} established that a continuous Hopfield
+network with the energy
+\(
+  E(\xi) = -\beta^{-1}\log\sum_a e^{\beta\,\xi^\top x_a} + \tfrac{1}{2}\xi^\top\xi
+\)
+has retrieval rule
+$\xi^{\mathrm{new}} = X\,\mathrm{softmax}(\beta\,X^\top\xi)$, which
+coincides with the transformer attention update when $X$ is the matrix
+of key/value vectors. Proposition~\ref{prop:lca-hopfield} establishes
+that LCA realizes this update with stored patterns $\Xi_h$ on the unit
+torus and the Fourier-HRR inner product as similarity. The
+unit-modulus restriction is the same one used throughout
+\cite{phasor-ssm-derivation}, \S4, and preserves Plate's binding/bundling
+algebra~\cite{hrr}.
+
+\subsection{HD computing attention precedents}
+
+VSA-based attention has been explored
+in~\cite{vsa-attention,hd-binding-attention} as a binding-based
+key--value associative memory. Those constructions use the
+Fourier-HRR inner product for the score and complex-domain superposition
+for the mix; LSA and LCA inherit those choices verbatim. The novel
+elements here are (i) the head-axis restriction of the score, which
+makes the operation pointwise in time, and (ii) the explicit
+embedding within the three-view phasor SSM derivation.
+
+%======================================================================
+\section{Formal system summary}\label{sec:summary}
+%======================================================================
+
+\begin{definition}[Phasor LSA layer]
+A Phasor Local Self-Attention layer is parameterized by three
+PhasorDense projections $\Pi_Q, \Pi_K, \Pi_V$ of width $D = \nh\Dh$,
+a scale $\beta\in\R_+$, and the shared carrier $\omega = 2\pi/T$. It
+acts on $X\in[-1,1]^{D\times L\times B}$ via
+\[
+  Y_{:,l,b}
+  = \tfrac{1}{\pi}\arg\!\Bigl(
+      \sum_{h'}\tfrac{1}{\nh}\exp\!\bigl(\beta\,\sm(\Pi_Q(X)_{:,h,l,b},
+                                                  \Pi_K(X)_{:,h',l,b})\bigr)\,
+        e^{\im\pi \Pi_V(X)_{:,h',l,b}}\Bigr),
+\]
+broadcast over $(l, b)$. The layer admits the discrete, continuous,
+and parallel forms of \eqref{eq:lsa-discrete}--\eqref{eq:lsa-parallel}
+and they coincide at every lattice point $l T$
+(Proposition~\ref{prop:lsa-equiv}).
+\end{definition}
+
+\begin{definition}[Phasor LCA layer]
+A Phasor Local Cross-Attention layer is parameterized by an anchor
+bank $Q^{*}\in[-1,1]^{D\times A}$, two PhasorDense projections
+$\Pi_K, \Pi_V$ of width $D$, a head-mix tensor $M\in\R^{A\times \nh\times \nh}$
+(default $\delta_{h h'}/A$), a scale $\beta\in\R_+$, and the carrier
+$\omega = 2\pi/T$. It acts on $X\in[-1,1]^{D\times L\times B}$ via
+\eqref{eq:lca-score}--\eqref{eq:lca-reduce}, broadcast over $(l, b)$.
+It admits the three views of
+\eqref{eq:lca-discrete}--\eqref{eq:lca-parallel}, which coincide at
+every lattice point $l T$ (Proposition~\ref{prop:lca-equiv}). When
+$V = K$ and $M$ is the default, it reduces to a modern-Hopfield
+pattern retrieval on the unit torus with stored patterns $\Xi_h$
+(Proposition~\ref{prop:lca-hopfield}).
+\end{definition}
+
+\medskip
+\noindent\textbf{Properties.} Both LSA and LCA:
+\begin{enumerate}[nosep,leftmargin=*]
+  \item are pointwise in time, so they compose with the surrounding
+        Phasor SSM in all three views;
+  \item respect the per-channel-$\omega$ rule of
+        \cite{phasor-ssm-derivation}, \S3.5---all heads share $\omega$,
+        only $\lambda$ varies per channel;
+  \item realize the Fourier-HRR algebra on a per-slice basis: the
+        score is HRR similarity, the mix is HRR bundling, the output
+        $\arg$ is the HRR phase-extraction nonlinearity.
+\end{enumerate}
+
+The companion document
+\texttt{docs/local\_attention\_companion.md} traces these definitions
+to the existing PhasorNetworks.jl source tree and lays out an
+implementation and experimental test plan.
+
+%======================================================================
+\begin{thebibliography}{99}
+
+\bibitem{phasor-ssm-derivation}
+W.\ Olin-Ammentorp.
+\newblock The Phasor State-Space Model: A Derivation from
+  Resonate-and-Fire Dynamics to Holographic Distributed Representations.
+\newblock Companion document, PhasorNetworks.jl
+  (\texttt{docs/phasor\_ssm\_derivation.tex}).
+
+\bibitem{hopfield-is-all-you-need}
+H.\ Ramsauer, B.\ Sch{\"a}fl, J.\ Lehner, P.\ Seidl, M.\ Widrich,
+T.\ Adler, L.\ Gruber, M.\ Holzleitner, M.\ Pavlovi{\'c},
+G.\ Kraml Sandner, et al.
+\newblock Hopfield Networks Is All You Need.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2021.
+
+\bibitem{longformer}
+I.\ Beltagy, M.\ E.\ Peters, and A.\ Cohan.
+\newblock Longformer: The Long-Document Transformer.
+\newblock \emph{arXiv preprint} arXiv:2004.05150, 2020.
+
+\bibitem{longformer-followups}
+J.\ Ainslie, S.\ Onta{\~n}{\'o}n, C.\ Alberti, V.\ Cvicek, Z.\ Fisher,
+P.\ Pham, A.\ Ravula, S.\ Sanghai, Q.\ Wang, and L.\ Yang.
+\newblock ETC: Encoding Long and Structured Inputs in Transformers.
+\newblock In \emph{Empirical Methods in Natural Language Processing
+  (EMNLP)}, 2020.
+
+\bibitem{efficient-transformers}
+Y.\ Tay, M.\ Dehghani, D.\ Bahri, and D.\ Metzler.
+\newblock Efficient Transformers: A Survey.
+\newblock \emph{ACM Computing Surveys}, 55(6), 2022.
+
+\bibitem{mamba}
+A.\ Gu and T.\ Dao.
+\newblock Mamba: Linear-Time Sequence Modeling with Selective State
+  Spaces.
+\newblock In \emph{Conference on Language Modeling (COLM)}, 2024.
+
+\bibitem{retnet}
+Y.\ Sun, L.\ Dong, S.\ Huang, S.\ Ma, Y.\ Xia, J.\ Xue, J.\ Wang, and
+F.\ Wei.
+\newblock Retentive Network: A Successor to Transformer for Large
+  Language Models.
+\newblock \emph{arXiv preprint} arXiv:2307.08621, 2023.
+
+\bibitem{s5}
+J.\ T.\ H.\ Smith, A.\ Warrington, and S.\ W.\ Linderman.
+\newblock Simplified State Space Layers for Sequence Modeling.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2023.
+
+\bibitem{hippo}
+A.\ Gu, T.\ Dao, S.\ Ermon, A.\ Rudra, and C.\ R{\'e}.
+\newblock HiPPO: Recurrent Memory with Optimal Polynomial Projections.
+\newblock In \emph{Neural Information Processing Systems (NeurIPS)},
+  2020.
+
+\bibitem{hrr}
+T.\ A.\ Plate.
+\newblock Holographic Reduced Representations.
+\newblock \emph{IEEE Transactions on Neural Networks}, 6(3):623--641,
+  1995.
+
+\bibitem{vsa-attention}
+E.\ P.\ Frady, D.\ Kleyko, and F.\ T.\ Sommer.
+\newblock A Theory of Sequence Indexing and Working Memory in
+  Recurrent Neural Networks.
+\newblock \emph{Neural Computation}, 30(6):1449--1513, 2018.
+
+\bibitem{hd-binding-attention}
+P.\ Neubert, S.\ Schubert, K.\ Schlegel, and P.\ Protzel.
+\newblock Vector Semantic Representations as Descriptors for Visual
+  Place Recognition.
+\newblock In \emph{Robotics: Science and Systems}, 2021.
+
+\end{thebibliography}
+
+\end{document}
