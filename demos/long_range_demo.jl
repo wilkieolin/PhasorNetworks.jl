@@ -32,6 +32,11 @@ Usage:
   julia --project=. demos/long_range_demo.jl --benchmark fmnist --epochs 15
   julia --project=. demos/long_range_demo.jl --benchmark ablation --epochs 15
   julia --project=. demos/long_range_demo.jl --benchmark fmnist --epochs 20 --lr 0.008 --lr-ssm 0.002 --weight-decay 0.0001 --cosine-schedule
+
+  # Pixel-by-pixel sequential FashionMNIST with full architecture (STFT+Attn+Dense):
+  julia --project=. demos/long_range_demo.jl --benchmark fmnist --full-arch \
+      --pixels-per-step 1 --epochs 20 --hidden 64 --cosine-schedule
+  # Batchsize auto-scales from --batchsize to fit L=784 in GPU memory.
 =#
 
 using PhasorNetworks
@@ -110,6 +115,9 @@ function parse_args()
             help = "GC every N batches (0 = every batch). Set higher for SSM workloads."
             arg_type = Int
             default = 50
+        "--full-arch"
+            help = "use STFT+Attn+Dense for --benchmark fmnist (instead of Dense-only)"
+            action = :store_true
     end
     return ArgParse.parse_args(s)
 end
@@ -231,20 +239,25 @@ function create_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
 end
 
 """
-    create_ablation_model(; C_in, D_hidden, n_classes, use_stft, use_attention, readout_frac)
+    create_ablation_model(; C_in, D_hidden, n_classes, use_stft, use_attention,
+                            readout_frac, init_mode)
 
 Build a model with optional ResonantSTFT and SSMSelfAttention for ablation testing.
+`init_mode` applies to the PhasorDense layers; ResonantSTFT keeps its own
+trainable-ω init (per-channel ω is the deliberate exception, CLAUDE.md).
 """
 function create_ablation_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
                                  use_stft::Bool=true, use_attention::Bool=true,
-                                 readout_frac::Float32=0.25f0)
+                                 readout_frac::Float32=0.25f0,
+                                 init_mode::Symbol=:default)
     layers = []
 
     # Input layer: ResonantSTFT (trainable omega, outputs complex) or PhasorDense
     if use_stft
         push!(layers, ResonantSTFT(C_in => D_hidden, normalize_to_unit_circle))
     else
-        push!(layers, PhasorDense(C_in => D_hidden, normalize_to_unit_circle; use_bias=false))
+        push!(layers, PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
+                                  init_mode=init_mode, use_bias=false))
     end
 
     if use_attention
@@ -252,7 +265,8 @@ function create_ablation_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
     end
 
     # Second SSM layer + readout
-    push!(layers, PhasorDense(D_hidden => D_hidden, identity; use_bias=false))
+    push!(layers, PhasorDense(D_hidden => D_hidden, identity;
+                              init_mode=init_mode, use_bias=false))
     push!(layers, SSMReadout(D_hidden => n_classes; readout_frac=readout_frac))
 
     return Chain(Tuple(layers)...)
@@ -279,19 +293,23 @@ Must be called BEFORE moving to GPU.
 """
 # Helper: apply a function to all layers that have log_neg_lambda in params
 function _map_ssm_layers(fn_ps, fn_st, ps::NamedTuple, st::NamedTuple)
-    ps_dict = Dict(pairs(ps))
-    st_dict = Dict(pairs(st))
-    for k in keys(ps)
-        layer_ps = ps[k]
-        layer_st = get(st, k, NamedTuple())
-        if layer_ps isa NamedTuple && haskey(layer_ps, :log_neg_lambda)
-            ps_dict[k] = fn_ps(layer_ps)
-            if layer_st isa NamedTuple
-                st_dict[k] = fn_st(layer_st)
-            end
-        end
-    end
-    return NamedTuple(ps_dict), NamedTuple(st_dict)
+    # Rebuild the NamedTuples preserving layer order. A `Dict` roundtrip
+    # would hash-reorder fields, and Lux.applychain dispatches on
+    # `NamedTuple{fields}` requiring layers/ps/st to share field order.
+    ps_keys = keys(ps)
+    st_keys = keys(st)
+    new_ps_vals = Tuple(
+        let layer_ps = ps[k]
+            (layer_ps isa NamedTuple && haskey(layer_ps, :log_neg_lambda)) ?
+                fn_ps(layer_ps) : layer_ps
+        end for k in ps_keys)
+    new_st_vals = Tuple(
+        let layer_ps = get(ps, k, NamedTuple()), layer_st = st[k]
+            (layer_ps isa NamedTuple && haskey(layer_ps, :log_neg_lambda) &&
+             layer_st isa NamedTuple) ?
+                fn_st(layer_st) : layer_st
+        end for k in st_keys)
+    return NamedTuple{ps_keys}(new_ps_vals), NamedTuple{st_keys}(new_st_vals)
 end
 
 function scale_dynamics_for_length(ps::NamedTuple, st::NamedTuple,
@@ -301,6 +319,11 @@ function scale_dynamics_for_length(ps::NamedTuple, st::NamedTuple,
         scale = Float32(seq_len)
         λ_scaled = λ_base ./ scale
         ω_scaled = ω_base ./ scale
+        # The ω-write below lands in state but is consumed only by the
+        # ODE (CurrentCall) dispatch. The 3D Phase Dirac path (the hot
+        # path here) uses the shared ω = 2π from spk_args.t_period per
+        # the per-channel-ω rule (CLAUDE.md). λ-scaling is what actually
+        # shapes the memory window at large L.
         log_neg_lambda = Float32.(log.(-λ_scaled))
         omega = ω_scaled
     else  # :uniform
@@ -425,14 +448,21 @@ function run_conditions(name::String, train_loader, test_loader,
                         seed::Int, use_cuda::Bool, readout_frac::Float32,
                         seq_len::Int, lr_ssm::Float64=0.0,
                         weight_decay::Float64=0.0, cosine_schedule::Bool=false,
-                        gc_interval::Int=50)
+                        gc_interval::Int=50,
+                        model_factory::Function=create_model)
 
     device = use_cuda ? gpu_device() : cpu_device()
 
+    # Underlying layer init_mode is :default for the non-hippo rows; the
+    # per-condition `scale_dynamics_for_length` / `force_short_memory` call
+    # below overwrites log_neg_lambda anyway. `:uniform` as a layer init
+    # was removed (it spread ω across channels, violating the per-channel
+    # ω rule in CLAUDE.md). The string labels here describe the *resulting*
+    # dynamics, not the underlying layer init.
     conditions = [
         ("hippo",        :hippo,   false),
-        ("uniform",      :uniform, false),
-        ("short-memory", :uniform, true),
+        ("uniform",      :default, false),
+        ("short-memory", :default, true),
     ]
 
     results = Dict{String, NamedTuple{(:losses, :accs), Tuple{Vector{Float64}, Vector{Float64}}}}()
@@ -440,7 +470,7 @@ function run_conditions(name::String, train_loader, test_loader,
     for (cond_name, init_mode, force_short) in conditions
         println("\n--- [$name] condition: $cond_name ---")
         rng = Xoshiro(seed)
-        model = create_model(; C_in, D_hidden, n_classes, init_mode, readout_frac)
+        model = model_factory(; C_in, D_hidden, n_classes, init_mode, readout_frac)
         ps, st = Lux.setup(rng, model)
 
         if force_short
@@ -603,6 +633,7 @@ function main()
     wd         = Float64(parsed["weight-decay"])
     cosine     = parsed["cosine-schedule"]
     gc_int     = parsed["gc-interval"]
+    full_arch  = parsed["full-arch"]
 
     use_cuda = !no_cuda && CUDA.functional()
     println("Device: $(use_cuda ? "CUDA GPU" : "CPU")")
@@ -652,15 +683,35 @@ function main()
         println("  BENCHMARK: SEQUENTIAL FASHIONMNIST")
         println("#"^64)
 
-        train_loader, test_loader, fmnist_L, fmnist_C = load_sequential_fmnist(; batchsize, pixels_per_step=pps)
+        # Auto-scale batchsize based on L to prevent OOM at long sequences
+        # (same formula as the copying-task branch below).
+        fmnist_L_pre = 784 ÷ pps
+        fmnist_batchsize = min(batchsize, max(16, 4096 ÷ fmnist_L_pre))
+        if fmnist_batchsize < batchsize
+            @printf("  Auto-scaling fmnist batchsize from %d to %d for L=%d (memory safety)\n",
+                    batchsize, fmnist_batchsize, fmnist_L_pre)
+        end
+
+        if full_arch
+            println("  Architecture: STFT + Attn + Dense (--full-arch)")
+            factory = (; kwargs...) -> create_ablation_model(;
+                use_stft=true, use_attention=true, kwargs...)
+        else
+            println("  Architecture: Dense-only (default)")
+            factory = create_model
+        end
+
+        train_loader, test_loader, fmnist_L, fmnist_C =
+            load_sequential_fmnist(; batchsize=fmnist_batchsize, pixels_per_step=pps)
 
         fmnist_results = run_conditions("sFashionMNIST-L=$fmnist_L", train_loader, test_loader,
                                         mnist_loss, intensity_to_phase;
                                         C_in=fmnist_C, D_hidden, n_classes=10,
-                                        n_epochs, batchsize, lr, seed, use_cuda,
+                                        n_epochs, batchsize=fmnist_batchsize, lr, seed, use_cuda,
                                         readout_frac=0.25f0, seq_len=fmnist_L,
                                         lr_ssm, weight_decay=wd,
-                                        cosine_schedule=cosine, gc_interval=gc_int)
+                                        cosine_schedule=cosine, gc_interval=gc_int,
+                                        model_factory=factory)
 
         print_fmnist_table(fmnist_results)
     end
