@@ -16,5 +16,4 @@ coverage
 *plan*
 *.png
 ablation_results/
-docs/*.md
 test/scratch/*
