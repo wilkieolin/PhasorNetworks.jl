@@ -15,21 +15,20 @@
 #   - §5.1 three-view equivalence (FFT branch of causal_conv_dirac, L > 64)
 #   - §5.2 HD-VSA invariance — bind/unbind symmetry under LCA (score peak
 #         at matching anchor + Hopfield bundle recovers matching anchor)
+#   - §5.2 capacity sweep for LCA (top-1 noisy-recall as A varies)
 #
 # Bookmarked / not yet implemented:
-#   - §5.2 capacity sweep for LCA (varies A ∈ {16, 64, 256, 1024} on a
-#     synthetic associative-recall task) — research-scale; belongs in
-#     `scripts/` rather than `test/`.
 #   - §5.3 comparative training (FashionMNIST drop-in swap, learned-weight
 #     discrete↔spiking parity).
 #   - §5.4 streaming inference benchmark, composition with selective SSM.
 
 function local_attention_extras_tests()
     @testset "Local Attention Extras" begin
-        @info "Running local attention extras (FFT path + §5.2 Hopfield)..."
+        @info "Running local attention extras (FFT path + §5.2 Hopfield + capacity)..."
         phasor_local_attention_fft_path_tests()
         phasor_lca_score_peak_tests()
         phasor_lca_hopfield_bundle_tests()
+        phasor_lca_capacity_sweep_tests()
     end
 end
 
@@ -177,6 +176,63 @@ function phasor_lca_hopfield_bundle_tests()
                     cos_sim = mean(cos.(Float32(pi) .*
                         (bundle_phase_h[h] .- Float32.(anchors[:, h, a_star]))))
                     @test cos_sim > 0.95f0   # near-perfect retrieval at β = 10
+                end
+            end
+        end
+    end
+end
+
+# ----------------------------------------------------------------------
+# §5.2 HD-VSA invariance — capacity sweep (top-1 noisy recall)
+# ----------------------------------------------------------------------
+#
+# Sweeps `A` (anchor-bank size) at fixed `D_h` and measures top-1 recall
+# under Phase-domain Gaussian noise on the query. The argmax of the
+# head-axis score is interpreted as the layer's "guess" at which stored
+# anchor the query was a perturbation of; recall is the fraction of
+# anchors for which this guess is correct.
+#
+# The companion-document plan called for `A ∈ {16, 64, 256, 1024}` at
+# `D_h = 64`; we cap at `A = 256` here so the extras file still runs in
+# under a minute. The point of this testset is to verify the retrieval
+# *scales* the way Hopfield theory predicts (near-perfect recall while
+# `A ≲ exp(c · D_h)`), not to chart the full capacity curve — for that,
+# move this to `scripts/` and unroll.
+
+function phasor_lca_capacity_sweep_tests()
+    @testset "LCA capacity sweep (noisy top-1 recall)" begin
+        rng = Xoshiro(42)
+        Dh = 64
+        H, L, B = 1, 1, 1   # capacity is a per-(h, l, b) property
+
+        for A in (16, 64, 256)
+            anchors = Phase.(2f0 .* rand(rng, Float32, Dh, H, A) .- 1f0)
+
+            for σ in (0.05f0, 0.1f0, 0.2f0)
+                n_correct = 0
+                for a_star in 1:A
+                    noise   = σ .* randn(rng, Float32, Dh, H)
+                    raw     = Float32.(anchors[:, :, a_star]) .+ noise
+                    # Inline remap to [-1, 1] — `remap_phase` is not exported.
+                    wrapped = mod.(raw .+ 1f0, 2f0) .- 1f0
+                    K       = reshape(Phase.(wrapped), Dh, H, L, B)
+                    scores  = similarity_outer_heads(anchors, K) # (A, H, L, B)
+                    a_hat   = argmax(scores[:, 1, 1, 1])
+                    n_correct += (a_hat == a_star)
+                end
+                recall = n_correct / A
+                @info "capacity sweep" Dh=Dh A=A σ=σ recall=recall
+
+                # Thresholds. At D_h = 64 the chance-level pair similarity
+                # for random Phase anchors has std ≈ 1/√D_h ≈ 0.125, well
+                # below the σ = 0.2 self-similarity drop (~cos(π·σ) ≈ 0.81),
+                # so even A = 256 should retrieve nearly perfectly. We
+                # allow a small slack for the largest (A, σ) combination.
+                if σ <= 0.1f0
+                    @test recall >= 0.95
+                else
+                    # σ = 0.2: still expect ≥ 0.9 across all A in this range.
+                    @test recall >= 0.9
                 end
             end
         end
