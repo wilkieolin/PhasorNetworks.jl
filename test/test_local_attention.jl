@@ -167,6 +167,36 @@ function phasor_lsa_tests()
             # through the score weighting.
             @test abs(g.scale[1]) > 0f0
         end
+
+        @testset "H=1 identity (Π_Q = Π_K = Π_V = I)" begin
+            # With `n_heads = 1` and the three projection weight matrices
+            # set to identity, PhasorLSA should reduce to the identity in
+            # phase: Q = K = V = x, so the head-axis score is 1 everywhere
+            # (only one head), the bundle is exp(iπx) up to a positive
+            # real prefactor, and complex_to_angle recovers x.
+            #
+            # Derivation note: for L = 1, the per-channel PhasorDense Dirac
+            # response z_c = e^(k_c · δt) followed by `-conj` and
+            # normalisation leaves phase = x_c exactly, irrespective of
+            # λ_c. So this test is robust to whatever HiPPO-init λ landed
+            # in `ps.q_proj.log_neg_lambda`.
+            D_id, B_id = 8, 3
+            layer_id = PhasorLSA(D_id => D_id, 1)
+            ps_init, st_id = Lux.setup(rng, layer_id)
+            eye = Float32[i == j ? 1f0 : 0f0 for i in 1:D_id, j in 1:D_id]
+            ps_id = (q_proj = merge(ps_init.q_proj, (weight = eye,)),
+                     k_proj = merge(ps_init.k_proj, (weight = eye,)),
+                     v_proj = merge(ps_init.v_proj, (weight = eye,)),
+                     scale  = ps_init.scale)
+
+            x_id = Phase.(2f0 .* rand(rng, Float32, D_id, B_id) .- 1f0)
+            y_id, _ = layer_id(x_id, ps_id, st_id)
+            @test size(y_id) == (D_id, B_id)
+            # arc_error wraps the phase-difference modulus correctly,
+            # so wrap-around at ±1 boundary is handled.
+            err = maximum(abs.(arc_error.(Float32.(y_id) .- Float32.(x_id))))
+            @test err < 1f-4
+        end
     end
 end
 
