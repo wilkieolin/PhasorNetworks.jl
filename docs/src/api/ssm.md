@@ -27,12 +27,22 @@ SSMSelfAttention
 ```
 
 !!! note "PhasorSSM is deprecated"
-    `PhasorSSM` is a backward-compatible constructor that returns a `PhasorDense` with
-    SSM-appropriate defaults. New code should use `PhasorDense` directly with
-    `init_mode=:uniform` or `init_mode=:hippo`.
+    `PhasorSSM` has been removed. New code should use `PhasorDense` directly with
+    `init_mode=:default` or `init_mode=:hippo`.
+
+## Spiking encoding
 
 ```@docs
-PhasorSSM
+MakeSpikingSSM
+ssm_phases_to_train
+```
+
+## Output extraction
+
+```@docs
+ssm_extract_phases
+sample_phases_at_periods
+reconstruct_from_current
 ```
 
 ## Encoding

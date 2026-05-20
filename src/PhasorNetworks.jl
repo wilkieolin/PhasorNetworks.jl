@@ -70,11 +70,11 @@ orthogonal_codes,
 similarity,
 similarity_self,
 similarity_outer,
+similarity_outer_heads,
 similarity_loss,
 codebook_loss,
 
 #ssm
-PhasorSSM,
 SSMReadout,
 phasor_kernel,
 causal_conv,
@@ -86,9 +86,12 @@ psk_encode,
 impulse_encode,
 SSMCrossAttention,
 SSMSelfAttention,
+PhasorLSA,
+PhasorLCA,
 MakeSpikingSSM,
 ssm_phases_to_train,
 ssm_extract_phases,
+sample_phases_at_periods,
 reconstruct_from_current,
 
 #network
@@ -106,6 +109,8 @@ MinPool,
 ResidualBlock,
 PhasorAttention,
 SingleHeadAttention,
+AttractorPhasorSSM,
+attractor_pull,
 train,
 soft_angle,
 default_bias,
@@ -155,19 +160,25 @@ spiking_loss_and_accuracy,
 confusion_matrix,
 OvR_matrices,
 tpr_fpr,
-interpolate_roc
+interpolate_roc,
+
+#datasets
+fashion_mnist_data
 
 include("imports.jl")
 include("constants.jl")
 include("types.jl")
 include("domains.jl")
+include("activations.jl")
 include("gpu.jl")
 include("spiking.jl")
 include("vsa.jl")
 include("kernels.jl")
 include("network.jl")
 include("ssm.jl")
+include("attractor_ssm.jl")
 include("metrics.jl")
+include("datasets.jl")
 include("hep.jl")
 include("ep.jl")
 

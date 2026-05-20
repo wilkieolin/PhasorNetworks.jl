@@ -269,19 +269,19 @@ function hep_aligned_training_tests()
     @testset "hep_train aligned (HolomorphicReadout)" begin
         args = Args(lr=1.0, epochs=10, batchsize=64)
 
+        # Use ω=0 for EP settling (no carrier oscillation) by setting
+        # spk_args.t_period = Inf, so period_to_angfreq(Inf) = 0.
+        # The per-channel ω rule (CLAUDE.md) made ω derive from
+        # layer.spk_args.t_period, so we no longer hack it via state.
+        # extract_hep_params reads the layer's spk_args at gradient time.
+        spk0 = SpikingArgs(t_period = Float32(Inf))
         model = Chain(
             x -> ComplexF32.(x),
-            PhasorDense(2 => 16, holotanh, use_bias=false),
-            PhasorDense(16 => 2, holotanh, use_bias=false),
+            PhasorDense(2 => 16, holotanh; use_bias=false, spk_args=spk0),
+            PhasorDense(16 => 2, holotanh; use_bias=false, spk_args=spk0),
             HolomorphicReadout(2 => 2)
         )
         ps, st = Lux.setup(args.rng, model)
-        # Use omega=0 for EP settling (no carrier oscillation)
-        st = merge(st, (
-            layer_2 = (omega = zeros(Float32, 16),),
-            layer_3 = (omega = zeros(Float32, 2),),
-            layer_4 = st.layer_4
-        ))
 
         x_test = Float32.(randn(args.rng, 2, 4))
         y_pred, _ = model(x_test, ps, st)

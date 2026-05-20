@@ -467,11 +467,26 @@ end
 # ================================================================
 
 """
-    extract_hep_params(ps, st)
+    extract_hep_params(model, ps, st)
+    extract_hep_params(model, ps)
 
 Extract weights, biases, dynamics, and readout from Lux params/state.
+The `model` is the parent `Lux.Chain`; it's required because the per-channel
+ω rule (see `CLAUDE.md`) now stores ω on `layer.spk_args.t_period` rather
+than in params/state. Each layer's scalar ω is broadcast to a per-channel
+vector matching `log_neg_lambda`'s shape so the existing `(lnl, omega)`
+k-array contract remains unchanged downstream.
 """
-function extract_hep_params(ps::NamedTuple, st::NamedTuple)
+# Resolve a layer's shared ω from its spk_args (single source of truth
+# per the per-channel ω rule). Returns the scalar; callers broadcast it
+# to per-channel shape for k_arrays.
+_layer_omega_scalar(layer::PhasorDense) = period_to_angfreq(layer.spk_args.t_period)
+# Fallback: layer doesn't carry spk_args (e.g. HolomorphicReadout) — use
+# the canonical default ω = 2π so unrelated chain entries don't break
+# extraction.
+_layer_omega_scalar(::Any) = Float32(2π)
+
+function extract_hep_params(model, ps::NamedTuple, st::NamedTuple)
     weights = []; biases = []; k_arrays = []; layer_keys = Symbol[]
     readout_conj = nothing
 
@@ -485,7 +500,8 @@ function extract_hep_params(ps::NamedTuple, st::NamedTuple)
                 push!(biases, nothing)
             end
             lnl = p.log_neg_lambda
-            omega = haskey(p, :omega) ? p.omega : s.omega
+            ω_scalar = _layer_omega_scalar(model.layers[key])
+            omega = fill(ω_scalar, size(lnl))
             push!(k_arrays, (lnl, omega))
             push!(layer_keys, key)
         elseif haskey(s, :codes_conj)
@@ -496,7 +512,7 @@ function extract_hep_params(ps::NamedTuple, st::NamedTuple)
     return Tuple(weights), Tuple(biases), Tuple(k_arrays), layer_keys, readout_conj
 end
 
-function extract_hep_params(ps::NamedTuple)
+function extract_hep_params(model, ps::NamedTuple)
     weights = []; biases = []; k_arrays = []; layer_keys = Symbol[]
     for key in keys(ps)
         p = ps[key]
@@ -508,7 +524,8 @@ function extract_hep_params(ps::NamedTuple)
                 push!(biases, nothing)
             end
             lnl = p.log_neg_lambda
-            omega = haskey(p, :omega) ? p.omega : fill(Float32(2pi), size(lnl))
+            ω_scalar = _layer_omega_scalar(model.layers[key])
+            omega = fill(ω_scalar, size(lnl))
             push!(k_arrays, (lnl, omega))
             push!(layer_keys, key)
         end
@@ -531,9 +548,6 @@ function pack_hep_gradients(w_grads, b_grads, layer_keys, ps)
             g[:weight] = Float32.(real.(w_grads[layer_idx]))
             if haskey(p, :log_neg_lambda)
                 g[:log_neg_lambda] = zeros(Float32, size(p.log_neg_lambda))
-            end
-            if haskey(p, :omega)
-                g[:omega] = zeros(Float32, size(p.omega))
             end
             if b_grads[layer_idx] !== nothing
                 g[:bias_real] = Float32.(real.(b_grads[layer_idx]))
@@ -583,7 +597,7 @@ function hep_train(model, ps, st, train_loader, args;
 
     for epoch in 1:args.epochs
         for (x, y) in train_loader
-            weights, biases, k_arrays, layer_keys, readout_conj = extract_hep_params(ps, st)
+            weights, biases, k_arrays, layer_keys, readout_conj = extract_hep_params(model, ps, st)
             rc = readout_conj !== nothing ? ComplexF32.(readout_conj) : nothing
 
             w_grads, b_grads = hep_gradient(weights, biases, k_arrays, x, y;
@@ -595,7 +609,7 @@ function hep_train(model, ps, st, train_loader, args;
             opt_state, ps = Optimisers.update(opt_state, ps, grad_nt)
 
             # Aligned loss from hEP equilibrium
-            w2, b2, k2, _, rc2 = extract_hep_params(ps, st)
+            w2, b2, k2, _, rc2 = extract_hep_params(model, ps, st)
             rc_e = rc2 !== nothing ? ComplexF32.(rc2) : nothing
             omegas = [ComplexF32.(ka[2]) for ka in k2]
             st_eval = hep_equilibrium(w2, b2, k2, ComplexF32.(x), 0.0f0, y;

@@ -27,7 +27,7 @@ Usage:
 
 using PhasorNetworks
 using Lux, Random, Optimisers, Zygote, Statistics
-using MLDatasets, MLUtils, OneHotArrays
+using MLUtils, OneHotArrays
 using CUDA, LuxCUDA
 using Plots
 using ArgParse
@@ -57,8 +57,8 @@ end
 function run_experiment(; n_epochs=20, batchsize=128, lr=3e-4, D_hidden=128,
                          seed=42, substeps=4, model_filter="both")
     println("Loading FashionMNIST...")
-    train_data = FashionMNIST(split=:train)
-    test_data  = FashionMNIST(split=:test)
+    train_data = fashion_mnist_data(:train)
+    test_data  = fashion_mnist_data(:test)
     x_train = Float32.(train_data.features)
     y_train = Float32.(onehotbatch(train_data.targets, 0:9))
     x_test  = Float32.(test_data.features)

@@ -278,6 +278,50 @@ function phase_to_train(phases::CuArray; spk_args::SpikingArgs, repeats::Int = 1
     return train
 end
 
+"""
+    ssm_phases_to_train(phases::CuArray{<:Phase, 3}; spk_args) -> SpikeTrainGPU
+
+GPU dispatch. Mirrors the CPU `ssm_phases_to_train` in `src/ssm.jl:719`:
+each `(c, l, b)` element produces one spike at time
+`(l-1)·t_period + phase_to_time(phases[c, l, b])`, all spikes share
+shape `(C, B)`.
+
+Implementation note: the CPU body iterates with explicit `for l in 1:L`
+loops and scalar `all_times[idx] = ...` writes, which are forbidden on
+CuArrays. The GPU rewrite fuses everything into:
+  1) `phase_to_time` broadcast over the (C, L, B) tensor,
+  2) an `l`-indexed offset added via broadcast against a `(1, L, 1)` GPU
+     constant,
+  3) `permutedims (1, 3, 2)` + `vec` to flatten so the per-spike order
+     matches the CPU version (outer loop `l`, inner column-major over
+     `(c, b)`).
+The CartesianIndex pattern stays on CPU (cheap, `C·B·L` integers) — the
+existing `phase_to_train(::CuArray, ...)` follows the same convention.
+"""
+function ssm_phases_to_train(phases::CuArray{<:Phase, 3}; spk_args::SpikingArgs)
+    C, L, B = size(phases)
+    shape   = (C, B)
+    period  = spk_args.t_period
+
+    # Per-element time within one period (CuArray, (C, L, B)).
+    times_within = phase_to_time(phases, spk_args=spk_args, offset=0.0f0)
+
+    # `l`-dependent offset, broadcast across (C, B).
+    l_offsets = cu(reshape(Float32.((0:L-1) .* period), 1, L, 1))
+    times_3d  = times_within .+ l_offsets
+
+    # Column-major flatten matching the CPU iteration order: l outermost,
+    # then (c, b) inner.
+    times_perm = permutedims(times_3d, (1, 3, 2))   # (C, B, L)
+    all_times  = vec(times_perm)                     # CuArray, length C·B·L
+
+    # Spike indices share the same (c, b) pattern across all `l`.
+    base_indices = vec(CartesianIndices((C, B)))     # CPU, length C·B
+    all_indices  = repeat(base_indices, L)            # CPU, length C·B·L
+
+    return SpikeTrainGPU(all_indices, all_times, shape, 0.0f0)
+end
+
 #Spiking
 
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)

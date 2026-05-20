@@ -406,23 +406,26 @@ function ep_kmode_stored_tests()
     @testset "K_mode=:stored matches FD with omega=0" begin
         rng = Xoshiro(42)
         chain, ps, st = _ep_chain(rng)
-        # Override omega = 0 in state so the K = λ + iω self-force
-        # contributes only the real decay. The default ω = 2π would
-        # give per-step rotations dt·ω that destabilize the damped
-        # iteration at dt = 0.5.
-        st = (
-            layer_1 = (omega = zeros(Float32, length(st.layer_1.omega)),),
-            layer_2 = (omega = zeros(Float32, length(st.layer_2.omega)),),
-        )
+        # Use omega_override = [zeros, zeros] so the K = λ + iω self-force
+        # contributes only the real decay. The default layer ω = 2π
+        # (derived from spk_args.t_period = 1.0 via period_to_angfreq)
+        # would give per-step rotations dt·ω that destabilize the damped
+        # iteration at dt = 0.5. ω was removed from PhasorDense
+        # params/state by the per-channel ω rule (see CLAUDE.md), so the
+        # override is now a per-call kwarg rather than a state hack.
+        n1 = length(ps.layer_1.log_neg_lambda)
+        n2 = length(ps.layer_2.log_neg_lambda)
+        ω0 = [zeros(Float32, n1), zeros(Float32, n2)]
 
         x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
         y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
 
         for K_mode in (:zero, :stored)
-            fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT, K_mode=K_mode)
+            fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT,
+                                    K_mode=K_mode, omega_override=ω0)
             grads, _ = ep_gradient(
                 StaticEP(β=EP_BETA, T_free=200, T_nudge=100, dt=EP_DT, K_mode=K_mode),
-                chain, ps, st, x, y)
+                chain, ps, st, x, y; omega_override=ω0)
             for key in (:layer_1, :layer_2)
                 re = norm(grads[key].weight .- fd[key].weight) / norm(fd[key].weight)
                 @info "K_mode=:$K_mode $key rel-err=$(round(re, digits=4))"
@@ -437,21 +440,22 @@ function ep_kmode_stored_tests()
         # rotation contribution genuinely changes the angle.
         cost = SimilarityCost(y)
         s_zero   = phasor_settle(chain, ps, st, x, cost, 0f0;
-                                  T=200, dt=EP_DT, K_mode=:zero)
+                                  T=200, dt=EP_DT, K_mode=:zero,
+                                  omega_override=ω0)
         s_stored = phasor_settle(chain, ps, st, x, cost, 0f0;
-                                  T=200, dt=EP_DT, K_mode=:stored)
+                                  T=200, dt=EP_DT, K_mode=:stored,
+                                  omega_override=ω0)
         @test isapprox(s_stored[end], s_zero[end]; atol=1e-3)
 
         # With non-zero ω (and a smaller dt to keep settling stable),
         # K_mode=:stored produces a genuinely different equilibrium.
-        st_omega = (
-            layer_1 = (omega = fill(0.3f0, length(st.layer_1.omega)),),
-            layer_2 = (omega = fill(0.3f0, length(st.layer_2.omega)),),
-        )
-        s_zero_ω   = phasor_settle(chain, ps, st_omega, x, cost, 0f0;
-                                    T=400, dt=0.1f0, K_mode=:zero)
-        s_stored_ω = phasor_settle(chain, ps, st_omega, x, cost, 0f0;
-                                    T=400, dt=0.1f0, K_mode=:stored)
+        ω03 = [fill(0.3f0, n1), fill(0.3f0, n2)]
+        s_zero_ω   = phasor_settle(chain, ps, st, x, cost, 0f0;
+                                    T=400, dt=0.1f0, K_mode=:zero,
+                                    omega_override=ω03)
+        s_stored_ω = phasor_settle(chain, ps, st, x, cost, 0f0;
+                                    T=400, dt=0.1f0, K_mode=:stored,
+                                    omega_override=ω03)
         Δ = norm(s_stored_ω[end] .- s_zero_ω[end])
         @test Δ > 1e-3
         @info "K_mode :zero vs :stored with ω=0.3: Δ = $(round(Δ, digits=4))"

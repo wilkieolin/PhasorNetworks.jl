@@ -142,8 +142,7 @@ Returns transformed phases using a soft angle conversion for stable gradients.
 """
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
-    #y = complex_to_angle(xz)
-    y = soft_angle(xz, 0.01f0, 0.1f0)
+    y = complex_to_angle(xz)
     return y
 end
 
@@ -510,7 +509,8 @@ end
 
 2-D complex variant: wraps as 3-D with a singleton batch axis, delegates to
 the 3-D path, then squeezes and transposes to match the CPU real-valued 2-D
-convention `(N, M)` (see [`similarity_outer(::AbstractArray{<:Real,2}, ...)`](@ref)).
+convention `(N, M)` — see the `AbstractArray{<:Real,2}` method of
+[`similarity_outer`](@ref).
 """
 function similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
     dims in (1, 2) || error("dims must be 1 or 2 for 2D arrays")
@@ -536,6 +536,27 @@ The clamp `max(|A+B|², 4)` from the original GPU formulation is dropped
 because every production caller passes unit-modulus inputs (output of
 `angle_to_complex`), for which `|A+B|² ≤ 4` holds exactly. Removing it
 preserves the bilinear structure required for a closed-form backward.
+
+# Memory layout
+
+The defining sum is decomposed before any `(D, M, N, X)` tensor is
+materialized:
+
+    ½|A_d+B_d|² − 1
+       = ½(|A_d|² + |B_d|²) + (Ar_d Br_d + Ai_d Bi_d) − 1
+
+Summing over `d`:
+
+    sim[m,n,x] = (1/D) [ ½·a2[m,x] + ½·b2[n,x] + cross[m,n,x] ] − 1
+
+with `a2 = Σ_d |A|²` shape `(M, X)`, `b2 = Σ_d |B|²` shape `(N, X)`, and
+`cross = Σ_d (Ar Br + Ai Bi)` shape `(M, N, X)` computed as two batched
+real GEMMs via `NNlib.batched_mul`. Forward peak transient is
+`O(D·max(M,N)·X + M·N·X)` instead of `O(D·M·N·X)`. At
+`D=64, M=N=784, X=32` this drops the broadcast-time peak from ~19 GiB
+to ~270 MiB (≈ 70× reduction), which matters for end-to-end attention on
+long sequences. The closed-form rrule below remains correct since it is
+derived from the math, not the implementation.
 """
 function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
                                              B::AbstractArray{ComplexF32,3})
@@ -545,16 +566,17 @@ function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
     @assert size(B, 3) == X "batch dim mismatch: size(A,3)=$X vs size(B,3)=$(size(B,3))"
     invD = inv(Float32(D))
 
-    A4 = reshape(A, D, M, 1, X)
-    B4 = reshape(B, D, 1, N, X)
+    Ar = real.(A); Ai = imag.(A)        # (D, M, X) Float32 each
+    Br = real.(B); Bi = imag.(B)        # (D, N, X) Float32 each
 
-    sr = real.(A4) .+ real.(B4)
-    si = imag.(A4) .+ imag.(B4)
-    sq = sr .^ 2 .+ si .^ 2
-    sim_per_d = 0.5f0 .* sq .- 1.0f0
+    a2 = reshape(sum(Ar .^ 2 .+ Ai .^ 2; dims=1), M, 1, X)   # (M, 1, X)
+    b2 = reshape(sum(Br .^ 2 .+ Bi .^ 2; dims=1), 1, N, X)   # (1, N, X)
 
-    sim = dropdims(sum(sim_per_d, dims=1), dims=1) .* invD
-    return sim
+    Ar_T = permutedims(Ar, (2, 1, 3))   # (M, D, X)
+    Ai_T = permutedims(Ai, (2, 1, 3))   # (M, D, X)
+    cross = batched_mul(Ar_T, Br) .+ batched_mul(Ai_T, Bi)   # (M, N, X)
+
+    return invD .* (0.5f0 .* (a2 .+ b2) .+ cross) .- 1.0f0
 end
 
 """
@@ -603,6 +625,73 @@ function ChainRulesCore.rrule(::typeof(_similarity_outer_canonical_complex),
 end
 
 #Note - additional definitions for similarity_outer included in gpu.jl
+
+"""
+    similarity_outer_heads(q, k) -> AbstractArray{Float32}
+
+Head-axis pairwise Fourier-HRR similarity for the local attention layers
+(`PhasorLSA`, `PhasorLCA`). Computes interference-based similarity scores
+between phase vectors of length `D_h`, contracting only the per-head
+channel axis, with the time and batch axes broadcast through. See
+`docs/local_attention_derivation.tex` (eqs. lsa-score, lca-score) for the
+formal definition.
+
+# Methods
+
+## LSA: `(D_h, H, L, B) × (D_h, H, L, B) → (H, H, L, B)`
+
+`s[h, h', l, b] = sim(q[:, h, l, b], k[:, h', l, b])`. The score is the
+Fourier-HRR similarity restricted to the per-head subspace.
+
+## LCA: `(D_h, H, A) × (D_h, H, L, B) → (A, H, L, B)`
+
+`s[a, h, l, b] = sim(q[:, h, a], k[:, h, l, b])` where `q` is a
+time-invariant anchor bank of `A` patterns per head. Implemented as
+`H` independent calls to [`_similarity_outer_canonical_complex`](@ref)
+(one per head) followed by a stack-and-permute.
+
+Reuses `_similarity_outer_canonical_complex` and inherits its closed-form
+rrule, so this primitive is end-to-end differentiable without manual rule
+definitions.
+"""
+function similarity_outer_heads(q::AbstractArray{<:Phase, 4},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, L, B = size(q)
+    @assert size(k) == size(q) "shape mismatch in LSA similarity_outer_heads: q=$(size(q)), k=$(size(k))"
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, L, B)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    Aq = reshape(qc, Dh, H, L * B)                  # (Dh, H, L*B) canonical layout
+    Bk = reshape(kc, Dh, H, L * B)
+
+    s = _similarity_outer_canonical_complex(Aq, Bk) # (H, H, L*B)
+    return reshape(s, H, H, L, B)
+end
+
+function similarity_outer_heads(q::AbstractArray{<:Phase, 3},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, A = size(q)
+    @assert size(k, 1) == Dh "channel-per-head mismatch: q has Dh=$Dh, k has $(size(k,1))"
+    @assert size(k, 2) == H  "head count mismatch: q has H=$H, k has $(size(k,2))"
+    L, B = size(k, 3), size(k, 4)
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, A)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    # Per-head independent (A, L*B) scores: each h gets its own canonical call.
+    # map (not comprehension) keeps Zygote happy and works on GPU CuArrays.
+    per_head = map(1:H) do h
+        Aq_h = reshape(qc[:, h, :],       Dh, A,     1)   # (Dh, A,   1)
+        Bk_h = reshape(kc[:, h, :, :],    Dh, L * B, 1)   # (Dh, L*B, 1)
+        s = _similarity_outer_canonical_complex(Aq_h, Bk_h)  # (A, L*B, 1)
+        reshape(s, A, L, B)                                  # (A, L, B)
+    end
+
+    # Stack on a new trailing axis → (A, L, B, H); permute → (A, H, L, B).
+    stacked = stack(per_head)                       # (A, L, B, H)
+    return permutedims(stacked, (1, 4, 2, 3))       # (A, H, L, B)
+end
 
 """
     v_unbind(x::AbstractArray, y::AbstractArray) -> AbstractArray

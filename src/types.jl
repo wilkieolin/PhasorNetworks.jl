@@ -242,7 +242,7 @@ Controls neuron dynamics, spike generation, and numerical integration.
 - `spk_scale::Float32`: Scaling factor for spike currents
 - `threshold::Float32`: Voltage threshold for spike generation
 - `spike_kernel::Union{Symbol, Function}`: Spike kernel function (e.g., :gaussian) or custom function
-- `solver`: ODE solver for neural dynamics (typically Heun())
+- `solver`: ODE solver for neural dynamics (default Tsit5())
 - `solver_args::Dict`: Arguments for the ODE solver
 
 Used in both simulation and training of spiking neural networks.
@@ -266,7 +266,7 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                     steepness::Real = 0.05f0,
                     threshold::Real = 0.001f0,
                     spike_kernel = :gaussian,
-                    solver = Heun(),
+                    solver = Tsit5(),
                     solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
                                     :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),

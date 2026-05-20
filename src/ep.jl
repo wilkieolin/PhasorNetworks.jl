@@ -187,17 +187,19 @@ end
 # ep_self_force: half-K times z_self. K_mode = :zero ignores the
 # stored per-channel dynamics (matches the prototype's K=0
 # settling); K_mode = :stored pulls λ = -exp(log_neg_lambda) and ω
-# from the layer's params/state. With ω ≈ 0 (e.g. by zeroing
-# state.omega) the equilibrium remains close to the unit circle;
-# with the layer's default ω = 2π and dt = 0.5 the per-step
-# rotation is too large for damped fixed-point iteration to settle,
-# so :stored mode typically requires a smaller dt or a chain whose
-# omega has been overridden.
+# from the layer's spk_args (via _get_omega). With ω ≈ 0 (e.g. by
+# passing omega_override = zeros(...) or constructing the layer
+# with SpikingArgs(t_period = Inf)) the equilibrium remains close
+# to the unit circle; with the layer's default ω = 2π and dt = 0.5
+# the per-step rotation is too large for damped fixed-point
+# iteration to settle, so :stored mode typically requires a smaller
+# dt or an ω override.
 function ep_self_force(layer::PhasorDense, ps, st, z_self;
-                       K_mode::Symbol = :zero)
+                       K_mode::Symbol = :zero,
+                       omega_override::Union{Nothing, AbstractVector} = nothing)
     K_mode == :zero && return zero(z_self)
     λ = -exp.(ps.log_neg_lambda)
-    ω = layer.trainable_omega ? ps.omega : st.omega
+    ω = omega_override === nothing ? _get_omega(layer) : omega_override
     return Float32(0.5) .* ComplexF32.(λ .+ im .* ω) .* z_self
 end
 
@@ -230,14 +232,12 @@ function ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
     if haskey(ps, :log_neg_lambda)
         g = merge(g, (log_neg_lambda = zeros(Float32, size(ps.log_neg_lambda)),))
     end
-    if haskey(ps, :omega)
-        g = merge(g, (omega = zeros(Float32, size(ps.omega)),))
-    end
     return g
 end
 
-function ep_energy_contribution(::PhasorDense, ps, st, z_in, z_self;
-                                K_mode::Symbol = :zero)
+function ep_energy_contribution(layer::PhasorDense, ps, st, z_in, z_self;
+                                K_mode::Symbol = :zero,
+                                omega_override::Union{Nothing, AbstractVector} = nothing)
     e = Float32(real(dot(z_self, ps.weight * z_in)))
     if haskey(ps, :bias_real)
         bias = ps.bias_real .+ 1f0im .* ps.bias_imag
@@ -245,19 +245,12 @@ function ep_energy_contribution(::PhasorDense, ps, st, z_in, z_self;
     end
     if K_mode == :stored
         λ = -exp.(ps.log_neg_lambda)
-        ω = layer_omega(z_self, ps, st)   # see helper below
+        ω = omega_override === nothing ? _get_omega(layer) : omega_override
         K = ComplexF32.(λ .+ im .* ω)
         # Energy contribution: ½·Re<z, K·z>
         e += Float32(0.5) * Float32(real(dot(z_self, K .* z_self)))
     end
     return e
-end
-
-# Tiny helper used only by ep_energy_contribution; the runtime
-# dispatch in ep_self_force does the trainable_omega check itself.
-function layer_omega(z_self, ps, st)
-    haskey(ps, :omega) && return ps.omega
-    return st.omega
 end
 
 # ================================================================
@@ -288,7 +281,8 @@ EP-compatible layers. Returns one complex-state vector per layer.
 function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Real;
                        T::Int = 100, dt::Real = 0.5f0,
                        init::Union{Nothing,Vector} = nothing,
-                       K_mode::Symbol = :zero)
+                       K_mode::Symbol = :zero,
+                       omega_override::Union{Nothing, Vector} = nothing)
     layer_keys = collect(keys(ps))
     dt_f = Float32(dt)
     β_f  = Float32(β)
@@ -301,7 +295,8 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
 
     for _ in 1:T
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
-                              β_f, dt_f, states; K_mode=K_mode)
+                              β_f, dt_f, states; K_mode=K_mode,
+                              omega_override=omega_override)
     end
     return states
 end
@@ -310,9 +305,13 @@ end
 # given time-varying nudge β. Factored out so phasor_settle and the
 # lock-in gradient extraction share the per-step logic. `K_mode`
 # selects the self-energy treatment (see `ep_self_force`).
+# `omega_override` is a Vector of per-layer overrides (each either
+# `nothing` to use the layer's spk_args ω, or an AbstractVector to
+# replace it) — or `nothing` to use defaults for every layer.
 function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                       cost::AbstractEPCost, β::Float32, dt::Float32, states;
-                      K_mode::Symbol = :zero)
+                      K_mode::Symbol = :zero,
+                      omega_override::Union{Nothing, Vector} = nothing)
     n = length(layer_keys)
     new_states = Vector{Vector{ComplexF32}}(undef, n)
     for l in 1:n
@@ -320,10 +319,11 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
         ps_l = ps[key]; st_l = st[key]
         z_in   = (l == 1) ? z0 : states[l-1]
         z_self = states[l]
+        ω_l    = omega_override === nothing ? nothing : omega_override[l]
 
         grad_l = ep_drive(chain.layers[key], ps_l, st_l, z_in)
         grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self;
-                                          K_mode=K_mode)
+                                          K_mode=K_mode, omega_override=ω_l)
 
         if l < n
             key_n = layer_keys[l+1]
@@ -377,12 +377,14 @@ analysis only.
 function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
                             cost::AbstractEPCost;
                             ε::Real = 1e-5, T::Int = 200, dt::Real = 0.5f0,
-                            K_mode::Symbol = :zero)
+                            K_mode::Symbol = :zero,
+                            omega_override::Union{Nothing, Vector} = nothing)
     ε_f  = Float32(ε)
 
     function loss_at(ps_perturbed)
         s = phasor_settle(chain, ps_perturbed, st, x, cost, 0f0;
-                          T=T, dt=dt, K_mode=K_mode)
+                          T=T, dt=dt, K_mode=K_mode,
+                          omega_override=omega_override)
         return ep_loss(cost, s[end])
     end
 
@@ -486,11 +488,14 @@ The convenience form taking a complex vector `y` wraps it in a
 `SimilarityCost` for backward compatibility.
 """
 function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x,
-                     cost::AbstractEPCost)
+                     cost::AbstractEPCost;
+                     omega_override::Union{Nothing, Vector} = nothing)
     s_free  = phasor_settle(chain, ps, st, x, cost, 0f0;
-                            T=m.T_free,  dt=m.dt, K_mode=m.K_mode)
+                            T=m.T_free,  dt=m.dt, K_mode=m.K_mode,
+                            omega_override=omega_override)
     s_nudge = phasor_settle(chain, ps, st, x, cost, m.β;
-                            T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode)
+                            T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode,
+                            omega_override=omega_override)
 
     h_free  = chain_hebbians(chain, ps, st, x, s_free)
     h_nudge = chain_hebbians(chain, ps, st, x, s_nudge)
@@ -503,8 +508,8 @@ end
 
 # Back-compat: y as a complex vector → SimilarityCost.
 function ep_gradient(m::AbstractEPMethod, chain::Lux.Chain, ps, st, x,
-                     y::AbstractVector{<:Complex})
-    return ep_gradient(m, chain, ps, st, x, SimilarityCost(ComplexF32.(y)))
+                     y::AbstractVector{<:Complex}; kwargs...)
+    return ep_gradient(m, chain, ps, st, x, SimilarityCost(ComplexF32.(y)); kwargs...)
 end
 
 # Walk the chain, computing per-layer Hebbian outer products at the
@@ -550,14 +555,13 @@ function _ep_diff_gradient(ps, h_free, h_nudge, β)
     return NamedTuple(pairs)
 end
 
-# Add zero gradients for log_neg_lambda / omega so the returned
-# NamedTuple matches `ps` shape exactly (avoids Optimisers warnings).
+# Add zero gradients for log_neg_lambda so the returned NamedTuple
+# matches `ps` shape exactly (avoids Optimisers warnings). ω was
+# removed from PhasorDense parameters/state (it's now derived from
+# spk_args), so no :omega slot needs padding.
 function _pad_dynamics_zeros(entry::NamedTuple, layer_ps::NamedTuple)
     if haskey(layer_ps, :log_neg_lambda)
         entry = merge(entry, (log_neg_lambda = zeros(Float32, size(layer_ps.log_neg_lambda)),))
-    end
-    if haskey(layer_ps, :omega)
-        entry = merge(entry, (omega = zeros(Float32, size(layer_ps.omega)),))
     end
     return entry
 end
@@ -625,10 +629,12 @@ Base.@kwdef struct LockinEP <: AbstractEPMethod
 end
 
 function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
-                     cost::AbstractEPCost)
+                     cost::AbstractEPCost;
+                     omega_override::Union{Nothing, Vector} = nothing)
     # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
     s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
-                           T=m.T_free, dt=m.dt, K_mode=m.K_mode)
+                           T=m.T_free, dt=m.dt, K_mode=m.K_mode,
+                           omega_override=omega_override)
     h_dc   = chain_hebbians(chain, ps, st, x, s_free)
 
     # 2. Lock-in setup.
@@ -644,7 +650,8 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     for t in 1:T_warmup
         β_t = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
-                              β_t, m.dt, states; K_mode=m.K_mode)
+                              β_t, m.dt, states; K_mode=m.K_mode,
+                              omega_override=omega_override)
     end
 
     # 4. Per-layer complex Hebbian accumulator. Weight + bias_real
@@ -663,7 +670,8 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     for t in 1:T_lockin
         β_t   = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
-                              β_t, m.dt, states; K_mode=m.K_mode)
+                              β_t, m.dt, states; K_mode=m.K_mode,
+                              omega_override=omega_override)
         demod = exp(-im * m.ω_p * t * m.dt)
         for (l, key) in enumerate(layer_keys)
             haskey(ps[key], :weight) || continue

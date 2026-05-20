@@ -33,6 +33,7 @@ function ssm_tests()
         normalize_to_unit_circle_hard_mode_tests()
         soft_normalize_to_unit_circle_zero_tests()
         phasor_stft_sparse_input_tests()
+        zoh_bias_continuous_current_tests()
     end
 end
 
@@ -215,7 +216,7 @@ function dirac_discretization_tests()
 
             # SSM-mode layer (init_mode != :default) should use Dirac
             layer_ssm = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                    init_mode=:uniform, use_bias=false)
+                                    init_mode=:default, use_bias=false)
             ps, st = Lux.setup(rng, layer_ssm)
             y_dirac, _ = layer_ssm(phases, ps, st)
             @test size(y_dirac) == (C_out, L, B)
@@ -232,10 +233,11 @@ function dirac_discretization_tests()
 
             # The complex-3D ZOH path now lives in PhasorResonant; verify it
             # produces a same-shape Phase output from the same phase data
-            # lifted to the unit circle.
+            # lifted to the unit circle. Both layers carry a single shared
+            # ω = 2π (per-channel ω rule).
             x_cmpx = angle_to_complex(phases)
             resonant = PhasorResonant(C_in => C_out, normalize_to_unit_circle;
-                                      omega = st.omega,
+                                      spk_args = layer_ssm.spk_args,
                                       init_log_neg_lambda = ps.log_neg_lambda[1])
             ps_r, st_r = Lux.setup(rng, resonant)
             y_cmpx, _ = resonant(x_cmpx, ps_r, st_r)
@@ -249,7 +251,7 @@ function dirac_discretization_tests()
             L, B = 8, 3
 
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false)
+                                init_mode=:default, use_bias=false)
             ps, st = Lux.setup(rng, layer)
 
             phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
@@ -257,11 +259,16 @@ function dirac_discretization_tests()
             # Dirac discrete path (single-oscillator)
             y_dirac, _ = layer(phases, ps, st)
 
-            # Manual computation: same formula, verify we get identical results
+            # Manual computation: same formula, verify we get identical results.
+            # Mirror the layer's §4.1 frame correction by applying `-conj(.)` to
+            # the raw Dirac potential before normalization — the layer derotates
+            # to the static phase frame at integer T (with shared ω = 2π,
+            # `unrotate_solution` reduces to `-conj(.)`).
             λ = -exp.(ps.log_neg_lambda)
-            ω = st.omega
-            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, 1f0)
-            y_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
+            ω = zero(λ) .+ period_to_angfreq(layer.spk_args.t_period)
+            T = layer.spk_args.t_period
+            Z_manual = causal_conv_dirac(phases, ps.weight, λ, ω, T)
+            y_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
 
             @test Float32.(y_dirac) ≈ Float32.(y_manual) atol=1f-5
 
@@ -309,7 +316,10 @@ function phasor_ssm_layer_tests()
         # Parameter shapes
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
-        @test size(st.omega) == (out_dim,)
+        # Per-channel ω rule: ω is derived from spk_args.t_period (shared
+        # scalar across channels). State is empty after the refactor.
+        @test st == NamedTuple()
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # parameterlength
         @test Lux.parameterlength(layer) == out_dim * in_dim + out_dim
@@ -327,15 +337,22 @@ function phasor_ssm_layer_tests()
         y2, _ = layer(x2, ps, st)
         @test Float32.(y) != Float32.(y2)
 
-        # Custom omega vector (per-channel)
-        ω_custom = collect(range(0.5f0, 3.0f0; length=out_dim))
-        layer_om = PhasorResonant(in_dim => out_dim; omega = ω_custom)
-        @test layer_om.omega ≈ Float32.(ω_custom)
+        # Custom (single) ω — every channel shares the same carrier, derived
+        # from spk_args.t_period.
+        custom_spk = SpikingArgs(t_period = 2π / 1.5f0)
+        layer_om = PhasorResonant(in_dim => out_dim; spk_args = custom_spk)
+        @test period_to_angfreq(layer_om.spk_args.t_period) ≈ 1.5f0
+        _, st_om = Lux.setup(rng, layer_om)
+        @test st_om == NamedTuple()
 
-        # Scalar omega (broadcast)
-        layer_sc = PhasorResonant(in_dim => out_dim; omega = 1.5f0)
-        @test all(layer_sc.omega .≈ 1.5f0)
-        @test length(layer_sc.omega) == out_dim
+        # Default ω is 2π (per-channel ω rule, t_period = 1).
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
+
+        # Per-channel multi-timescale λ via init_log_neg_lambda vector.
+        lnl_vec = collect(range(log(0.01), log(0.5); length=out_dim))
+        layer_mt = PhasorResonant(in_dim => out_dim; init_log_neg_lambda = lnl_vec)
+        ps_mt, _ = Lux.setup(rng, layer_mt)
+        @test all(ps_mt.log_neg_lambda .≈ Float32.(lnl_vec))
     end
 end
 
@@ -421,7 +438,7 @@ function ssm_chain_tests()
         # SSMReadout consumes the phase output directly.
         model = Chain(
             PhasorResonant(C_in => D_hidden),
-            PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+            PhasorDense(D_hidden => D_hidden, identity; init_mode=:default, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
         ps, st = Lux.setup(rng, model)
@@ -496,7 +513,7 @@ function ssm_gpu_tests()
 
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                PhasorDense(D_hidden => D_hidden, identity; init_mode=:uniform, use_bias=false),
+                PhasorDense(D_hidden => D_hidden, identity; init_mode=:default, use_bias=false),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -553,54 +570,63 @@ function ssm_cross_attention_tests()
         layer = SSMCrossAttention(C_in => d_model, n_keys)
         ps, st = Lux.setup(rng, layer)
 
-        @testset "parameter shapes" begin
-            @test size(ps.weight_q) == (d_model, C_in)
-            @test size(ps.weight_v) == (d_model, C_in)
+        @testset "parameter structure (PhasorDense q/v projections + stored keys)" begin
+            # q_proj / v_proj are PhasorDense layers (use_bias=false), so each
+            # parameter tree has weight (d_model, C_in) + log_neg_lambda (d_model,).
+            @test size(ps.q_proj.weight) == (d_model, C_in)
+            @test size(ps.q_proj.log_neg_lambda) == (d_model,)
+            @test size(ps.v_proj.weight) == (d_model, C_in)
+            @test size(ps.v_proj.log_neg_lambda) == (d_model,)
             @test size(ps.keys) == (d_model, n_keys)
             @test length(ps.scale) == 1
         end
 
-        @testset "output shape and finiteness" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, st_new = layer(x, ps, st)
+        @testset "Phase 3D forward (primary path)" begin
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            y, _ = layer(x, ps, st)
+            @test size(y) == (d_model, n_keys, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
 
+        @testset "Complex 3D forward (back-compat trampoline)" begin
+            x = randn(rng, ComplexF32, C_in, L, B)
+            y, _ = layer(x, ps, st)
             @test size(y) == (d_model, n_keys, B)
             @test eltype(y) <: Complex
             @test all(isfinite, y)
-        end
-
-        @testset "unit circle normalization" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, _ = layer(x, ps, st)
-            mags = abs.(y)
-            @test all(abs.(mags .- 1f0) .< 0.1f0)
+            # angle_to_complex output is unit modulus.
+            @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
         end
 
         @testset "different inputs produce different outputs" begin
-            x1 = randn(rng, ComplexF32, C_in, L, B)
-            x2 = randn(rng, ComplexF32, C_in, L, B)
+            x1 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            x2 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
-            @test y1 != y2
+            @test Float32.(y1) != Float32.(y2)
         end
 
         @testset "gradient computation" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             loss_fn = ps -> begin
                 y, _ = layer(x, ps, st)
-                sum(abs2.(y))
+                sum(abs2.(Float32.(y)))
             end
             val, grads = withgradient(loss_fn, ps)
             g = grads[1]
             @test isfinite(val)
-            @test all(isfinite, g.weight_q)
-            @test all(isfinite, g.weight_v)
+            @test all(isfinite, g.q_proj.weight)
+            @test all(isfinite, g.q_proj.log_neg_lambda)
+            @test all(isfinite, g.v_proj.weight)
+            @test all(isfinite, g.v_proj.log_neg_lambda)
             @test all(isfinite, g.keys)
             @test all(isfinite, g.scale)
         end
 
         @testset "parameterlength" begin
-            expected = d_model * C_in * 2 + d_model * n_keys + 1
+            # 2 PhasorDense layers (each: d_model*C_in + d_model) + keys + scale.
+            expected = 2 * (d_model * C_in + d_model) + d_model * n_keys + 1
             @test Lux.parameterlength(layer) == expected
         end
     end
@@ -615,54 +641,63 @@ function ssm_self_attention_tests()
         layer = SSMSelfAttention(C_in => d_model)
         ps, st = Lux.setup(rng, layer)
 
-        @testset "parameter shapes" begin
-            @test size(ps.weight_q) == (d_model, C_in)
-            @test size(ps.weight_k) == (d_model, C_in)
-            @test size(ps.weight_v) == (d_model, C_in)
-            @test length(ps.scale) == 1
+        @testset "parameter structure (SingleHeadAttention internals)" begin
+            # Inner SingleHeadAttention container holds q/k/v PhasorDense
+            # projections, the PhasorAttention scale, and an identity out_proj.
+            @test haskey(ps, :inner)
+            @test haskey(ps.inner, :q_proj)
+            @test haskey(ps.inner, :k_proj)
+            @test haskey(ps.inner, :v_proj)
+            @test haskey(ps.inner, :attention)
+            @test size(ps.inner.q_proj.weight) == (d_model, C_in)
+            @test size(ps.inner.k_proj.weight) == (d_model, C_in)
+            @test size(ps.inner.v_proj.weight) == (d_model, C_in)
+            @test length(ps.inner.attention.scale) == 1
         end
 
-        @testset "output shape preserves temporal dim" begin
+        @testset "Phase 3D forward (primary path)" begin
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            y, _ = layer(x, ps, st)
+            @test size(y) == (d_model, L, B)
+            @test eltype(y) <: Phase
+            @test all(isfinite, Float32.(y))
+        end
+
+        @testset "Complex 3D forward (back-compat trampoline)" begin
             x = randn(rng, ComplexF32, C_in, L, B)
             y, _ = layer(x, ps, st)
-
             @test size(y) == (d_model, L, B)
             @test eltype(y) <: Complex
             @test all(isfinite, y)
-        end
-
-        @testset "unit circle normalization" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
-            y, _ = layer(x, ps, st)
-            mags = abs.(y)
-            @test all(abs.(mags .- 1f0) .< 0.1f0)
+            @test all(abs.(abs.(y) .- 1f0) .< 1f-5)
         end
 
         @testset "different inputs produce different outputs" begin
-            x1 = randn(rng, ComplexF32, C_in, L, B)
-            x2 = randn(rng, ComplexF32, C_in, L, B)
+            x1 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
+            x2 = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             y1, _ = layer(x1, ps, st)
             y2, _ = layer(x2, ps, st)
-            @test y1 != y2
+            @test Float32.(y1) != Float32.(y2)
         end
 
         @testset "gradient computation" begin
-            x = randn(rng, ComplexF32, C_in, L, B)
+            x = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
             loss_fn = ps -> begin
                 y, _ = layer(x, ps, st)
-                sum(abs2.(y))
+                sum(abs2.(Float32.(y)))
             end
             val, grads = withgradient(loss_fn, ps)
             g = grads[1]
             @test isfinite(val)
-            @test all(isfinite, g.weight_q)
-            @test all(isfinite, g.weight_k)
-            @test all(isfinite, g.weight_v)
-            @test all(isfinite, g.scale)
+            @test all(isfinite, g.inner.q_proj.weight)
+            @test all(isfinite, g.inner.k_proj.weight)
+            @test all(isfinite, g.inner.v_proj.weight)
+            @test all(isfinite, g.inner.attention.scale)
         end
 
         @testset "parameterlength" begin
-            expected = d_model * C_in * 3 + 1
+            # 3 PhasorDense layers (each: d_model*C_in + d_model) + scale.
+            expected = 3 * (d_model * C_in + d_model) + 1
             @test Lux.parameterlength(layer) == expected
         end
     end
@@ -675,14 +710,13 @@ function ssm_attention_chain_tests()
         L, B = 10, 4
 
         @testset "self-attention in chain" begin
-            # PhasorResonant encodes complex → phase. SSMSelfAttention takes
-            # complex, so we lift back via angle_to_complex; SSMReadout has a
-            # Phase 3D dispatch so we can finish in the phase domain.
+            # PhasorResonant outputs Phase 3D; SSMSelfAttention now has a
+            # Phase 3D dispatch (trampolines through its Complex 3D path)
+            # so the chain stays in the phase domain end-to-end without
+            # manual angle_to_complex / complex_to_angle plumbing.
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -696,9 +730,7 @@ function ssm_attention_chain_tests()
         @testset "cross-attention in chain" begin
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMCrossAttention(D_hidden => D_hidden, L, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -712,9 +744,7 @@ function ssm_attention_chain_tests()
         @testset "gradient through chain with self-attention" begin
             model = Chain(
                 PhasorResonant(C_in => D_hidden),
-                angle_to_complex,
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-                complex_to_angle,
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -727,11 +757,10 @@ function ssm_attention_chain_tests()
             end
             val, grads = withgradient(loss_fn, ps)
             @test isfinite(val)
-            # layer_1 is PhasorResonant; layer_2 / layer_4 are pass-through
-            # functions (no params); layer_3 is SSMSelfAttention; layer_5
-            # is SSMReadout (codes in state, no params either).
             @test all(isfinite, grads[1].layer_1.weight)
-            @test all(isfinite, grads[1].layer_3.weight_q)
+            # SSMSelfAttention now wraps a SingleHeadAttention; q_proj is a
+            # PhasorDense whose weight lives at layer_2.inner.q_proj.weight.
+            @test all(isfinite, grads[1].layer_2.inner.q_proj.weight)
         end
     end
 end
@@ -784,10 +813,19 @@ function ssm_spiking_dispatch_tests()
         sc = SpikingCall(train, spk_args, tspan_spk)
 
         @testset "PhasorDense SSM SpikingCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
+            # `:phase` from a SpikingCall returns the dense per-save-point
+            # ODE trajectory by design (preserves sub-period transients).
+            # For per-period (C_out, L, B) phases — the canonical "compare
+            # to the discrete Dirac path" view — request `:potential` and
+            # use `sample_phases_at_periods`.
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:hippo, use_bias=false,
+                                return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
-            y, st_new = layer(sc, ps, st)
+            sol, st_new = layer(sc, ps, st)
+            y = sample_phases_at_periods(sol, L, spk_args;
+                                          activation = normalize_to_unit_circle)
 
             @test size(y) == (C_out, L, B)
             @test eltype(y) <: Phase
@@ -795,11 +833,15 @@ function ssm_spiking_dispatch_tests()
         end
 
         @testset "PhasorDense SSM CurrentCall dispatch" begin
-            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
+            layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                init_mode=:hippo, use_bias=false,
+                                return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
             cc = CurrentCall(sc)
-            y, st_new = layer(cc, ps, st)
+            sol, st_new = layer(cc, ps, st)
+            y = sample_phases_at_periods(sol, L, spk_args;
+                                          activation = normalize_to_unit_circle)
 
             @test size(y) == (C_out, L, B)
             @test eltype(y) <: Phase
@@ -808,12 +850,16 @@ function ssm_spiking_dispatch_tests()
 
         @testset "PhasorDense SSM potential return type" begin
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:potential))
+                                init_mode=:hippo, use_bias=false, return_type=SolutionType(:potential))
             ps, st = Lux.setup(rng, layer)
 
             sol, st_new = layer(sc, ps, st)
-            # Returns ODE solution of single-stage system (C_out, B)
-            @test !(sol isa AbstractArray)
+            # Returns the raw ODE solution — a time-indexed, interpolable
+            # SciML object (NOT a final-state snapshot). Note: current SciML
+            # makes ODESolution <: AbstractArray (it acts as a vector of u's
+            # indexed by step), so the meaningful distinguishing check is
+            # "is it a timeseries solution", not "is it not an array".
+            @test sol isa SciMLBase.AbstractTimeseriesSolution
             sampled = sol(tspan_spk[2])
             @test sampled isa AbstractArray
             @test size(sampled) == (C_out, B)
@@ -821,7 +867,7 @@ function ssm_spiking_dispatch_tests()
 
         @testset "PhasorDense SSM spiking return type" begin
             layer = PhasorDense(C_in => C_out, normalize_to_unit_circle;
-                                init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking))
+                                init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking))
             ps, st = Lux.setup(rng, layer)
 
             result, st_new = layer(sc, ps, st)
@@ -877,31 +923,53 @@ function ssm_spiking_correlation_tests()
         C_in, C_out = 4, 8
         L, B = 8, 3
 
-        # Phase-returning layer for both Dirac and spiking comparison
-        layer = PhasorDense(C_in => C_out, normalize_to_unit_circle; init_mode=:uniform, use_bias=false, return_type=SolutionType(:phase))
-        ps, st = Lux.setup(rng, layer)
+        # Two views of the same layer differing only in `return_type`:
+        #   - `:phase`     for the discrete 3D Dirac path on `phases_in`
+        #   - `:potential` for the spiking ODE path on the SpikingCall
+        # `Lux.setup` is called once because parameters and state don't
+        # depend on `return_type` (verified by inspection of
+        # `initialparameters` / `initialstates` for PhasorDense).
+        layer_phase = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                  init_mode=:hippo, use_bias=false,
+                                  return_type=SolutionType(:phase))
+        layer_pot   = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                  init_mode=:hippo, use_bias=false,
+                                  return_type=SolutionType(:potential))
+        ps, st = Lux.setup(rng, layer_phase)
 
         # Random phase input
         phases_in = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)
 
-        # Dirac convolution (exact analytical)
-        phases_dirac, _ = layer(phases_in, ps, st)
+        # Dirac convolution (exact analytical, rotating-frame output)
+        phases_dirac, _ = layer_phase(phases_in, ps, st)
 
         # Spiking ODE (single-stage: dz/dt = k·z + W·I(t))
         train = ssm_phases_to_train(phases_in, spk_args=spk_args)
         tspan_spk = (0.0f0, Float32(L) * spk_args.t_period)
         sc = SpikingCall(train, spk_args, tspan_spk)
-        phases_spiking, _ = layer(sc, ps, st)
+        sol, _ = layer_pot(sc, ps, st)
+
+        # Sample at L period boundaries with library unrotation so the
+        # result lives in the **static phase frame** — matching the
+        # post-§4.1 `phases_dirac` (which the layer now derotates to the
+        # static frame internally). See docs/three_view_mismatch_analysis.md
+        # §4.1 for the frame story.
+        phases_spiking = sample_phases_at_periods(sol, L, spk_args;
+                                                   activation = normalize_to_unit_circle,
+                                                   unrotate = true)
 
         @testset "output shapes match" begin
             @test size(phases_dirac) == size(phases_spiking)
         end
 
         @testset "Dirac matches manual causal_conv_dirac" begin
+            # `-conj.(Z_manual)` mirrors the layer's §4.1 derotation
+            # to the static phase frame.
             λ_c = -exp.(ps.log_neg_lambda)
-            ω_c = st.omega
-            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, 1f0)
-            phases_manual = complex_to_angle(normalize_to_unit_circle(Z_manual))
+            ω_c = zero(λ_c) .+ period_to_angfreq(layer_pot.spk_args.t_period)
+            T_c = layer_pot.spk_args.t_period
+            Z_manual = causal_conv_dirac(phases_in, ps.weight, λ_c, ω_c, T_c)
+            phases_manual = complex_to_angle(normalize_to_unit_circle(-conj.(Z_manual)))
             @test Float32.(phases_dirac) ≈ Float32.(phases_manual) atol=1f-5
         end
 
@@ -913,9 +981,10 @@ function ssm_spiking_correlation_tests()
         @testset "spiking ODE correlates with Dirac" begin
             c = cor_realvals(vec(Float32.(phases_dirac)),
                              vec(Float32.(phases_spiking)))
-            # The single-stage ODE should correlate positively with the
-            # exact Dirac result. The gap comes from the finite-width spike
-            # kernel and ODE solver temporal discretization.
+            # Both sides in the static phase frame after §4.1; only
+            # solver discretization and the finite-width spike kernel
+            # separate them. Empirically ρ ≈ 0.97–1.00; the 0.3 floor
+            # is generous to keep the test robust to solver tweaks.
             @test c > 0.3
         end
     end
@@ -931,7 +1000,7 @@ function ssm_spiking_chain_tests()
             model = Chain(
                 MakeSpikingSSM(spk_args),
                 PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
-                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
+                            init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMReadout(D_hidden => n_classes),
             )
             ps, st = Lux.setup(rng, model)
@@ -947,7 +1016,7 @@ function ssm_spiking_chain_tests()
             model = Chain(
                 MakeSpikingSSM(spk_args),
                 PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
-                            init_mode=:uniform, use_bias=false, return_type=SolutionType(:spiking)),
+                            init_mode=:hippo, use_bias=false, return_type=SolutionType(:spiking)),
                 SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
                 SSMReadout(D_hidden => n_classes),
             )
@@ -976,9 +1045,9 @@ function phasor_stft_tests()
         @test size(ps.log_neg_lambda) == (n_freqs,)
         @test size(ps.omega) == (n_freqs,)
 
-        # State: omega_out is fixed
-        @test haskey(st, :omega_out)
-        @test st.omega_out ≈ Float32(2π)
+        # State is empty after the refactor; ω_out is derived from spk_args.
+        @test st == NamedTuple()
+        @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # Omega initialized as uniform spread
         @test ps.omega[1] ≈ 0.2f0
@@ -1020,17 +1089,20 @@ function phasor_stft_tests()
         @test all(isfinite, grads[1].log_neg_lambda)
         @test all(isfinite, grads[1].omega)
 
-        # Frequency shift identity: when omega_out == omega, shift is no-op
-        st_match = (omega_out = ps.omega[1],)
-        layer_id = ResonantSTFT(in_dim => 1, identity; omega_lo=ps.omega[1], omega_hi=ps.omega[1])
-        ps_id, _ = Lux.setup(rng, layer_id)
-        # Override omega to match omega_out exactly
-        ps_id = merge(ps_id, (omega = Float32[st_match.omega_out],))
+        # Frequency shift identity: when ω_out == ω, shift is no-op.
+        # Pick a per-channel ω equal to the layer's spk_args carrier (2π by
+        # default), so `_freq_shift` produces an identity rotation.
+        ω_target = period_to_angfreq(SpikingArgs().t_period)
+        layer_id = ResonantSTFT(in_dim => 1, identity; omega_lo=ω_target, omega_hi=ω_target)
+        ps_id, st_id = Lux.setup(rng, layer_id)
+        # Override omega to match ω_out exactly
+        ps_id = merge(ps_id, (omega = Float32[ω_target],))
         x_small = randn(rng, ComplexF32, in_dim, L, B)
-        y_shift, _ = layer_id(x_small, ps_id, st_match)
+        y_shift, _ = layer_id(x_small, ps_id, st_id)
         # Build expected output without shift (standard causal conv)
         λ_id = -exp.(ps_id.log_neg_lambda)
-        K_id = phasor_kernel(λ_id, ps_id.omega, 1f0, L)
+        T_id = layer_id.spk_args.t_period
+        K_id = phasor_kernel(λ_id, ps_id.omega, T_id, L)
         xr = reshape(x_small, in_dim, L * B)
         Hr = complex.(ps_id.weight * real.(xr), ps_id.weight * imag.(xr))
         H_id = reshape(Hr, 1, L, B)
@@ -1125,7 +1197,7 @@ function phasor_stft_init_kwarg_tests()
         @test all(ps_def.log_neg_lambda .≈ Float32(log(0.1)))
 
         # PhasorDense — overrides per-mode default uniformly.
-        for mode in (:default, :uniform)
+        for mode in (:default, :hippo)
             d = PhasorDense(4 => 4; init_mode=mode, init_log_neg_lambda=target)
             ps_d, _ = Lux.setup(rng, d)
             @test all(ps_d.log_neg_lambda .≈ Float32(target))
@@ -1309,5 +1381,108 @@ function phasor_stft_sparse_input_tests()
         @test sum(isinf, gs[1].log_neg_lambda) == 0
         # Gradient should still carry signal (non-zero where active region drove output).
         @test sum(abs, gs[1].weight) > 0
+    end
+end
+
+"""
+Pin the §4.3 ZOH-bias semantics: in `PhasorResonant` and `ResonantSTFT`'s
+3D Complex dispatches, bias is treated as a continuous complex current.
+The closed-form per-period contribution at sample `m` is
+
+    Z_bias[c, m]  =  b · B_c · G[c, m]
+                  =  b · (A_c^(m+1) − 1) / k_c
+
+where `B_c = (exp(k_c·T)−1)/k_c` is the ZOH input gain (same factor
+`phasor_kernel` applies to the signal) and `A_c = exp(k_c·T)`. This
+test bias-only-probes both layers (zero weights, nonzero bias) and
+asserts that the layer's complex output matches the analytical
+reference within solver tolerance. Pre-§4.3 the layers used `b · G`
+without the `B` factor, so this test would catch that regression.
+
+`PhasorResonant` always passes through `complex_to_angle` so we can
+only check the phase direction (magnitude information is discarded by
+the unit-circle activation). For magnitude validation we use
+`ResonantSTFT(...; activation = identity)` with `omega_lo = omega_hi
+= ω_out` (where ω_out is derived from spk_args.t_period) so
+`_freq_shift` is a no-op and the raw `Z_bias` is visible at the
+layer output.
+"""
+function zoh_bias_continuous_current_tests()
+    @testset "ZOH bias = continuous current (§4.3)" begin
+        rng = Xoshiro(0)
+        T = 1f0
+        L, B = 4, 1
+        n = 4
+
+        # ---- ResonantSTFT bias-only probe (raw complex output) ----
+        @testset "ResonantSTFT analytical bias-only match" begin
+            ω_const = Float32(2π)
+            log_λ   = Float32(log(0.2))
+            # Default SpikingArgs.t_period = 1, so ω_out = 2π = ω_const,
+            # making `_freq_shift` an identity.
+            layer = ResonantSTFT(1 => n, identity;
+                                 use_bias = true,
+                                 omega_lo = ω_const,
+                                 omega_hi = ω_const,
+                                 init_log_neg_lambda = log_λ)
+            ps, st = Lux.setup(rng, layer)
+            br, bi = 0.3f0, 0.4f0
+            ps = merge(ps, (weight   = zeros(Float32, n, 1),
+                             bias_real = fill(br, n),
+                             bias_imag = fill(bi, n)))
+
+            x = zeros(ComplexF32, 1, L, B)
+            y, _ = layer(x, ps, st)              # (n, L, B) ComplexF32
+
+            λ = -exp.(ps.log_neg_lambda)
+            ω = ps.omega
+            k = ComplexF32.(λ .+ 1im .* ω)
+            A = exp.(k .* T)
+            b = ComplexF32(br + bi*1im)
+
+            # Analytical reference: b · B · G[c, m] = b · (A^(m+1) − 1)/k
+            ref = [b * (A[c]^(m+1) - 1f0) / k[c] for c in 1:n, m in 0:L-1]
+            ref_3d = reshape(ref, n, L, 1)
+
+            # Both magnitude and phase must match within solver tolerance.
+            @test maximum(abs.(y .- ref_3d)) < 1f-5
+            # Sanity: bias contribution grows monotonically over periods at
+            # this λ — non-trivial reference, not a degenerate zero.
+            mags = [mean(abs.(y[:, m, :])) for m in 1:L]
+            @test issorted(mags)
+            @test mags[end] > 1f-2
+        end
+
+        # ---- PhasorResonant bias-only probe (Phase output) ----
+        @testset "PhasorResonant analytical bias-only direction" begin
+            log_λ   = Float32(log(0.2))
+            # Default SpikingArgs.t_period = 1 → ω = 2π.
+            layer = PhasorResonant(1 => n;
+                                   use_bias = true,
+                                   init_log_neg_lambda = log_λ)
+            ps, st = Lux.setup(rng, layer)
+            br, bi = 0.3f0, 0.4f0
+            ps = merge(ps, (weight   = zeros(Float32, n, 1),
+                             bias_real = fill(br, n),
+                             bias_imag = fill(bi, n)))
+
+            x = zeros(ComplexF32, 1, L, B)
+            y, _ = layer(x, ps, st)              # (n, L, B) Phase
+
+            λ = -exp.(ps.log_neg_lambda)
+            ω = zero(λ) .+ period_to_angfreq(layer.spk_args.t_period)
+            k = ComplexF32.(λ .+ 1im .* ω)
+            A = exp.(k .* T)
+            b = ComplexF32(br + bi*1im)
+
+            ref_complex = [b * (A[c]^(m+1) - 1f0) / k[c] for c in 1:n, m in 0:L-1]
+            ref_phase = complex_to_angle(reshape(ref_complex, n, L, 1))
+
+            # Phase output is wrapped in [-1, 1]; compare via modular arc.
+            arc = let d = mod.(Float32.(y) .- Float32.(ref_phase) .+ 1f0, 2f0) .- 1f0
+                abs.(d)
+            end
+            @test maximum(arc) < 1f-4
+        end
     end
 end
