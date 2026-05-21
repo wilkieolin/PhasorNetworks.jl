@@ -63,6 +63,8 @@ include("test_phase_type.jl")
 include("test_ssm.jl")
 include("test_local_attention.jl")
 include("test_attractor_ssm.jl")
+include("test_hep.jl")
+include("test_ep.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
@@ -75,6 +77,8 @@ include("test_attractor_ssm.jl")
     ssm_tests()
     local_attention_tests()
     attractor_ssm_tests()
+    hep_tests()
+    ep_tests()
     #spiking_operations_tests()
 
     if CUDA.functional()

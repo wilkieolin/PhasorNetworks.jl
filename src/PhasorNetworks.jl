@@ -116,6 +116,33 @@ soft_angle,
 default_bias,
 zero_bias,
 
+#hep
+holotanh,
+holotanh_deriv,
+hep_energy,
+hep_equilibrium,
+hep_gradient,
+hep_train,
+hep_cost_xent,
+hep_cost_xent_grad,
+HolomorphicReadout,
+hep_interference_cost,
+hep_interference_cost_grad,
+extract_hep_params,
+pack_hep_gradients,
+
+#ep
+SimilarityCost,
+CodebookCost,
+StaticEP,
+LockinEP,
+phasor_settle,
+ep_gradient,
+ep_train,
+ep_loss,
+fd_gradient_phasor,
+chain_hebbians,
+
 #metrics
 arc_error,
 angular_mean,
@@ -152,5 +179,7 @@ include("ssm.jl")
 include("attractor_ssm.jl")
 include("metrics.jl")
 include("datasets.jl")
+include("hep.jl")
+include("ep.jl")
 
 end

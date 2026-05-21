@@ -27,6 +27,8 @@ makedocs(;
             "SSM" => "api/ssm.md",
             "Attractor SSM" => "api/attractor_ssm.md",
             "Datasets" => "api/datasets.md",
+            "Equilibrium Propagation" => "api/ep.md",
+            "Holomorphic EP" => "api/hep.md",
         ]
     ],
 )

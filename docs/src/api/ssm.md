@@ -24,6 +24,8 @@ hippo_legs_diagonal
 SSMReadout
 SSMCrossAttention
 SSMSelfAttention
+PhasorLSA
+PhasorLCA
 ```
 
 !!! note "PhasorSSM is deprecated"

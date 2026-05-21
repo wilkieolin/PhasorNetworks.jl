@@ -3,7 +3,7 @@ using ComponentArrays, Lux
 using SciMLSensitivity, DifferentialEquations, Optimisers
 
 using Lux: glorot_uniform, truncated_normal
-using LinearAlgebra: diagind, I
+using LinearAlgebra: diagind, I, dot
 using DifferentialEquations: ODESolution
 using ChainRulesCore: ignore_derivatives, NoTangent, unthunk
 import ChainRulesCore
