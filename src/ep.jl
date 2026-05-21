@@ -43,6 +43,21 @@ struct SimilarityCost{T<:AbstractVector{<:Complex}} <: AbstractEPCost
     y::T
 end
 
+"""
+    ep_loss(cost::AbstractEPCost, z_o) -> Float32
+
+Scalar training loss at the free-phase equilibrium output `z_o` under
+`cost`. Plugs into [`ep_train`](@ref) for per-epoch loss reporting.
+
+Defined per-cost:
+
+- `ep_loss(c::SimilarityCost, z_o) = 1 - Re⟨c.y, z_o⟩ / length(z_o)` —
+  cosine-distance to the unit-modulus target.
+- `ep_loss(c::CodebookCost, z_o)` — softmax cross-entropy of the
+  per-class similarities against `c.y_onehot`; see [`CodebookCost`](@ref).
+"""
+function ep_loss end
+
 # Real-parameter convention: factor of 1/d, NOT 1/(2d).
 # Do not "fix" — see docs/phasor_ep_design.md.
 nudge_force(c::SimilarityCost, z_o, β) = (β / length(z_o)) .* c.y
@@ -512,8 +527,21 @@ function ep_gradient(m::AbstractEPMethod, chain::Lux.Chain, ps, st, x,
     return ep_gradient(m, chain, ps, st, x, SimilarityCost(ComplexF32.(y)); kwargs...)
 end
 
-# Walk the chain, computing per-layer Hebbian outer products at the
-# given equilibrium states.
+"""
+    chain_hebbians(chain::Lux.Chain, ps, st, x, states::Vector) -> NamedTuple
+
+Per-layer Hebbian outer products at the equilibrium states `states`. The
+input `x` becomes the first layer's complex drive `z_0`; subsequent
+layers consume the upstream equilibrium state. For each layer that has a
+weight (`PhasorDense` and friends), returns `ep_hebbian(layer, ps, st,
+z_in, z_self)` — see [`ep_hebbian`](@ref). Layers without a weight get
+a zero-shaped gradient slot to keep the NamedTuple shape matching `ps`.
+
+Used internally by [`ep_gradient`](@ref) (both `StaticEP` and `LockinEP`
+paths) to compute the per-equilibrium Hebbian snapshots that the EP
+gradient theorem differences. Useful directly when implementing custom
+gradient estimators or batched EP variants.
+"""
 function chain_hebbians(chain::Lux.Chain, ps, st, x, states::Vector)
     layer_keys = collect(keys(ps))
     n = length(layer_keys)

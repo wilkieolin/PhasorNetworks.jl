@@ -7,5 +7,5 @@ learned phasor codes. Extends the linear time-invariant SSM
 
 ```@autodocs
 Modules = [PhasorNetworks]
-Pages = ["attractor_ssm.jl"]
+Pages = ["src/attractor_ssm.jl"]
 ```
