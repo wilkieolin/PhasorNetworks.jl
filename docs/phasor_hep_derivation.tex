@@ -1,0 +1,800 @@
+% Phasor hEP Derivation — coupled recurrence formulation
+% Compile standalone: pdflatex phasor_hep_derivation.tex
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\eg}{e.g.}
+\newcommand{\ie}{i.e.}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{corollary}{Corollary}
+
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\Real}{Re}
+
+\title{Holomorphic Equilibrium Propagation\\
+via Coupled Phasor Recurrences}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Equilibrium Propagation: Standard Formulation}\label{sec:ep}
+%======================================================================
+
+\subsection{Energy function}
+
+Consider an $L$-layer network with input $\bm{x}\in\C^{d_0}$ (fixed),
+hidden states $\bm{z}_1\in\C^{d_1},\dots,\bm{z}_L\in\C^{d_L}$,
+weight matrices $W_\ell\in\C^{d_\ell\times d_{\ell-1}}$, biases
+$\bm{b}_\ell\in\C^{d_\ell}$, and a holomorphic activation function
+$\sigma:\C\to\C$ applied element-wise.  Define $\bm{z}_0\equiv\bm{x}$
+and the \emph{pre-activation}
+\begin{equation}\label{eq:pre}
+  \bm{a}_\ell \;=\; W_\ell\,\bm{z}_{\ell-1} + \bm{b}_\ell,
+  \qquad \ell=1,\dots,L.
+\end{equation}
+
+The Hopfield-style energy function is
+\begin{equation}\label{eq:energy}
+  \Phi(\bm{z},\theta,\beta)
+  \;=\;
+  \sum_{\ell=1}^{L}
+    \bigl\langle
+      \sigma(\bm{a}_\ell),\;
+      \bm{z}_\ell
+    \bigr\rangle
+  \;-\;
+  \beta\,\mathcal{C}(\bm{z}_L,\,\bm{y}),
+\end{equation}
+where $\theta=\{W_\ell,\bm{b}_\ell\}$ collects all parameters,
+$\beta\in\C$ is the nudge strength,
+$\mathcal{C}$ is the task cost, $\bm{y}$ is the target, and
+$\langle\bm{u},\bm{v}\rangle = \sum_j u_j\,v_j$
+is the \textbf{complex bilinear form} (no conjugation).
+
+\begin{remark}
+Using the bilinear form rather than the Hermitian inner product
+$\bm{u}^H\bm{v}$ is essential:  the Hermitian product involves
+complex conjugation and is not holomorphic.  The bilinear form keeps
+$\Phi$ holomorphic in all $\bm{z}_\ell$.
+\end{remark}
+
+\subsection{Equilibrium condition}\label{sec:eq-cond}
+
+The state $\bm{z}_\ell$ appears in two terms of $\Phi$:
+\begin{enumerate}[label=(\alph*)]
+\item As the ``post-synaptic'' factor in layer~$\ell$:
+  $\langle\sigma(\bm{a}_\ell),\,\bm{z}_\ell\rangle$.
+\item As part of the ``pre-synaptic'' input to layer~$\ell+1$
+  (when $\ell<L$):
+  $\langle\sigma(\bm{a}_{\ell+1}),\,\bm{z}_{\ell+1}\rangle$
+  where $\bm{a}_{\ell+1}=W_{\ell+1}\,\bm{z}_\ell+\bm{b}_{\ell+1}$.
+\end{enumerate}
+Taking the holomorphic gradient $\partial\Phi/\partial\bm{z}_\ell$:
+
+\begin{equation}\label{eq:ep-grad}
+  \boxed{
+  \frac{\partial\Phi}{\partial\bm{z}_\ell}
+  \;=\;
+  \underbrace{\sigma(\bm{a}_\ell)}_{\text{drive from below}}
+  \;+\;
+  \underbrace{
+    W_{\ell+1}^{\!\top}\!
+    \bigl[
+      \sigma'(\bm{a}_{\ell+1})\odot\bm{z}_{\ell+1}
+    \bigr]
+  }_{\text{drive from above}}
+  \;-\;
+  \beta\,\delta_{\ell L}\,
+  \frac{\partial\mathcal{C}}{\partial\bm{z}_L}
+  }
+\end{equation}
+where $\odot$ is the Hadamard (element-wise) product and
+$\delta_{\ell L}$ is the Kronecker delta (the cost gradient acts only
+on the output layer).  Note that $W_{\ell+1}^{\!\top}$ (transpose,
+not conjugate transpose) couples layer~$\ell+1$ back into
+layer~$\ell$ --- this is the \textbf{symmetric weight} requirement of EP.
+
+At equilibrium, $\partial\Phi/\partial\bm{z}_\ell=0$ for all~$\ell$,
+and the equilibrium states $\bm{z}_\ell^*(\beta)$ depend on $\beta$.
+
+\subsection{EP gradient theorem}
+
+\begin{theorem}[Scellier \& Bengio, 2017]
+If $\bm{z}^*(\beta)$ is a smooth family of equilibria, then
+\begin{equation}\label{eq:ep-grad-thm}
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  \lim_{\beta\to 0}\;
+  \frac{1}{\beta}
+  \left[
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(\beta)}
+    -
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(0)}
+  \right],
+\end{equation}
+where $\mathcal{L}=\mathcal{C}(\bm{z}_L^*(0),\,\bm{y})$ is the loss
+at the free equilibrium.
+\end{theorem}
+
+%======================================================================
+\section{Phasor Oscillator Dynamics}\label{sec:phasor}
+%======================================================================
+
+\subsection{Single-layer ODE}
+
+Each layer's autonomous dynamics follow the resonate-and-fire ODE:
+\begin{equation}\label{eq:rf-ode}
+  \frac{\dd\bm{z}_\ell}{\dd t}
+  \;=\;
+  K_\ell\,\bm{z}_\ell + \bm{I}_\ell(t),
+  \qquad
+  K_\ell = \diag(\bm{k}_\ell),
+  \qquad
+  k_{\ell,c} = \lambda_{\ell,c} + \im\,\omega_{\ell,c},
+\end{equation}
+where $\lambda_{\ell,c}<0$ is the per-channel decay rate,
+$\omega_{\ell,c}$ is the angular frequency, and $\bm{I}_\ell(t)$ is
+the input current.  The diagonal structure means each channel $c$ is an
+independent damped oscillator.
+
+\subsection{Discretization}
+
+With time step $\dt$, the exact solution over one step is
+\begin{equation}\label{eq:discretize}
+  \bm{z}_\ell[n+1]
+  \;=\;
+  A_\ell\,\bm{z}_\ell[n] + B_\ell\,\bm{I}_\ell[n],
+\end{equation}
+where $A_\ell = \diag(e^{\bm{k}_\ell\dt})$ and
+$B_\ell = \diag\!\bigl((e^{\bm{k}_\ell\dt}-1)/\bm{k}_\ell\bigr)$
+are diagonal matrices.  The magnitudes $|A_{\ell,c}|=e^{\lambda_{\ell,c}\dt}<1$,
+so the autonomous dynamics are strictly contractive.
+
+\subsection{Impulse-response kernel}
+
+Unrolling the recurrence with zero initial conditions:
+\begin{equation}\label{eq:kernel}
+  \bm{z}_\ell[n]
+  \;=\;
+  \sum_{j=0}^{n} \mathcal{K}_\ell[n-j]\,\bm{I}_\ell[j],
+  \qquad
+  \mathcal{K}_\ell[m] = A_\ell^m\,B_\ell.
+\end{equation}
+This is a causal convolution with the phasor kernel
+$\mathcal{K}_\ell[m]$, computable via FFT.  The kernel is a decaying
+spiral in the complex plane---each channel $c$ traces
+$\mathcal{K}_{\ell,c}[m] = e^{k_{\ell,c}\,m\dt}\,(e^{k_{\ell,c}\dt}-1)/k_{\ell,c}$.
+
+%======================================================================
+\section{Coupled Phasor Recurrence for EP}\label{sec:coupled}
+%======================================================================
+
+\subsection{Merging EP dynamics with phasor settling}
+
+We now replace EP's generic fixed-point iteration with the phasor
+oscillator dynamics.  The ``input current'' to each layer's oscillator
+bank is the EP energy gradient~\eqref{eq:ep-grad}:
+
+\begin{equation}\label{eq:coupled-drive}
+  \bm{I}_\ell[n]
+  \;=\;
+  \underbrace{\sigma(\bm{a}_\ell[n])}_{\text{feedforward}}
+  \;+\;
+  \underbrace{
+    W_{\ell+1}^{\!\top}
+    \bigl[\sigma'(\bm{a}_{\ell+1}[n])\odot\bm{z}_{\ell+1}[n]\bigr]
+  }_{\text{feedback}}
+  \;-\;
+  \beta\,\delta_{\ell L}\,
+  \frac{\partial\mathcal{C}}{\partial\bm{z}_L}\bigg|_{\bm{z}[n]}
+\end{equation}
+where $\bm{a}_\ell[n]=W_\ell\,\bm{z}_{\ell-1}[n]+\bm{b}_\ell$ is
+the pre-activation computed from the current states.
+
+The coupled recurrence is then:
+
+\begin{equation}\label{eq:coupled}
+  \boxed{
+  \bm{z}_\ell[n+1]
+  \;=\;
+  A_\ell\,\bm{z}_\ell[n]
+  \;+\;
+  B_\ell\,\bm{I}_\ell[n],
+  \qquad \ell=1,\dots,L.
+  }
+\end{equation}
+
+All layers update \textbf{simultaneously} at each time step~$n$.
+The oscillator eigenvalues $\bm{k}_\ell$ provide the
+settling dynamics:
+\begin{itemize}
+\item The \textbf{decay} ($\lambda<0$) drives the system toward
+  equilibrium---it acts as a natural damping that replaces the step-size
+  parameter $\eta$ in standard EP.
+\item The \textbf{oscillation} ($\omega$) adds phasor structure---phase
+  information is carried implicitly in the complex state without
+  explicit phase extraction.
+\item The \textbf{kernel} $\mathcal{K}_\ell[m]=A_\ell^m B_\ell$
+  integrates the EP gradient signal over time with exponential memory,
+  smoothing the settling trajectory.
+\end{itemize}
+
+\subsection{Two-layer example}
+
+For concreteness, consider $L=2$ (hidden layer~$\bm{z}_1$, output
+layer~$\bm{z}_2$, input $\bm{x}=\bm{z}_0$ fixed):
+
+\begin{align}
+  \bm{I}_1[n] &= \sigma(W_1\bm{x}+\bm{b}_1)
+    + W_2^{\!\top}\bigl[\sigma'(W_2\bm{z}_1[n]+\bm{b}_2)
+      \odot\bm{z}_2[n]\bigr],
+    \label{eq:I1}\\[4pt]
+  \bm{I}_2[n] &= \sigma(W_2\bm{z}_1[n]+\bm{b}_2)
+    - \beta\,\frac{\partial\mathcal{C}}{\partial\bm{z}_2}\bigg|_{\bm{z}[n]},
+    \label{eq:I2}\\[6pt]
+  \bm{z}_1[n+1] &= A_1\,\bm{z}_1[n] + B_1\,\bm{I}_1[n],
+    \label{eq:z1}\\
+  \bm{z}_2[n+1] &= A_2\,\bm{z}_2[n] + B_2\,\bm{I}_2[n].
+    \label{eq:z2}
+\end{align}
+
+Note the symmetric coupling:  $W_2$ sends information forward from
+$\bm{z}_1$ to $\bm{z}_2$ in~\eqref{eq:I2}, and $W_2^{\!\top}$ sends
+influence backward from $\bm{z}_2$ to $\bm{z}_1$ in~\eqref{eq:I1}.
+
+\subsection{Equilibrium}
+
+At a fixed point ($\bm{z}_\ell[n+1]=\bm{z}_\ell[n]=\bm{z}_\ell^*$):
+\begin{equation}\label{eq:fixed-point}
+  \bm{z}_\ell^*
+  \;=\;
+  A_\ell\,\bm{z}_\ell^*+B_\ell\,\bm{I}_\ell^*
+  \qquad\Longrightarrow\qquad
+  \bm{z}_\ell^*
+  \;=\;
+  (I-A_\ell)^{-1}\,B_\ell\,\bm{I}_\ell^*.
+\end{equation}
+Since $|A_{\ell,c}|<1$, the matrix $(I-A_\ell)$ is invertible with
+$(I-A_\ell)^{-1}_{cc} = 1/(1-e^{k_{\ell,c}\dt})$.  The fixed-point
+condition~\eqref{eq:fixed-point} is a nonlinear system (because
+$\bm{I}_\ell^*$ depends on all $\bm{z}^*$), solved self-consistently
+by running the recurrence until convergence.
+
+\begin{remark}[Static gain]
+The factor $(I-A_\ell)^{-1}B_\ell$ is the \emph{DC gain} of the
+oscillator---the steady-state response to a constant input.
+Channel~$c$ has DC gain
+\[
+  G_c = \frac{B_c}{1-A_c}
+  = \frac{e^{k_c\dt}-1}{k_c(1-e^{k_c\dt})}
+  = -\frac{1}{k_c}
+  = \frac{1}{|\lambda_c|^2+\omega_c^2}
+    \bigl(|\lambda_c|-\im\omega_c\bigr).
+\]
+The magnitude $|G_c|=1/|k_c|$ is larger for slowly-decaying,
+low-frequency channels (small $|\lambda|$, small $\omega$),
+which act as long-memory integrators.
+\end{remark}
+
+\subsection{Convergence}
+
+\begin{proposition}[Contraction]
+If $\sigma$ has bounded derivative ($|\sigma'|\le M$) and the coupling
+is weak enough that
+\begin{equation}\label{eq:contraction}
+  \max_\ell\;|A_{\ell,c}| + |B_{\ell,c}|\,M\,\|W\|_{\text{op}}
+  \;<\; 1
+  \qquad\text{for all channels $c$},
+\end{equation}
+then the coupled recurrence~\eqref{eq:coupled} is a contraction
+mapping and converges to a unique fixed point.
+\end{proposition}
+
+In practice, the damping rates $|\lambda_{\ell,c}|$ and the weight
+magnitudes determine whether the system converges.  The holomorphic
+activation $\sigma=\tanh$ has $|\tanh'|\le 1$, so the contraction
+condition reduces to $|A_{\ell,c}|+|B_{\ell,c}|\,\|W\|_{\text{op}}<1$.
+
+%======================================================================
+\section{Continuous-Time Formulation}\label{sec:ode}
+%======================================================================
+
+\subsection{Coupled ODE system}
+
+The discrete recurrence~\eqref{eq:coupled} corresponds to the
+continuous-time coupled ODE system:
+\begin{equation}\label{eq:coupled-ode}
+  \boxed{
+  \frac{\dd\bm{z}_\ell}{\dd t}
+  \;=\;
+  K_\ell\,\bm{z}_\ell
+  \;+\;
+  \bm{I}_\ell(t),
+  \qquad \ell=1,\dots,L,
+  }
+\end{equation}
+where $K_\ell=\diag(\bm{k}_\ell)$ and $\bm{I}_\ell(t)$ is the EP
+energy gradient~\eqref{eq:coupled-drive} evaluated at the instantaneous
+states.  This is a system of $\sum_\ell d_\ell$ coupled complex ODEs.
+
+The connection to the existing \texttt{oscillator\_bank} is direct:
+the oscillator bank solves $\dd\bm{z}/\dd t = K\bm{z}+\bm{I}(t)$
+for a single layer.  The coupled formulation simply makes
+$\bm{I}_\ell(t)$ depend on all layers' states, creating an interacting
+system.
+
+\subsection{Lyapunov stability}
+
+For the autonomous system ($\bm{I}=0$), the Lyapunov function is
+$V = \sum_\ell \|\bm{z}_\ell\|^2$, with
+$\dot{V} = 2\sum_\ell\Real(\bm{z}_\ell^H K_\ell\bm{z}_\ell)
+= 2\sum_{\ell,c}\lambda_{\ell,c}|z_{\ell,c}|^2 < 0$
+since all $\lambda_{\ell,c}<0$.  The autonomous dynamics are globally
+asymptotically stable.
+
+When the coupling $\bm{I}_\ell$ is present, local stability is
+governed by the spectrum of the full Jacobian:
+\[
+  J = \begin{pmatrix}
+    K_1 & \partial\bm{I}_1/\partial\bm{z}_2 \\
+    \partial\bm{I}_2/\partial\bm{z}_1 & K_2
+  \end{pmatrix}
+\]
+(for $L=2$).  Stability requires all eigenvalues of $J$ to have
+negative real part, which holds when the damping dominates the
+coupling strength---the same condition as~\eqref{eq:contraction}
+in continuous time.
+
+%======================================================================
+\section{Holomorphic Extension}\label{sec:holo}
+%======================================================================
+
+\subsection{Complex nudge parameter}
+
+Following Laborieux \& Zenke~(2022), we extend $\beta$ from
+$\R$ to $\C$.  If $\Phi$ is holomorphic in $\beta$ and
+the equilibrium map $\bm{z}^*(\beta)$ is holomorphic, then
+by the Cauchy integral formula:
+\begin{equation}\label{eq:cauchy}
+  \left.\frac{\dd}{\dd\beta}
+    \frac{\partial\Phi}{\partial\theta}\right|_{\beta=0}
+  \;=\;
+  \frac{1}{2\pi\im}
+  \oint_{|\beta|=r}
+    \frac{1}{\beta^2}\,
+    \frac{\partial\Phi}{\partial\theta}\bigg|_{\bm{z}^*(\beta)}
+    \dd\beta.
+\end{equation}
+
+Discretizing the contour with $N$ equally-spaced points
+$\beta_n = r\,e^{2\pi\im n/N}$, $n=0,\dots,N-1$:
+\begin{equation}\label{eq:fourier}
+  \boxed{
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  \frac{1}{N}\sum_{n=0}^{N-1}
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(\beta_n)}
+    \!\!\cdot\, e^{-2\pi\im n/N}.
+  }
+\end{equation}
+
+This is exact for any $r>0$, provided holomorphicity holds inside the
+disk $|\beta|\le r$.
+
+\subsection{Holomorphicity requirements}\label{sec:holo-req}
+
+For the energy~\eqref{eq:energy} to be holomorphic in $\bm{z}$ and
+$\beta$, we need:
+
+\begin{enumerate}
+\item \textbf{Activation $\sigma$}: Must be holomorphic (complex-differentiable).
+  Complex $\tanh(z) = (e^z-e^{-z})/(e^z+e^{-z})$ is meromorphic
+  (holomorphic except at isolated poles on the imaginary axis at
+  $z=\im\pi(n+\tfrac{1}{2})$).  For bounded states, this is sufficient.
+
+\item \textbf{Bilinear form}: The inner product
+  $\langle\bm{u},\bm{v}\rangle=\sum_j u_j v_j$ is holomorphic.
+  The Hermitian form $\bm{u}^H\bm{v}=\sum_j\bar{u}_j v_j$ is
+  \textbf{not} holomorphic due to conjugation.
+
+\item \textbf{Weight operations}: Matrix multiplication
+  $W\bm{z}$ is holomorphic in $\bm{z}$ (and in $W$ if weights are
+  viewed as variables).  The transpose $W^{\!\top}$ (not $W^H$) is
+  used in the feedback term.
+
+\item \textbf{Oscillator dynamics}: The recurrence
+  $\bm{z}[n+1]=A\bm{z}[n]+B\bm{I}[n]$ is holomorphic in
+  $\bm{z}$ and $\bm{I}$ (linear).  It is also holomorphic in the
+  eigenvalues $\bm{k}$ through $A=e^{\bm{k}\dt}$ and
+  $B=(e^{\bm{k}\dt}-1)/\bm{k}$ (entire functions of $\bm{k}$).
+
+\item \textbf{Cost function $\mathcal{C}$}: Should be holomorphic
+  in $\bm{z}_L$.  See Section~\ref{sec:cost}.
+\end{enumerate}
+
+The standard phasor activation \texttt{normalize\_to\_unit\_circle},
+$z\mapsto z/|z|$, is \textbf{not} holomorphic because
+$|z|=\sqrt{z\bar{z}}$ involves conjugation.  In the coupled
+recurrence formulation, this activation is \textbf{not applied during
+settling}---the oscillator dynamics and holomorphic $\sigma$ handle
+boundedness.  Phase information passes implicitly through the complex
+state; explicit phase extraction occurs only at the final readout.
+
+\subsection{Holomorphic cost function}\label{sec:cost}
+
+The cost function enters the energy as $-\beta\,\mathcal{C}(\bm{z}_L,\bm{y})$.
+For $\Phi$ to be holomorphic in $\bm{z}_L$, we need $\mathcal{C}$ to
+be holomorphic.  Several options:
+
+\begin{enumerate}
+\item \textbf{Complex linear cost}:
+  $\mathcal{C} = -\langle\bm{t},\,\bm{z}_L\rangle
+  = -\sum_j t_j\,z_{L,j}$,
+  where $\bm{t}\in\C^{d_L}$ is a target vector (e.g., class-specific
+  codebook entry on the unit circle).
+  This is holomorphic and linear---the simplest option.
+
+\item \textbf{Softmax cross-entropy on linear readout}:
+  Introduce a readout matrix $W_r\in\R^{C\times d_L}$ and define
+  logits $\bm{\ell}=W_r\bm{z}_L$ (real matrix times complex vector
+  gives complex logits; take real part for classification).
+  The softmax and cross-entropy applied to $\Real(\bm{\ell})$ are not
+  holomorphic, but applied to the complex logits directly:
+  \[
+    \mathcal{C} = -\sum_c y_c\,\log\frac{e^{\ell_c}}{\sum_{c'}e^{\ell_{c'}}}
+  \]
+  is holomorphic in $\bm{\ell}$ (and hence in $\bm{z}_L$), since
+  $\exp$ and $\log$ are holomorphic.
+
+\item \textbf{Quadratic cost}:
+  $\mathcal{C} = \tfrac{1}{2}\langle\bm{z}_L-\bm{t},\,
+  \bm{z}_L-\bm{t}\rangle
+  = \tfrac{1}{2}\sum_j(z_{L,j}-t_j)^2$.
+  This is holomorphic (note: $(z-t)^2$ is a polynomial in $z$, not
+  $|z-t|^2$ which would require conjugation).  However, for complex $z$,
+  this does not measure Euclidean distance---it is a complex-valued
+  ``distance'' that can be negative.
+\end{enumerate}
+
+Option~2 (complex softmax cross-entropy) is the closest to standard
+practice and was used in the reference implementation.
+
+%======================================================================
+\section{Teaching Oscillation Interpretation}\label{sec:osc}
+%======================================================================
+
+\subsection{Oscillating nudge}
+
+In the continuous-time formulation~\eqref{eq:coupled-ode}, let $\beta$
+oscillate at a \emph{teaching frequency} $\omega_T$:
+\begin{equation}\label{eq:beta-osc}
+  \beta(t) = r\,e^{\im\omega_T t}.
+\end{equation}
+
+The output layer's ODE becomes
+\begin{equation}
+  \frac{\dd\bm{z}_L}{\dd t}
+  = K_L\bm{z}_L
+  + \sigma(W_L\bm{z}_{L-1}+\bm{b}_L)
+  - r\,e^{\im\omega_T t}\,
+    \frac{\partial\mathcal{C}}{\partial\bm{z}_L}.
+\end{equation}
+This is a periodically driven oscillator.  After transients decay
+(governed by $\lambda<0$), every state $\bm{z}_\ell(t)$ reaches a
+periodic steady state that can be expanded in a Fourier series in
+$\omega_T$:
+\begin{equation}\label{eq:fourier-state}
+  \bm{z}_\ell(t)
+  \;=\;
+  \bm{c}_{\ell,0}
+  + \bm{c}_{\ell,1}\,e^{\im\omega_T t}
+  + \bm{c}_{\ell,2}\,e^{2\im\omega_T t}
+  + \cdots
+\end{equation}
+
+\subsection{Gradient as first Fourier coefficient}
+
+The parameter gradient~\eqref{eq:fourier} corresponds to extracting
+the first Fourier coefficient of
+$\partial\Phi/\partial\theta$ evaluated along the oscillating trajectory.
+In continuous time:
+\begin{equation}\label{eq:grad-fourier}
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  \frac{1}{T}\int_0^T
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}(t)}
+    e^{-\im\omega_T t}\,\dd t,
+  \qquad T=\frac{2\pi}{\omega_T}.
+\end{equation}
+
+This is a \textbf{lock-in measurement}: correlate the energy gradient
+with a reference signal at the teaching frequency.  All other frequency
+components (DC, harmonics) average out.
+
+\subsection{Physical interpretation}
+
+Each neuron's potential $\bm{z}_\ell(t)$ traces a trajectory in the
+complex plane.  The zeroth-order term $\bm{c}_{\ell,0}$ is the free
+equilibrium (the prediction).  The first-order term
+$\bm{c}_{\ell,1}\,e^{\im\omega_T t}$ is an ``epicycle''---a secondary
+oscillation at the teaching frequency, superimposed on the natural
+dynamics.
+
+\begin{itemize}
+\item The \textbf{amplitude} $|\bm{c}_{\ell,1}|$ encodes the gradient
+  magnitude---how sensitive this neuron is to the output error signal.
+\item The \textbf{phase} $\arg(\bm{c}_{\ell,1})$ encodes the gradient
+  direction---whether the weight should increase or decrease.
+\end{itemize}
+
+For the linear oscillator dynamics $\dd z/\dd t = kz + I(t)$, the
+response at $\omega_T$ is $c_1 = I_1/(\im\omega_T - k)$, where $I_1$
+is the first Fourier coefficient of the input.  The linear transfer
+function ensures that the teaching signal at $\omega_T$ and the natural
+dynamics at $\omega$ do not interfere: they are orthogonal spectral
+components.  This \textbf{spectral separation} is exact in linear
+layers and approximate (with controlled error) through nonlinear
+activations.
+
+%======================================================================
+\section{Parameter Gradients}\label{sec:param-grad}
+%======================================================================
+
+\subsection{Energy gradient w.r.t.\ weights}
+
+From~\eqref{eq:energy}, the gradient of $\Phi$ w.r.t.\ $W_\ell$ is:
+\begin{equation}\label{eq:dPhi-dW}
+  \frac{\partial\Phi}{\partial W_\ell}
+  \;=\;
+  \bigl[\sigma'(\bm{a}_\ell)\odot\bm{z}_\ell\bigr]
+  \,\bm{z}_{\ell-1}^{\!\top}.
+\end{equation}
+This is a \textbf{Hebbian} outer product: the gradient of the energy
+w.r.t.\ a weight is the product of post-synaptic activity
+(modulated by the activation derivative) and pre-synaptic activity.
+It is local---each synapse needs only the activities of the two neurons
+it connects.
+
+\subsection{Energy gradient w.r.t.\ oscillator parameters}
+
+The energy depends on $\bm{k}_\ell=\bm{\lambda}_\ell+\im\bm{\omega}_\ell$
+through the equilibrium states $\bm{z}^*(\bm{k})$.  Since the kernel
+$\mathcal{K}[m]=A^m B$ is holomorphic in $\bm{k}$, the equilibrium
+map inherits this holomorphicity, and we can compute
+$\partial\mathcal{L}/\partial\bm{k}_\ell$ via the same contour
+integration~\eqref{eq:fourier}.
+
+Equivalently, in the continuous-time formulation, the ODE
+$\dd z_c/\dd t = k_c z_c + I_c(t)$ has solution
+\[
+  z_c(t) = e^{k_c t}z_c(0) + \int_0^t e^{k_c(t-s)}I_c(s)\,\dd s.
+\]
+This is entire in $k_c$, so holomorphic EP can train the dynamics
+parameters $(\lambda_c,\omega_c)$ alongside the weights.
+
+\subsection{Full hEP parameter update}
+
+The complete training step:
+\begin{enumerate}
+\item \textbf{Free phase}: Run coupled recurrence~\eqref{eq:coupled}
+  with $\beta=0$ to convergence.  Record equilibrium
+  $\bm{z}^*(0)$.
+\item \textbf{Contour evaluation}: For $n=0,\dots,N-1$:
+  \begin{enumerate}[label=(\alph*)]
+    \item Set $\beta_n = r\,e^{2\pi\im n/N}$.
+    \item Initialize from $\bm{z}^*(0)$ (complexified).
+    \item Run coupled recurrence to convergence at $\beta_n$.
+    \item Compute
+      $\bm{g}_n = \partial\Phi/\partial\theta|_{\bm{z}^*(\beta_n)}$.
+  \end{enumerate}
+\item \textbf{Extract gradient}:
+  $\Delta\theta = \frac{1}{N}\sum_n \Real\!\bigl(\bm{g}_n\,
+  e^{-2\pi\im n/N}\bigr)$.
+\item \textbf{Update}: $\theta \leftarrow \theta - \eta\,\Delta\theta$.
+\end{enumerate}
+
+%======================================================================
+\section{Connection to PhasorNetworks Dispatch Paths}\label{sec:dispatch}
+%======================================================================
+
+\subsection{Mapping to 3D complex dispatch}
+
+The coupled recurrence~\eqref{eq:coupled} maps naturally onto the
+existing 3D complex dispatch path in PhasorNetworks.jl.  In the
+standard (feedforward) case:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Standard SSM} & \textbf{Coupled hEP} \\
+\midrule
+Input: $(C_{\text{in}}, L, B)$ complex & Input: $(C_{\text{in}}, B)$,
+  $L$ = settling steps \\
+$H = W \cdot x$ (channel mixing) & $\bm{I}_\ell[n]$ from
+  Eq.~\eqref{eq:coupled-drive} \\
+$Z = \text{causal\_conv}(K, H)$ & $\bm{z}_\ell$ from
+  recurrence~\eqref{eq:coupled} \\
+$Y = \text{activation}(Z)$ & Equilibrium $\bm{z}^*$ (no activation
+  during settling) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The key difference: in the standard SSM, each layer processes a
+pre-computed input sequence.  In the coupled hEP formulation, the
+``input'' at each step depends on the current states of all layers,
+creating a recurrent interaction.
+
+\subsection{Activation and phase extraction}
+
+In the standard dispatch, the activation
+(\texttt{normalize\_to\_unit\_circle}) is applied at each layer's
+output, and \texttt{complex\_to\_angle} extracts phase for the Phase
+dispatch.
+
+In the hEP formulation:
+\begin{itemize}
+\item During settling: \textbf{no activation applied}.  The oscillator
+  damping ($\lambda<0$) keeps states bounded.  The holomorphic
+  activation $\sigma$ (e.g., $\tanh$) appears only inside the energy
+  gradient~\eqref{eq:coupled-drive}.
+\item At readout: phase can be extracted from the equilibrium states
+  $\bm{z}^*$ for compatibility with the Codebook/SSMReadout layers.
+  This non-holomorphic step occurs \textbf{outside} the EP dynamics
+  and does not affect gradient quality.
+\end{itemize}
+
+\subsection{Connection to the continuous ODE dispatch}
+
+The coupled ODE~\eqref{eq:coupled-ode} maps directly onto the
+\texttt{oscillator\_bank} infrastructure.  Each layer already solves
+$\dd\bm{z}/\dd t = K\bm{z} + \bm{I}(t)$ via
+\texttt{DifferentialEquations.jl}.  The hEP extension requires:
+\begin{enumerate}
+\item Making $\bm{I}_\ell(t)$ depend on other layers' states
+  (creating a coupled system).
+\item Adding the teaching term
+  $-\beta(t)\,\partial\mathcal{C}/\partial\bm{z}_L$ to the output
+  layer.
+\end{enumerate}
+These modifications preserve the ODE structure and remain compatible
+with the existing solver and sensitivity analysis infrastructure.
+
+%======================================================================
+\section{Consistency Checks}\label{sec:checks}
+%======================================================================
+
+\subsection{Recovery of standard EP}
+
+Setting $K_\ell=\lambda\,I$ (uniform real eigenvalues, no oscillation)
+and $\dt=1$, the recurrence becomes
+\[
+  \bm{z}_\ell[n+1]
+  = e^{\lambda}\bm{z}_\ell[n]
+  + \frac{e^\lambda-1}{\lambda}\,\bm{I}_\ell[n].
+\]
+As $\lambda\to 0^-$, we have $e^\lambda\to 1$ and
+$(e^\lambda-1)/\lambda\to 1$, so
+$\bm{z}_\ell[n+1]\approx\bm{z}_\ell[n]+\bm{I}_\ell[n]$---this is
+standard gradient ascent on the energy with step size~1.
+The phasor formulation thus reduces to standard EP when the oscillator
+dynamics are removed.
+
+\subsection{Recovery of feedforward SSM}
+
+If the feedback terms are removed
+($W_{\ell+1}^{\!\top}[\cdots]=0$ in~\eqref{eq:coupled-drive}) and
+$\beta=0$, then each layer receives only feedforward input:
+$\bm{I}_\ell[n]=\sigma(W_\ell\bm{z}_{\ell-1}[n]+\bm{b}_\ell)$.
+This is the standard SSM causal convolution, where each layer
+processes the previous layer's output as a time series.
+
+\subsection{Holomorphicity of the full system}
+
+Each component of the coupled recurrence is holomorphic:
+\begin{itemize}
+\item $A_\ell\bm{z}_\ell$: linear in $\bm{z}_\ell$ and
+  holomorphic in $\bm{k}_\ell$ (via $A=e^{k\dt}$).
+\item $B_\ell\bm{I}_\ell$: $B_\ell$ is holomorphic in $\bm{k}_\ell$;
+  $\bm{I}_\ell$ is holomorphic in $\bm{z}$ if $\sigma$ and
+  $\mathcal{C}$ are holomorphic.
+\item Weight operations: $W\bm{z}$ is holomorphic; $W^{\!\top}\bm{v}$
+  is holomorphic (transpose, not conjugate transpose).
+\item $\beta$: enters linearly in the cost term.
+\end{itemize}
+By composition, the equilibrium map
+$\bm{z}^*(\beta,\theta)$ is holomorphic in $\beta$ (given $\sigma$
+and $\mathcal{C}$ are holomorphic), validating the contour
+integration~\eqref{eq:fourier}.
+
+\subsection{Dimensions and types}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Quantity} & \textbf{Type} & \textbf{Shape} & \textbf{Notes} \\
+\midrule
+$\bm{z}_\ell$ & $\C^{d_\ell}$ & $(d_\ell, B)$ & Hidden states (batch $B$) \\
+$W_\ell$ & $\R^{d_\ell\times d_{\ell-1}}$ & --- & Real weights \\
+$\bm{b}_\ell$ & $\C^{d_\ell}$ & $(d_\ell,)$ & Complex bias \\
+$K_\ell$ & $\C^{d_\ell\times d_\ell}$ & diagonal & Per-channel eigenvalues \\
+$A_\ell$ & $\C^{d_\ell\times d_\ell}$ & diagonal & $\diag(e^{\bm{k}_\ell\dt})$ \\
+$B_\ell$ & $\C^{d_\ell\times d_\ell}$ & diagonal & $\diag((e^{\bm{k}_\ell\dt}-1)/\bm{k}_\ell)$ \\
+$\beta$ & $\C$ & scalar & Nudge (real for std EP) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Weights $W_\ell$ are real-valued but operate on complex states,
+producing complex outputs.  This matches the existing PhasorDense
+convention where \texttt{params.weight} is \texttt{Float32} and the
+complex multiplication is done component-wise:
+$W\bm{z} = W\,\Real(\bm{z}) + \im\,W\,\text{Im}(\bm{z})$.
+
+%======================================================================
+\section{Summary}\label{sec:summary}
+%======================================================================
+
+The coupled phasor recurrence~\eqref{eq:coupled} unifies equilibrium
+propagation with the phasor SSM framework:
+
+\begin{enumerate}
+\item EP's settling dynamics are realized by \textbf{damped oscillator
+  recurrences}, with the oscillator eigenvalue $k=\lambda+\im\omega$
+  providing both convergence (decay) and phasor structure (oscillation).
+
+\item The EP energy gradient drives each oscillator as an
+  \textbf{input current}, with feedforward terms ($\sigma(W\bm{z}_{below})$)
+  and feedback terms ($W^{\!\top}[\sigma'\odot\bm{z}_{above}]$)
+  coupling all layers simultaneously.
+
+\item The \textbf{holomorphic extension} (complex $\beta$) is naturally
+  compatible because the oscillator dynamics, weight operations, and
+  holomorphic activations are all complex-differentiable.  The gradient
+  is the first Fourier coefficient of the energy gradient evaluated
+  along a contour in the complex $\beta$-plane.
+
+\item In continuous time, the oscillating nudge
+  $\beta(t)=r\,e^{\im\omega_T t}$ produces an \textbf{epicyclic
+  perturbation} of each neuron's trajectory, whose amplitude and phase
+  at $\omega_T$ encode the parameter gradient---extractable via lock-in
+  measurement.
+
+\item The formulation \textbf{reduces to} standard EP (when
+  $\omega=0$, $\lambda\to 0$) and to the feedforward SSM (when feedback
+  is removed and $\beta=0$), confirming consistency with both limiting
+  cases.
+\end{enumerate}
+
+\section*{References}
+
+\begin{itemize}
+\item Laborieux, A.\ \& Zenke, F.\ (2022).
+  ``Holomorphic Equilibrium Propagation Computes Exact Gradients
+  Through Finite Size Oscillations.'' NeurIPS 2022.
+  arXiv:2209.00530.
+\item Scellier, B.\ \& Bengio, Y.\ (2017).
+  ``Equilibrium Propagation: Bridging the Gap Between Energy-Based
+  Models and Backpropagation.''
+  Frontiers in Computational Neuroscience.
+\end{itemize}
+
+\end{document}

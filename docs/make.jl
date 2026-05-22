@@ -12,17 +12,23 @@ makedocs(;
         edit_link="main",
         assets=String[],
     ),
+    checkdocs=:exports,
     pages=[
         "Home" => "index.md",
         "API Reference" => [
             "Types" => "api/types.md",
             "Networks" => "api/network.md",
+            "Activations" => "api/activations.md",
             "Spiking" => "api/spiking.md",
             "Domains" => "api/domains.md",
             "VSA" => "api/vsa.md",
             "GPU" => "api/gpu.md",
             "Metrics" => "api/metrics.md",
             "SSM" => "api/ssm.md",
+            "Attractor SSM" => "api/attractor_ssm.md",
+            "Datasets" => "api/datasets.md",
+            "Equilibrium Propagation" => "api/ep.md",
+            "Holomorphic EP" => "api/hep.md",
         ]
     ],
 )

@@ -144,7 +144,7 @@ function run()
 
     # ---- FashionMNIST ablation: STFT vs no STFT ----
     println("\n" * "="^64)
-    println("  FashionMNIST: PhasorSTFT ablation")
+    println("  FashionMNIST: ResonantSTFT ablation")
     println("="^64)
 
     train_loader, test_loader, fmnist_L, fmnist_C = load_sequential_fmnist(; batchsize, pixels_per_step=pps)

@@ -4,30 +4,30 @@ using Test
 @testset "Backend Abstraction" begin
     @testset "Args construction" begin
         # Default backend
-        a = Args()
+        a = PhasorNetworks.Args()
         @test a.backend == :cuda
 
         # Explicit backend
-        a_cpu = Args(backend=:cpu)
+        a_cpu = PhasorNetworks.Args(backend=:cpu)
         @test a_cpu.backend == :cpu
 
         # Backward compat: use_cuda kwarg
-        a_old = Args(use_cuda=false)
+        a_old = PhasorNetworks.Args(use_cuda=false)
         @test a_old.backend == :cpu
 
-        a_old2 = Args(use_cuda=true)
+        a_old2 = PhasorNetworks.Args(use_cuda=true)
         @test a_old2.backend == :cuda
     end
 
     @testset "Args use_cuda property compat" begin
-        a = Args(backend=:cuda)
+        a = PhasorNetworks.Args(backend=:cuda)
         @test a.use_cuda == true
 
-        a2 = Args(backend=:cpu)
+        a2 = PhasorNetworks.Args(backend=:cpu)
         @test a2.use_cuda == false
 
         # Write via use_cuda
-        a3 = Args()
+        a3 = PhasorNetworks.Args()
         a3.use_cuda = false
         @test a3.backend == :cpu
 

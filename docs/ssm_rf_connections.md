@@ -269,11 +269,11 @@ The tension, then, is between:
 - **Frequency diversity** (better input decomposition, higher accuracy)
 - **Phase coherence** (stable HD representations, meaningful similarity)
 
-### 4.5 Resolution: Multi-Compartment Frequency Decomposition (PhasorSTFT)
+### 4.5 Resolution: Multi-Compartment Frequency Decomposition (ResonantSTFT)
 
-The `PhasorSTFT` layer resolves this tension by separating frequency analysis from phase representation. The key insight is that a neuron can have **multiple compartments** — a physical model grounded in dendritic computation, where different dendritic branches have distinct resonant properties but converge onto a single somatic output.
+The `ResonantSTFT` layer resolves this tension by separating frequency analysis from phase representation. The key insight is that a neuron can have **multiple compartments** — a physical model grounded in dendritic computation, where different dendritic branches have distinct resonant properties but converge onto a single somatic output.
 
-Each frequency channel `f` in PhasorSTFT consists of two compartments:
+Each frequency channel `f` in ResonantSTFT consists of two compartments:
 
 1. **Signal compartment**: driven by weighted input, evolves at trainable `(λ_f, ω_f)`:
    ```
@@ -307,25 +307,25 @@ This frequency-shift modulation is:
 The resulting architecture separates concerns cleanly:
 
 ```
-Input → PhasorSTFT (trainable ω per channel, frequency decomposition)
+Input → ResonantSTFT (trainable ω per channel, frequency decomposition)
       → Downstream PhasorDense layers (fixed shared ω, phase-coherent HD vectors)
       → Codebook / SSMReadout (similarity-based classification)
 ```
 
-The PhasorSTFT layer gets the accuracy benefit of frequency diversity — each channel tunes to a different input frequency — while downstream layers maintain the phase coherence required for HD computing. The interface between them is the frequency shift, which translates between the two regimes.
+The ResonantSTFT layer gets the accuracy benefit of frequency diversity — each channel tunes to a different input frequency — while downstream layers maintain the phase coherence required for HD computing. The interface between them is the frequency shift, which translates between the two regimes.
 
 ### 4.6 Biological Interpretation
 
 The multi-compartment architecture has a direct biological analog. Pyramidal neurons in cortex have extensive dendritic trees where individual dendritic branches can sustain **local oscillations** at frequencies different from the somatic oscillation. These dendritic compartments act as resonant filters, selectively amplifying inputs at specific frequencies. The dendritic signals then converge at the soma, where they modulate the neuron's spiking output at the somatic frequency.
 
 In this view:
-- **Dendritic compartments** = PhasorSTFT channels with trainable `ω_f`
+- **Dendritic compartments** = ResonantSTFT channels with trainable `ω_f`
 - **Soma** = downstream PhasorDense neurons at shared `ω_out`
 - **Dendritic-to-somatic coupling** = frequency-shift re-encoding
 
 The reference compartment corresponds to the **intrinsic oscillation** of the dendrite — the free-running resonance that would occur without input. The phase deviation from this intrinsic oscillation is the information that propagates to the soma.
 
-This is also consistent with the **cochlear model**: the basilar membrane decomposes sound into frequency channels (like PhasorSTFT), and inner hair cells transduce the envelope and fine timing at each frequency into neural spikes at a common temporal frame (like the frequency shift to `ω_out`). The auditory nerve then carries phase-locked responses at a shared rate, enabling downstream coincidence detection — a form of phase-based similarity computation.
+This is also consistent with the **cochlear model**: the basilar membrane decomposes sound into frequency channels (like ResonantSTFT), and inner hair cells transduce the envelope and fine timing at each frequency into neural spikes at a common temporal frame (like the frequency shift to `ω_out`). The auditory nerve then carries phase-locked responses at a shared rate, enabling downstream coincidence detection — a form of phase-based similarity computation.
 
 ---
 
@@ -522,14 +522,14 @@ This factorization enables the convolutional view: the Dirac encoding produces t
 - Express the computation as VSA operations (binding = rotation, bundling = superposition)
 - Produce spike-based I/O for neuromorphic hardware
 - Use FFT-based convolution for O(L log L) sequence processing
-- Trainable frequency decomposition at the input stage (`PhasorSTFT`), with frequency-shift re-encoding to maintain phase coherence in downstream layers (see section 4.4–4.6)
+- Trainable frequency decomposition at the input stage (`ResonantSTFT`), with frequency-shift re-encoding to maintain phase coherence in downstream layers (see section 4.4–4.6)
 
 **Cannot do (inherent limitations):**
 - Direct phase-space convolution (must work in complex space, extract phases after)
 - Non-diagonal A matrix (oscillators are independent; coupling is through W only)
 - Phase-linear state update (the `arg` readout introduces essential nonlinearity)
 - Channel-independent Dirac encoding (unlike ZOH, the encoding depends on the output channel's eigenvalue)
-- Mixed-period *within* a synchronized layer (the equal-period constraint is required for HD phase coherence; frequency diversity is handled by a dedicated PhasorSTFT stage that re-encodes to a uniform carrier)
+- Mixed-period *within* a synchronized layer (the equal-period constraint is required for HD phase coherence; frequency diversity is handled by a dedicated ResonantSTFT stage that re-encodes to a uniform carrier)
 
 ---
 
@@ -564,7 +564,7 @@ The phasor kernel `K[n] = Aⁿ·B` also has a closed-form DFT: `K̂[f] = B / (1 
 
 ### 8.4 Trainable Frequency Decomposition (Implemented)
 
-The tension between frequency diversity (per-channel `ω` for better input decomposition) and phase coherence (shared `ω` for HD representations) is resolved by the `PhasorSTFT` layer, which separates these two roles into distinct architectural stages. See section 4.4–4.6 for the full treatment. The implementation uses a multi-compartment neuron model with frequency-shift re-encoding, preserving both the filter-bank interpretation and the equal-period constraint for downstream layers.
+The tension between frequency diversity (per-channel `ω` for better input decomposition) and phase coherence (shared `ω` for HD representations) is resolved by the `ResonantSTFT` layer, which separates these two roles into distinct architectural stages. See section 4.4–4.6 for the full treatment. The implementation uses a multi-compartment neuron model with frequency-shift re-encoding, preserving both the filter-bank interpretation and the equal-period constraint for downstream layers.
 
 ### 8.5 Structured Phase Initialization
 
@@ -594,8 +594,8 @@ Beyond HiPPO, there may be other principled initializations for the `(λ, ω)` p
 | Discretization | ZOH, bilinear, etc. | ZOH (continuous input) or Dirac (phase/spike input) |
 | Initialization | HiPPO-LegS, random | HiPPO-LegS, uniform, fixed |
 | Gating | Input-dependent A (Mamba) | Input-dependent λ,ω (neuromodulation) |
-| Frequency analysis | Fixed filterbank or learned | PhasorSTFT: trainable ω with re-encoding to shared carrier |
-| Inter-layer coupling | Arbitrary | Equal-period for synchronized layers; PhasorSTFT bridges frequency-diverse input to phase-coherent network |
+| Frequency analysis | Fixed filterbank or learned | ResonantSTFT: trainable ω with re-encoding to shared carrier |
+| Inter-layer coupling | Arbitrary | Equal-period for synchronized layers; ResonantSTFT bridges frequency-diverse input to phase-coherent network |
 
 ---
 
@@ -610,7 +610,7 @@ The R&F neuron network is a **physically-grounded diagonal state-space model** w
 
 All three SSM computational views (recurrent, convolutional, continuous) apply to R&F networks, with the caveat that the **phase readout introduces nonlinearity** that prevents the convolutional view from operating directly on phases. The computation must proceed in complex space (where everything is linear) and extract phases only at the output boundary.
 
-A key architectural tension — between **frequency diversity** (per-channel `ω` for better input decomposition) and **phase coherence** (shared `ω` for stable HD representations) — is resolved by the `PhasorSTFT` layer. This multi-compartment neuron model performs trainable frequency decomposition at the input stage, then re-encodes the invariant phase content at a uniform carrier for downstream synchronized layers. The result is a two-stage architecture where frequency analysis and phase-coherent computation coexist without compromise, grounded in the biological model of dendritic resonance converging onto somatic oscillation.
+A key architectural tension — between **frequency diversity** (per-channel `ω` for better input decomposition) and **phase coherence** (shared `ω` for stable HD representations) — is resolved by the `ResonantSTFT` layer. This multi-compartment neuron model performs trainable frequency decomposition at the input stage, then re-encodes the invariant phase content at a uniform carrier for downstream synchronized layers. The result is a two-stage architecture where frequency analysis and phase-coherent computation coexist without compromise, grounded in the biological model of dendritic resonance converging onto somatic oscillation.
 
 The SSM perspective provides three practical gifts to R&F networks:
 - **HiPPO initialization** for principled multi-timescale memory (what should leakage be?)

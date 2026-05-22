@@ -5,7 +5,7 @@ Pkg.activate("..")
 # Include necessary source files and import packages
 include("../src/PhasorNetworks.jl")
 using .PhasorNetworks
-using Lux, MLUtils, MLDatasets, OneHotArrays, Statistics, LuxCUDA
+using Lux, MLUtils, OneHotArrays, Statistics, LuxCUDA
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
@@ -41,8 +41,8 @@ function train_and_test_conv(ea::ExpArgs)
 
     # --- Data Loading ---
     println("Loading FashionMNIST dataset...")
-    train_data = MLDatasets.FashionMNIST(split=:train)
-    test_data = MLDatasets.FashionMNIST(split=:test)
+    train_data = fashion_mnist_data(:train)
+    test_data = fashion_mnist_data(:test)
 
     train_loader = DataLoader(train_data, batchsize=args.batchsize, shuffle=true)
     test_loader = DataLoader(test_data, batchsize=args.batchsize)
@@ -114,8 +114,8 @@ function train_and_test_phasor(ea::ExpArgs)
 
     # --- Data Loading ---
     println("Loading FashionMNIST dataset...")
-    train_data = MLDatasets.FashionMNIST(split=:train)
-    test_data = MLDatasets.FashionMNIST(split=:test)
+    train_data = fashion_mnist_data(:train)
+    test_data = fashion_mnist_data(:test)
 
     train_loader = DataLoader(train_data, batchsize=args.batchsize, shuffle=true)
     test_loader = DataLoader(test_data, batchsize=args.batchsize)

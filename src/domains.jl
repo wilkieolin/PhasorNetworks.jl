@@ -15,6 +15,20 @@ function angle_to_complex(x::AbstractArray)
     return exp.(k .* x)
 end
 
+# Closed-form pullback for angle_to_complex. For z = exp(iπx) with real x and
+# real-valued cost L, the cotangent is dx = π · imag(dz · conj(z)). Saving
+# only the output z (one (...) ComplexF32) avoids tape Zygote would
+# otherwise hold for the broadcast → exp chain.
+function ChainRulesCore.rrule(::typeof(angle_to_complex), x::AbstractArray)
+    z = angle_to_complex(x)
+    function angle_to_complex_pullback(dz_)
+        dz = unthunk(dz_)
+        dx = pi_f32 .* imag.(dz .* conj.(z))
+        return (NoTangent(), dx)
+    end
+    return z, angle_to_complex_pullback
+end
+
 """
     complex_to_angle(x::AbstractArray)
 
@@ -28,6 +42,44 @@ Convert an array of complex numbers to their angles in units of π radians.
 """
 function complex_to_angle(x::AbstractArray)
     return Phase.(angle.(x) ./ pi_f32)
+end
+
+# Closed-form pullback for `complex_to_angle` on arrays. Forward is
+# `y = atan(imag(z), real(z)) / π` (in units of π). Standard derivative
+# (away from z = 0):
+#
+#   ∂y/∂a = -b / (π · |z|²),    ∂y/∂b = a / (π · |z|²)
+#
+# In ChainRules tangent convention (`ȳ = ∂L/∂(re y) + i·∂L/∂(im y)`,
+# but y is real so ȳ is real), the chain gives
+#
+#   dz = ȳ · (-b + i·a) / (π · |z|²) = ȳ · (i · z) / (π · |z|²)
+#
+# At z = 0, atan(0, 0) is conventionally 0 (Julia's convention), but the
+# derivative is undefined (0/0 = NaN). We zero the cotangent for
+# sub-threshold elements — same short-circuit pattern as the
+# `normalize_to_unit_circle` rrule, for the same reason: a real
+# pipeline like sparse-input PhasorResonant lands on exact zeros after
+# the SSM kernel underflows, and the abs(0) / atan(0,0) chain rules
+# would otherwise propagate NaN through the rest of the gradient.
+function ChainRulesCore.rrule(::typeof(complex_to_angle), x::AbstractArray;
+                              threshold::Real = 1.0f-10)
+    y = complex_to_angle(x)
+    th2 = Float32(threshold)^2
+    r2 = abs2.(real.(x)) .+ abs2.(imag.(x))
+
+    function complex_to_angle_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        # ȳ may be a Phase array (Real subtype); coerce to Float32 for arithmetic.
+        ȳf = Float32.(ȳ)
+        active = r2 .> th2
+        safe_r2 = max.(r2, th2)
+        # dz = ȳ · i·z / (π · |z|²)  for active; 0 otherwise.
+        dz_active = ȳf .* (1.0f0im) .* x ./ (pi_f32 .* safe_r2)
+        dz = ifelse.(active, dz_active, zero(eltype(x)))
+        return (NoTangent(), dz)
+    end
+    return y, complex_to_angle_pullback
 end
 
 """
@@ -44,123 +96,6 @@ Convert real and imaginary components to an angle in units of π radians.
 """
 function complex_to_angle(x_real::Real, x_imag::Real)
     return Phase(atan(x_imag, x_real) / pi_f32)
-end
-
-"""
-    soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
-
-Calculate angles of complex numbers with a soft threshold based on magnitude.
-The output is scaled by a sigmoid function of the magnitude, which smoothly 
-transitions between 0 and 1 in the range [r_lo, r_hi].
-
-# Arguments
-- `x::AbstractArray{<:Complex}`: Array of complex numbers
-- `r_lo::Real = 0.1f0`: Lower threshold for magnitude scaling
-- `r_hi::Real = 0.2f0`: Upper threshold for magnitude scaling
-
-# Returns
-- Array of angles in units of π radians, scaled by magnitude-dependent sigmoid
-"""
-function soft_angle(x::AbstractArray{<:Complex}, r_lo::Real = 0.1f0, r_hi::Real = 0.2f0)
-    s = similar(real.(x))
-
-    ignore_derivatives() do
-        r = abs.(x)
-        m = (r .- r_lo) ./ (r_hi - r_lo)
-        s .= sigmoid_fast(3.0f0 .* m .- (r_hi - r_lo))
-    end
-
-    return Phase.(s .* angle.(x) / pi_f32)
-end
-
-
-"""
-    normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
-
-Hard normalization: project complex numbers to the unit circle, then rotate by −π/2 to
-convert from potential representation to current representation.
-
-# Arguments
-- `z::AbstractArray{<:Complex}`: Array of complex numbers
-- `threshold::Real`: Minimum magnitude to avoid division by zero (default: 1.0f-10)
-
-# Returns
-- Complex array with unit magnitude, rotated by −π/2 relative to the input phase
-
-# Details
-For each complex number z = r*exp(iθ), returns exp(i(θ − π/2)) = −i·z/|z|.
-Values with magnitude below threshold are mapped to −i (the rotation of the 1+0im fallback).
-
-The −π/2 rotation aligns the normalization output with the current convention used in
-Resonate-and-Fire spiking networks: a neuron fires at maximum imaginary value (potential
-angle π/2), and its spike is received as a positive real current (angle 0) at postsynaptic
-neurons. This rotation ensures that a "firing" neuron (potential at +i) outputs a maximum
-excitatory current (+1), making this function a faithful continuous-time analog of sparse
-spiking activation.
-"""
-function normalize_to_unit_circle(z::AbstractArray{<:Complex}; threshold::Real = 1.0f-10)
-    r = abs.(z)
-    # Use ifelse for Zygote compatibility
-    # For very small magnitudes, map to 1+0im before rotation to avoid numerical issues
-    scale_factor = ifelse.(r .> Float32(threshold), 1.0f0 ./ r, 0.0f0)
-    default_value = ComplexF32(1.0f0 + 0.0f0im)
-
-    normalized = ifelse.(r .> Float32(threshold), z .* scale_factor, default_value)
-    return normalized
-end
-
-"""
-    soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.6f0, steepness::Float32 = 10.0f0)
-
-Soft normalization: smoothly map complex numbers onto the unit circle via phase interpolation
-(SLERP), with sub-threshold values collapsed to `1+0im`.
-
-# Arguments
-- `z::AbstractArray{<:Complex}`: Array of complex numbers
-- `r_lo::Real`: Lower magnitude threshold — below this, output is approximately `1+0im` (default: 0.1)
-- `r_hi::Real`: Upper magnitude threshold — above this, output is approximately `z/|z|` (default: 0.6)
-
-# Returns
-- Complex array with magnitude exactly 1, with phase smoothly interpolated from 0 toward `angle(z)`
-
-# Details
-Uses spherical linear interpolation (SLERP) on the unit circle rather than linear complex mixing,
-which avoids cancellation artifacts when `z` and the reference `1+0im` point in opposite directions.
-
-A blend factor in [0, 1] is computed via sigmoid of the input magnitude, centered between `r_lo`
-and `r_hi`. The output phase is then `blend × angle(z)`:
-- For |z| ≪ r_lo: blend ≈ 0 → output ≈ `1+0im` (sub-threshold / silent)
-- For |z| ≫ r_hi: blend ≈ 1 → output ≈ `z/|z|` (suprathreshold / active)
-- For r_lo ≤ |z| ≤ r_hi: smooth phase rotation between the two extremes
-
-The output magnitude is always exactly 1, making this suitable as a differentiable gate that
-preserves phase information for active neurons while anchoring silent neurons at a fixed reference.
-
-# Example
-```julia
-# Sub-threshold: output collapses to 1+0im regardless of phase
-z_small = 0.05f0 * exp(1im * π/4)
-z_norm = soft_normalize_to_unit_circle([z_small])  # ≈ 1+0im, |z_norm| = 1
-
-# Suprathreshold: output preserves phase on unit circle
-z_large = 5.0f0 * exp(1im * π/4)
-z_norm = soft_normalize_to_unit_circle([z_large])  # ≈ exp(iπ/4), |z_norm| = 1
-```
-"""
-function soft_normalize_to_unit_circle(z::AbstractArray{<:Complex}; r_lo::Real = 0.1f0, r_hi::Real = 0.6f0)
-    r = abs.(z)
-    midpoint = (r_lo + r_hi) / 2
-    k = 6.0f0 / (r_hi - r_lo)
-    # blend: 0 when r << r_lo (→ output 1+0im), 1 when r >> r_hi (→ output z/|z|)
-    blend = sigmoid_fast.(k .* (r .- midpoint))
-
-    # Unit vector in direction of z
-    safe_r = max.(r, 1.0f-10)
-    unit_z = z ./ safe_r
-
-    # Interpolate phase from 0 toward angle(z) — no complex addition, no cancellation
-    θ = atan.(imag.(unit_z), real.(unit_z))
-    return cos.(blend .* θ) .+ im .* sin.(blend .* θ)
 end
 
 """
@@ -862,6 +797,37 @@ function potential_to_phase(potential::AbstractArray, t::Real; offset::Real=0.f0
     return phase
 end
 
+"""
+    unrotate_solution(potentials, ts; spk_args::SpikingArgs, offset=0.0f0, bias=nothing)
+
+Remove the global oscillator rotation from a sampled ODE trajectory so the
+resulting potentials live in the **static phase frame** — the convention used
+by the 2D Phase MLP and the post-§4.1 3D Phase Dirac dispatch.
+
+For each sample time `t`, computes a reference phasor `current_zeros[t]`
+representing zero phase at that moment (via [`phase_to_potential`](@ref)),
+then returns `current_zeros .* conj.(potentials)`. After this step, the angle
+of each potential reflects the input phase rather than the oscillator's
+natural rotation at sample time.
+
+# Arguments
+- `potentials::AbstractVector{<:AbstractArray}` — per-sample membrane
+  potentials (e.g. `sol.u`).
+- `ts::AbstractVector` — sample times aligned with `potentials` (e.g. `sol.t`).
+
+# Keyword arguments
+- `spk_args::SpikingArgs` — supplies `t_period` for the reference phasor.
+- `offset::Real = 0.0f0` — time offset added to the reference phasor evaluation.
+- `bias::Union{Nothing, AbstractArray{<:Complex}} = nothing` — optional complex
+  offset added to each potential before derotation (shifts the origin in the
+  complex plane).
+
+# Returns
+A vector of arrays with the same shape as `potentials`, derotated into the
+static phase frame.
+
+See also: [`sample_phases_at_periods`](@ref), [`potential_to_phase`](@ref).
+"""
 function unrotate_solution(potentials::AbstractVector{<:AbstractArray}, ts::AbstractVector; offset::Real=0.0f0, spk_args::SpikingArgs, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
     current_zeros = similar(potentials[1], ComplexF32, (length(ts)))
 

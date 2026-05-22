@@ -142,8 +142,7 @@ Returns transformed phases using a soft angle conversion for stable gradients.
 """
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
     xz = batched_mul(w, angle_to_complex(x)) .+ b
-    #y = complex_to_angle(xz)
-    y = soft_angle(xz, 0.01f0, 0.1f0)
+    y = complex_to_angle(xz)
     return y
 end
 
@@ -224,6 +223,64 @@ function random_symbols(rng::AbstractRNG, size::Tuple{Vararg{Int}})
     y = Phase.(2.0f0 .* rand(rng, Float32, size) .- 1.0f0)
     return y
 end
+
+"""
+    orthogonal_codes([rng,] d::Int, n::Int) -> Array{Phase, 2}
+
+Construct `n` mutually (near-)orthogonal `d`-dimensional phasor codes for use
+as a `Codebook` (or other VSA classifier) initial state. Output shape is
+`(d, n)` — one column per code.
+
+# Construction
+The construction is exactly the binding-based one used in phasor VSA: a
+single random base symbol `b` is bundled with `n` integer multiples of a
+DFT shift symbol `s`,
+
+    code_i = remap_phase( b + (i − 1) · s ),    s[k] = 2 · ((k−1) mod n) / n
+
+Pairwise differences are `(i − j) · s mod 2`, whose per-dimension cosines
+sum to zero by DFT orthogonality:
+
+    sim(code_i, code_j) = (1/d) · Σ_k cos(2π · (i − j) · ((k−1) mod n) / n)
+
+This is **exactly zero** when `n` divides `d` (each n-period block
+contributes 0). When it does not, the sum has a bounded residual
+`≤ 1 / sin(π/n)` from the partial trailing block, giving similarity
+`O(n / d)` — still strictly better than the `O(1/√d)` standard deviation
+of random codes for small `d`. Diagonal entries (self-similarity) are
+exactly 1.
+
+# Errors
+Throws when `n > d`: at most `d` mutually orthogonal vectors fit in
+`d`-dimensional space.
+
+# Notes
+- The base symbol `b` injects per-dimension randomness without changing
+  the orthogonality property — useful for breaking symmetry in downstream
+  layers.
+- For `n = 1` the orthogonality condition is vacuous; returns a single
+  random symbol.
+
+See also: [`Codebook`](@ref), [`random_symbols`](@ref), [`v_bind`](@ref).
+"""
+function orthogonal_codes(rng::AbstractRNG, d::Int, n::Int)
+    n > d && throw(ArgumentError(
+        "orthogonal_codes requires d ≥ n (cannot fit $n orthogonal vectors in $d dims)"))
+    if n == 1
+        return random_symbols(rng, (d, 1))
+    end
+    # Random base offset — does not change pairwise similarity.
+    base = 2.0f0 .* rand(rng, Float32, d) .- 1.0f0
+    # DFT shift pattern: tile (k mod n)/n across d dimensions.
+    shift = Float32[2 * ((k - 1) % n) / n for k in 1:d]
+    codes = Matrix{Float32}(undef, d, n)
+    for i in 1:n
+        @views codes[:, i] .= mod.(Float32(i - 1) .* shift .+ base .+ 1.0f0, 2.0f0) .- 1.0f0
+    end
+    return Phase.(codes)
+end
+
+orthogonal_codes(d::Int, n::Int) = orthogonal_codes(GLOBAL_RNG, d, n)
 
 """
     remap_phase(x::Real) -> Float32
@@ -412,14 +469,229 @@ function similarity_outer(x::AbstractArray{<:Real,2}, y::AbstractArray{<:Real,2}
     return s
 end
 
-function similarity_outer(x::AbstractArray{<:Complex}, y::AbstractArray{<:Complex}; dims=2)
-    s = [interference_similarity(abs.(xs .+ ys), dim=dims) for xs in eachslice(x, dims=dims), ys in eachslice(y, dims=dims)]
-    #stack and reshape to batch-last
-    s = permutedims(stack(s), (2,3,1))
-    return s
+"""
+    similarity_outer(x::AbstractArray{<:Complex,3}, y::AbstractArray{<:Complex,3}; dims=2)
+
+Pairwise interference-similarity for 3-D complex arrays on CPU. Permutes to
+canonical `(features, n_vectors, batch)` layout and delegates to
+[`_similarity_outer_canonical_complex`](@ref) — the same kernel used by the
+GPU dispatch — so CPU and GPU paths agree on output shape `(M, N, X)` and
+share the closed-form rrule.
+
+(Previous comprehension-based implementation averaged over the batch
+dimension instead of features, returning shape `(M, N, D)`. That was
+inconsistent with the GPU and CPU real-valued dispatches and is replaced
+here.)
+"""
+function similarity_outer(x::AbstractArray{<:Complex,3}, y::AbstractArray{<:Complex,3}; dims=2)
+    if dims == 2
+        feature_dim, batch_dim = 1, 3
+    elseif dims == 1
+        feature_dim, batch_dim = 2, 3
+    elseif dims == 3
+        feature_dim, batch_dim = 1, 2
+    else
+        error("dims must be 1, 2, or 3 for 3D arrays")
+    end
+
+    sz_x = size(x); sz_y = size(y)
+    @assert sz_y[batch_dim]   == sz_x[batch_dim]   "Batch size mismatch"
+    @assert sz_y[feature_dim] == sz_x[feature_dim] "Feature dimension mismatch"
+
+    perm = (feature_dim, dims, batch_dim)
+    A = permutedims(ComplexF32.(x), perm)
+    B = permutedims(ComplexF32.(y), perm)
+    return _similarity_outer_canonical_complex(A, B)
+end
+
+"""
+    similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
+
+2-D complex variant: wraps as 3-D with a singleton batch axis, delegates to
+the 3-D path, then squeezes and transposes to match the CPU real-valued 2-D
+convention `(N, M)` — see the `AbstractArray{<:Real,2}` method of
+[`similarity_outer`](@ref).
+"""
+function similarity_outer(x::AbstractArray{<:Complex,2}, y::AbstractArray{<:Complex,2}; dims=2)
+    dims in (1, 2) || error("dims must be 1 or 2 for 2D arrays")
+    x3 = reshape(x, size(x, 1), size(x, 2), 1)
+    y3 = reshape(y, size(y, 1), size(y, 2), 1)
+    out3 = similarity_outer(x3, y3; dims=dims)
+    return permutedims(dropdims(out3, dims=3), (2, 1))
+end
+
+"""
+    _similarity_outer_canonical_complex(A, B) -> AbstractArray{Float32,3}
+
+Vectorized pairwise interference similarity for complex inputs in canonical
+layout: `A :: (D, M, X)` and `B :: (D, N, X)`, returning `(M, N, X)` with
+
+    sim[m,n,x] = (1/D) * Σ_d (½ |A[d,m,x] + B[d,n,x]|² − 1)
+
+Used as the shared compute kernel for both the GPU 3-D `similarity_outer`
+dispatch (after permutation) and the rrule that gives it a memory-efficient
+backward pass.
+
+The clamp `max(|A+B|², 4)` from the original GPU formulation is dropped
+because every production caller passes unit-modulus inputs (output of
+`angle_to_complex`), for which `|A+B|² ≤ 4` holds exactly. Removing it
+preserves the bilinear structure required for a closed-form backward.
+
+# Memory layout
+
+The defining sum is decomposed before any `(D, M, N, X)` tensor is
+materialized:
+
+    ½|A_d+B_d|² − 1
+       = ½(|A_d|² + |B_d|²) + (Ar_d Br_d + Ai_d Bi_d) − 1
+
+Summing over `d`:
+
+    sim[m,n,x] = (1/D) [ ½·a2[m,x] + ½·b2[n,x] + cross[m,n,x] ] − 1
+
+with `a2 = Σ_d |A|²` shape `(M, X)`, `b2 = Σ_d |B|²` shape `(N, X)`, and
+`cross = Σ_d (Ar Br + Ai Bi)` shape `(M, N, X)` computed as two batched
+real GEMMs via `NNlib.batched_mul`. Forward peak transient is
+`O(D·max(M,N)·X + M·N·X)` instead of `O(D·M·N·X)`. At
+`D=64, M=N=784, X=32` this drops the broadcast-time peak from ~19 GiB
+to ~270 MiB (≈ 70× reduction), which matters for end-to-end attention on
+long sequences. The closed-form rrule below remains correct since it is
+derived from the math, not the implementation.
+"""
+function _similarity_outer_canonical_complex(A::AbstractArray{ComplexF32,3},
+                                             B::AbstractArray{ComplexF32,3})
+    D, M, X = size(A)
+    N = size(B, 2)
+    @assert size(B, 1) == D "feature dim mismatch: size(A,1)=$D vs size(B,1)=$(size(B,1))"
+    @assert size(B, 3) == X "batch dim mismatch: size(A,3)=$X vs size(B,3)=$(size(B,3))"
+    invD = inv(Float32(D))
+
+    Ar = real.(A); Ai = imag.(A)        # (D, M, X) Float32 each
+    Br = real.(B); Bi = imag.(B)        # (D, N, X) Float32 each
+
+    a2 = reshape(sum(Ar .^ 2 .+ Ai .^ 2; dims=1), M, 1, X)   # (M, 1, X)
+    b2 = reshape(sum(Br .^ 2 .+ Bi .^ 2; dims=1), 1, N, X)   # (1, N, X)
+
+    Ar_T = permutedims(Ar, (2, 1, 3))   # (M, D, X)
+    Ai_T = permutedims(Ai, (2, 1, 3))   # (M, D, X)
+    cross = batched_mul(Ar_T, Br) .+ batched_mul(Ai_T, Bi)   # (M, N, X)
+
+    return invD .* (0.5f0 .* (a2 .+ b2) .+ cross) .- 1.0f0
+end
+
+"""
+    rrule(_similarity_outer_canonical_complex, A, B)
+
+Closed-form pullback that avoids materializing the `(D, M, N, X)`
+intermediates the broadcast chain would otherwise pin in the tape.
+
+Given output cotangent `ḡ :: (M, N, X)`:
+
+    dA[d,m,x] = (1/D) [ A[d,m,x] · Σ_n ḡ[m,n,x]  +  Σ_n B[d,n,x] · ḡ[m,n,x] ]
+    dB[d,n,x] = (1/D) [ B[d,n,x] · Σ_m ḡ[m,n,x]  +  Σ_m A[d,m,x] · ḡ[m,n,x] ]
+
+Each contraction is one batched complex GEMM. Saved tape is just `A` and
+`B` (the function inputs). Memory ratio versus the broadcast-traced
+backward is ≈ `(M+N) / (k · M · N)`; for `M=N=L` and ~5 saved
+intermediates this is `4/(5L)` (≈ 1/160 at `L = 128`).
+"""
+function ChainRulesCore.rrule(::typeof(_similarity_outer_canonical_complex),
+                              A::AbstractArray{ComplexF32,3},
+                              B::AbstractArray{ComplexF32,3})
+    out = _similarity_outer_canonical_complex(A, B)
+    D, M, X = size(A)
+    N = size(B, 2)
+    invD = inv(Float32(D))
+
+    function _similarity_outer_canonical_complex_pullback(ḡ_)
+        ḡ = unthunk(ḡ_)
+        # Lift ḡ to ComplexF32 once so batched_mul can contract against the
+        # complex inputs; the (M,N,X) transient is freed at the end of bwd.
+        ḡc = ComplexF32.(ḡ)
+
+        g_row = reshape(sum(ḡ, dims=2), 1, M, X)   # Σ_n ḡ
+        g_col = reshape(sum(ḡ, dims=1), 1, N, X)   # Σ_m ḡ
+
+        # Σ_n B[d,n,x] · ḡ[m,n,x]  → (D, M, X)
+        AB_term = batched_mul(B, permutedims(ḡc, (2, 1, 3)))
+        # Σ_m A[d,m,x] · ḡ[m,n,x]  → (D, N, X)
+        BA_term = batched_mul(A, ḡc)
+
+        dA = invD .* (A .* g_row .+ AB_term)
+        dB = invD .* (B .* g_col .+ BA_term)
+        return (NoTangent(), dA, dB)
+    end
+    return out, _similarity_outer_canonical_complex_pullback
 end
 
 #Note - additional definitions for similarity_outer included in gpu.jl
+
+"""
+    similarity_outer_heads(q, k) -> AbstractArray{Float32}
+
+Head-axis pairwise Fourier-HRR similarity for the local attention layers
+(`PhasorLSA`, `PhasorLCA`). Computes interference-based similarity scores
+between phase vectors of length `D_h`, contracting only the per-head
+channel axis, with the time and batch axes broadcast through. See
+`docs/local_attention_derivation.tex` (eqs. lsa-score, lca-score) for the
+formal definition.
+
+# Methods
+
+## LSA: `(D_h, H, L, B) × (D_h, H, L, B) → (H, H, L, B)`
+
+`s[h, h', l, b] = sim(q[:, h, l, b], k[:, h', l, b])`. The score is the
+Fourier-HRR similarity restricted to the per-head subspace.
+
+## LCA: `(D_h, H, A) × (D_h, H, L, B) → (A, H, L, B)`
+
+`s[a, h, l, b] = sim(q[:, h, a], k[:, h, l, b])` where `q` is a
+time-invariant anchor bank of `A` patterns per head. Implemented as
+`H` independent calls to [`_similarity_outer_canonical_complex`](@ref)
+(one per head) followed by a stack-and-permute.
+
+Reuses `_similarity_outer_canonical_complex` and inherits its closed-form
+rrule, so this primitive is end-to-end differentiable without manual rule
+definitions.
+"""
+function similarity_outer_heads(q::AbstractArray{<:Phase, 4},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, L, B = size(q)
+    @assert size(k) == size(q) "shape mismatch in LSA similarity_outer_heads: q=$(size(q)), k=$(size(k))"
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, L, B)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    Aq = reshape(qc, Dh, H, L * B)                  # (Dh, H, L*B) canonical layout
+    Bk = reshape(kc, Dh, H, L * B)
+
+    s = _similarity_outer_canonical_complex(Aq, Bk) # (H, H, L*B)
+    return reshape(s, H, H, L, B)
+end
+
+function similarity_outer_heads(q::AbstractArray{<:Phase, 3},
+                                k::AbstractArray{<:Phase, 4})
+    Dh, H, A = size(q)
+    @assert size(k, 1) == Dh "channel-per-head mismatch: q has Dh=$Dh, k has $(size(k,1))"
+    @assert size(k, 2) == H  "head count mismatch: q has H=$H, k has $(size(k,2))"
+    L, B = size(k, 3), size(k, 4)
+
+    qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, A)
+    kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
+
+    # Per-head independent (A, L*B) scores: each h gets its own canonical call.
+    # map (not comprehension) keeps Zygote happy and works on GPU CuArrays.
+    per_head = map(1:H) do h
+        Aq_h = reshape(qc[:, h, :],       Dh, A,     1)   # (Dh, A,   1)
+        Bk_h = reshape(kc[:, h, :, :],    Dh, L * B, 1)   # (Dh, L*B, 1)
+        s = _similarity_outer_canonical_complex(Aq_h, Bk_h)  # (A, L*B, 1)
+        reshape(s, A, L, B)                                  # (A, L, B)
+    end
+
+    # Stack on a new trailing axis → (A, L, B, H); permute → (A, H, L, B).
+    stacked = stack(per_head)                       # (A, L, B, H)
+    return permutedims(stacked, (1, 4, 2, 3))       # (A, H, L, B)
+end
 
 """
     v_unbind(x::AbstractArray, y::AbstractArray) -> AbstractArray
@@ -449,4 +721,22 @@ end
 
 function v_unbind(x::SpikingTypes, y::SpikingTypes; kwargs...)
     return v_bind(x, y, unbind=true; kwargs...)
+end
+
+"""
+    codebook_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1) -> AbstractArray
+
+Compute loss for codebook-based classification from similarity scores.
+
+Wraps [`similarity_loss`](@ref) for use with [`Codebook`](@ref) layer outputs.
+
+# Arguments
+- `similarities`: Similarity scores from codebook (e.g. output of `similarity_outer`)
+- `truth`: Target values (one-hot encoded)
+- `dim`: Dimension along which to compute loss (default: 1)
+
+Returns per-sample loss values.
+"""
+function codebook_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1)
+    return similarity_loss(similarities, truth; dim=dim)
 end
