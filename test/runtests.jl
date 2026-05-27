@@ -1,5 +1,17 @@
 using Lux, OneHotArrays, Statistics, PhasorNetworks, Test
 using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
+
+# Try to bring in oneAPI to activate the OneAPI extension. The package is
+# in [deps] so always installed, but its Level Zero internals only support
+# Linux x86_64 — on aarch64 (e.g. DGX Spark) the import partially fails.
+# Catch + flag so the GPU test gate below can ignore oneAPI on unsupported
+# platforms while still using it on Aurora.
+const ONEAPI_AVAILABLE = try
+    @eval using oneAPI
+    oneAPI.functional()
+catch
+    false
+end
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
@@ -83,21 +95,25 @@ include("test_ep.jl")
     ep_tests()
     #spiking_operations_tests()
 
-    if CUDA.functional()
-        @info "CUDA device detected and functional. Running CUDA tests..."
-        @testset "CUDA Specific Tests" begin
+    # Backend-agnostic GPU test gate. `gpu_device()` auto-selects whichever
+    # backend has functional hardware (CUDA on NVIDIA, oneAPI on Intel via
+    # the loaded extension). The test bodies route through `gpu_device()`
+    # and `AbstractGPUArray` dispatch, so the same suite runs on either.
+    if CUDA.functional() || ONEAPI_AVAILABLE
+        dev = gpu_device()
+        @info "GPU detected: $(typeof(dev)). Running GPU tests..."
+        @testset "GPU Specific Tests" begin
             try
                 include("test_cuda.jl")
                 cuda_core_tests() # Call the main test function from test_cuda.jl
                 ssm_gpu_tests()
                 local_attention_gpu_tests()
             catch e
-                @error "Error during CUDA tests:" exception=(e, catch_backtrace())
-                @test false # Explicitly fail CUDA test section on error
+                @error "Error during GPU tests:" exception=(e, catch_backtrace())
+                @test false # Explicitly fail GPU test section on error
             end
         end
     else
-        @info "No functional CUDA device detected or CUDA.jl is not functional. Skipping CUDA tests."
-        # Optionally, explicitly mark as skipped if your test framework supports it.
+        @info "No functional GPU detected (neither CUDA nor oneAPI). Skipping GPU tests."
     end
 end
