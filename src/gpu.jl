@@ -41,10 +41,36 @@ end
 
 # Scalar helper functions (plain Julia math, no GPU kernel dependency)
 
+"""
+    gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
+
+GPU-optimized version of the Gaussian kernel used in spike current calculations.
+All inputs are Float32 for CUDA compatibility.
+
+# Arguments
+- `x::Float32`: Time of the spike
+- `t::Float32`: Current time
+- `t_sigma::Float32`: Width of the Gaussian kernel
+
+Returns the spike current value at time t for a spike at time x.
+"""
 function gaussian_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     return exp(-1.0f0 * ((t - x) / (2.0f0 * t_sigma))^2.0f0)
 end
 
+"""
+    raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32) -> Float32
+
+GPU-optimized version of the raised cosine kernel used in spike current calculations.
+Provides smoother gradients and better numerical stability than Gaussian kernels.
+
+# Arguments
+- `x::Float32`: Time of the spike
+- `t::Float32`: Current time
+- `t_sigma::Float32`: Width parameter (support is ±2*t_sigma)
+
+Returns the spike current value at time t for a spike at time x.
+"""
 function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     dt = t - x
     half_width = 2.0f0 * t_sigma
@@ -55,6 +81,12 @@ function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     end
 end
 
+"""
+    periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32) -> Float32
+
+GPU-optimized periodic raised cosine kernel for oscillatory systems.
+Computes the shortest distance on a periodic time domain before applying the raised cosine.
+"""
 function periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32, t_period::Float32)
     dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
     half_width = 2.0f0 * t_sigma
