@@ -14,7 +14,7 @@ end
     dt = t - x
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        output[i] = 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+        output[i] = 0.5f0 * (1.0f0 + cos(pi_f32 * dt / half_width))
     else
         output[i] = 0.0f0
     end
@@ -26,7 +26,7 @@ end
     dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        output[i] = 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+        output[i] = 0.5f0 * (1.0f0 + cos(pi_f32 * dt / half_width))
     else
         output[i] = 0.0f0
     end
@@ -49,7 +49,7 @@ function raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Float32)
     dt = t - x
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        return 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+        return 0.5f0 * (1.0f0 + cos(pi_f32 * dt / half_width))
     else
         return 0.0f0
     end
@@ -59,7 +59,7 @@ function periodic_raised_cosine_kernel_gpu(x::Float32, t::Float32, t_sigma::Floa
     dt = mod(t - x + t_period/2.0f0, t_period) - t_period/2.0f0
     half_width = 2.0f0 * t_sigma
     if abs(dt) <= half_width
-        return 0.5f0 * (1.0f0 + cos(3.1415927f0 * dt / half_width))
+        return 0.5f0 * (1.0f0 + cos(pi_f32 * dt / half_width))
     else
         return 0.0f0
     end
