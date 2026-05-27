@@ -12,20 +12,55 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 - `gc_interval::Int`: GC every N batches. 0 = every batch (default for ODE workloads). Set higher (e.g. 50) for SSM convolution workloads. (default: 0)
 - `batchsize::Int`: Number of samples per batch during training (default: 128)
 - `epochs::Int`: Number of training epochs (default: 10)
-- `use_cuda::Bool`: Whether to use GPU acceleration if available (default: true)
+- `backend::Symbol`: GPU backend to use (`:cuda`, `:cpu`, `:oneapi`). Default `:cuda`.
 - `rng::Xoshiro`: Random number generator for reproducibility (default: Xoshiro(42))
 """
-@kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
-    lr::Float64 = 0.0003       ## learning rate
-    lr_ssm::Float64 = 0.0      ## SSM dynamics learning rate (0 = use lr)
-    weight_decay::Float64 = 0.0 ## weight decay (weights only, not SSM params)
-    cosine_schedule::Bool = false ## cosine LR annealing
-    lr_min::Float64 = 1e-6     ## minimum LR for cosine schedule
-    gc_interval::Int = 0       ## GC every N batches (0 = every batch)
-    batchsize::Int = 128    ## batch size
-    epochs::Int = 10        ## number of epochs
-    use_cuda::Bool = true   ## use gpu (if cuda available)
-    rng::Xoshiro = Xoshiro(42) ## global rng
+mutable struct Args
+    lr::Float64
+    lr_ssm::Float64
+    weight_decay::Float64
+    cosine_schedule::Bool
+    lr_min::Float64
+    gc_interval::Int
+    batchsize::Int
+    epochs::Int
+    backend::Symbol
+    rng::Xoshiro
+end
+
+function Args(; lr::Float64 = 0.0003,
+               lr_ssm::Float64 = 0.0,
+               weight_decay::Float64 = 0.0,
+               cosine_schedule::Bool = false,
+               lr_min::Float64 = 1e-6,
+               gc_interval::Int = 0,
+               batchsize::Int = 128,
+               epochs::Int = 10,
+               backend::Symbol = :cuda,
+               use_cuda::Union{Bool, Nothing} = nothing,
+               rng::Xoshiro = Xoshiro(42))
+    if use_cuda !== nothing
+        Base.depwarn("Args(use_cuda=...) is deprecated, use Args(backend=:cuda/:cpu) instead", :Args)
+        backend = use_cuda ? :cuda : :cpu
+    end
+    return Args(lr, lr_ssm, weight_decay, cosine_schedule, lr_min,
+                gc_interval, batchsize, epochs, backend, rng)
+end
+
+# Backward compatibility: args.use_cuda still works as a read/write
+function Base.getproperty(a::Args, s::Symbol)
+    if s === :use_cuda
+        return getfield(a, :backend) == :cuda
+    end
+    return getfield(a, s)
+end
+
+function Base.setproperty!(a::Args, s::Symbol, v)
+    if s === :use_cuda
+        setfield!(a, :backend, v ? :cuda : :cpu)
+    else
+        setfield!(a, s, v)
+    end
 end
 
 """
@@ -67,13 +102,13 @@ end
 """
     SpikeTrainGPU{N}
 
-GPU-accelerated version of SpikeTrain, optimized for CUDA operations.
+GPU-accelerated version of SpikeTrain, supporting any GPU backend via AbstractGPUArray.
 Provides the same functionality as SpikeTrain but with additional fields for efficient GPU computation.
 
 # Fields
-- `indices::CuArray`: GPU array of spike locations in N-dimensional space
-- `linear_indices::CuArray`: Linearized indices for efficient GPU memory access
-- `times::CuArray{<:Real}`: GPU array of spike timings in seconds
+- `indices::AbstractGPUArray`: GPU array of spike locations in N-dimensional space
+- `linear_indices::AbstractGPUArray`: Linearized indices for efficient GPU memory access
+- `times::AbstractGPUArray{<:Real}`: GPU array of spike timings in seconds
 - `shape::Tuple`: Dimensions of the spike space
 - `linear_shape::Int`: Total size of the flattened spike space
 - `offset::Float32`: Time offset of the spike train
@@ -85,9 +120,9 @@ Can be converted to/from CPU SpikeTrain using Base.convert.
 See also: [`SpikeTrain`](@ref)
 """
 struct SpikeTrainGPU{N}
-    indices::CuArray
-    linear_indices::CuArray
-    times::CuArray{<:Real}
+    indices::AbstractGPUArray
+    linear_indices::AbstractGPUArray
+    times::AbstractGPUArray{<:Real}
     shape::Tuple
     linear_shape::Int
     offset::Float32
@@ -97,12 +132,12 @@ struct SpikeTrainGPU{N}
                             shape::Tuple,
                             offset::Real)
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
-        cu_times_f32 = cu(times_f32)
+        gpu_times_f32 = gdev(times_f32)
         indices = cdev(indices)
-        linear_indices = CuArray(LinearIndices(shape)[indices])
-        return new{length(shape)}(cu(indices),
+        linear_indices = gdev(LinearIndices(shape)[indices])
+        return new{length(shape)}(gdev(indices),
                 linear_indices,
-                cu_times_f32,
+                gpu_times_f32,
                 shape,
                 reduce(*, shape),
                 Float32(offset))

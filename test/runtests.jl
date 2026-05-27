@@ -1,5 +1,26 @@
 using Lux, OneHotArrays, Statistics, PhasorNetworks, Test
 using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
+
+# Optional: load oneAPI if it's available in the active project's load path.
+# oneAPI is a [weakdeps] entry — not pulled in by default. To run the GPU
+# test section against an Intel device, add it to your project:
+#
+#     Pkg.activate("."); Pkg.add("oneAPI")
+#     # then: julia --project=. -e 'using Pkg; Pkg.test("PhasorNetworks")'
+#
+# The try/catch handles:
+#   - oneAPI not installed → ImportError caught, ONEAPI_AVAILABLE = false
+#   - oneAPI installed but no Intel hardware (e.g. aarch64) → __init__
+#     raises, caught, ONEAPI_AVAILABLE = false
+# Cannot handle SIGABRT from Aurora's L0 driver during zeInit — that
+# kills the process. If you hit that, debug `using oneAPI` outside the
+# test suite first.
+const ONEAPI_AVAILABLE = try
+    @eval using oneAPI
+    oneAPI.functional()
+catch
+    false
+end
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
@@ -49,7 +70,7 @@ tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
     gc_interval::Int = 0     ## GC every N batches (0 = every batch)
     batchsize::Int = 256    ## batch size
     epochs::Int = 10        ## number of epochs
-    use_cuda::Bool = false   ## use gpu (if cuda available)
+    backend::Symbol = :cpu   ## GPU backend (:cuda, :cpu, :oneapi)
     rng::Xoshiro = Xoshiro(42) ## global rng
 end
 
@@ -68,6 +89,8 @@ include("test_ep.jl")
 #include("PROPOSED_spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
+    # Backend abstraction tests — self-contained @testset, just include it.
+    include("test_backend.jl")
     domain_tests()
     vsa_tests()
     network_tests()
@@ -81,21 +104,25 @@ include("test_ep.jl")
     ep_tests()
     #spiking_operations_tests()
 
-    if CUDA.functional()
-        @info "CUDA device detected and functional. Running CUDA tests..."
-        @testset "CUDA Specific Tests" begin
+    # Backend-agnostic GPU test gate. `gpu_device()` auto-selects whichever
+    # backend has functional hardware (CUDA on NVIDIA, oneAPI on Intel via
+    # the loaded extension). The test bodies route through `gpu_device()`
+    # and `AbstractGPUArray` dispatch, so the same suite runs on either.
+    if CUDA.functional() || ONEAPI_AVAILABLE
+        dev = gpu_device()
+        @info "GPU detected: $(typeof(dev)). Running GPU tests..."
+        @testset "GPU Specific Tests" begin
             try
                 include("test_cuda.jl")
                 cuda_core_tests() # Call the main test function from test_cuda.jl
                 ssm_gpu_tests()
                 local_attention_gpu_tests()
             catch e
-                @error "Error during CUDA tests:" exception=(e, catch_backtrace())
-                @test false # Explicitly fail CUDA test section on error
+                @error "Error during GPU tests:" exception=(e, catch_backtrace())
+                @test false # Explicitly fail GPU test section on error
             end
         end
     else
-        @info "No functional CUDA device detected or CUDA.jl is not functional. Skipping CUDA tests."
-        # Optionally, explicitly mark as skipped if your test framework supports it.
+        @info "No functional GPU detected (neither CUDA nor oneAPI). Skipping GPU tests."
     end
 end

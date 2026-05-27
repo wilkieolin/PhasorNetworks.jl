@@ -17,3 +17,5 @@ coverage
 *.png
 ablation_results/
 test/scratch/*
+*.aux
+*.log

@@ -501,7 +501,7 @@ function ssm_gpu_tests()
         end
 
         @testset "psk_encode on GPU" begin
-            images = CUDA.rand(Float32, 28, 28, 4)
+            images = gpu_device()(rand(Float32, 28, 28, 4))  # backend-agnostic
             x = psk_encode(images)
             @test size(x) == (28, 28, 4)
             @test all(abs.(abs.(Array(x)) .- 1f0) .< 1f-5)

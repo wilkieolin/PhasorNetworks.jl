@@ -94,6 +94,9 @@ ssm_extract_phases,
 sample_phases_at_periods,
 reconstruct_from_current,
 
+#backend
+select_device,
+
 #network
 attend,
 variance_scaling,
@@ -168,6 +171,7 @@ fashion_mnist_data
 include("imports.jl")
 include("constants.jl")
 include("types.jl")
+include("backend.jl")
 include("domains.jl")
 include("activations.jl")
 include("gpu.jl")
