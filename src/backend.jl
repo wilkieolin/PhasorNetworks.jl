@@ -16,26 +16,39 @@ Return a Lux device function for the given backend symbol.
 # Supported backends
 - `:cuda` — CUDA GPU (requires CUDA.jl, default)
 - `:cpu` — CPU fallback
-- `:oneapi` — Intel GPU (requires oneAPI.jl extension)
+- `:oneapi` — Intel GPU (provided by `PhasorNetworksOneAPIExt`; requires
+  `using oneAPI`)
 
 # Returns
 A device function compatible with Lux's `gpu_device()` / `cpu_device()`.
+
+# Implementation
+Dispatches through `Val(backend)` so package extensions can register
+new backends by adding methods on `Val{:<name>}` rather than
+overwriting the `::Symbol` entry point (which Julia's strict
+precompile checks forbid). The package ships the `:cuda` and `:cpu`
+methods; `PhasorNetworksOneAPIExt` adds `:oneapi`.
 """
-function select_device(backend::Symbol)
-    if backend == :cuda
-        if CUDA.functional()
-            return gpu_device()
-        else
-            @warn "CUDA requested but not functional, falling back to CPU"
-            return cpu_device()
-        end
-    elseif backend == :cpu
-        return cpu_device()
-    elseif backend == :oneapi
-        error("oneAPI backend requires `using oneAPI` — load the package to activate the extension")
+select_device(backend::Symbol) = select_device(Val(backend))
+
+function select_device(::Val{:cuda})
+    if CUDA.functional()
+        return gpu_device()
     else
-        error("Unknown backend: $backend. Supported: :cuda, :cpu, :oneapi")
+        @warn "CUDA requested but not functional, falling back to CPU"
+        return cpu_device()
     end
+end
+
+select_device(::Val{:cpu}) = cpu_device()
+
+# Fallback for unknown / unloaded backends. `:oneapi` lands here unless
+# `PhasorNetworksOneAPIExt` has been activated by `using oneAPI`.
+function select_device(::Val{B}) where {B}
+    if B === :oneapi
+        error("oneAPI backend requires `using oneAPI` — load the package to activate the extension")
+    end
+    error("Unknown backend: :$B. Supported: :cuda, :cpu, :oneapi")
 end
 
 """
