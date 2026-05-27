@@ -1,11 +1,20 @@
 using Lux, OneHotArrays, Statistics, PhasorNetworks, Test
 using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
 
-# Try to bring in oneAPI to activate the OneAPI extension. The package is
-# in [deps] so always installed, but its Level Zero internals only support
-# Linux x86_64 — on aarch64 (e.g. DGX Spark) the import partially fails.
-# Catch + flag so the GPU test gate below can ignore oneAPI on unsupported
-# platforms while still using it on Aurora.
+# Optional: load oneAPI if it's available in the active project's load path.
+# oneAPI is a [weakdeps] entry — not pulled in by default. To run the GPU
+# test section against an Intel device, add it to your project:
+#
+#     Pkg.activate("."); Pkg.add("oneAPI")
+#     # then: julia --project=. -e 'using Pkg; Pkg.test("PhasorNetworks")'
+#
+# The try/catch handles:
+#   - oneAPI not installed → ImportError caught, ONEAPI_AVAILABLE = false
+#   - oneAPI installed but no Intel hardware (e.g. aarch64) → __init__
+#     raises, caught, ONEAPI_AVAILABLE = false
+# Cannot handle SIGABRT from Aurora's L0 driver during zeInit — that
+# kills the process. If you hit that, debug `using oneAPI` outside the
+# test suite first.
 const ONEAPI_AVAILABLE = try
     @eval using oneAPI
     oneAPI.functional()
