@@ -279,6 +279,13 @@ Controls neuron dynamics, spike generation, and numerical integration.
 - `spike_kernel::Union{Symbol, Function}`: Spike kernel function (e.g., :gaussian) or custom function
 - `solver`: ODE solver for neural dynamics (default Tsit5())
 - `solver_args::Dict`: Arguments for the ODE solver
+- `warmup_periods::Int`: Per-layer cycles dropped from the output spike train,
+  with remaining spikes shifted back by `warmup_periods * t_period`. Lets each
+  layer absorb its own transient locally instead of forcing the whole network
+  to run long enough for everything to settle end-to-end. **NOTE**: this does
+  not simulate true end-to-end settling — each layer is warmed up in isolation,
+  and any *cross-layer* feedback dynamics will not be captured. For a pure
+  feedforward chain (the typical case), it's a sound speedup. Default 0.
 
 Used in both simulation and training of spiking neural networks.
 """
@@ -292,9 +299,10 @@ struct SpikingArgs
     spike_kernel::Union{Symbol, Function}
     solver # Solver type can be kept generic
     solver_args::Dict
+    warmup_periods::Int
 end
 
-function SpikingArgs(; leakage::Real = -0.2f0, 
+function SpikingArgs(; leakage::Real = -0.2f0,
                     t_period::Real = 1.0f0,
                     t_window::Real = 0.01f0,
                     spk_scale::Real = 1.0f0,
@@ -305,8 +313,9 @@ function SpikingArgs(; leakage::Real = -0.2f0,
                     solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
                                     :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                                    :save_start => true))
-                    
+                                    :save_start => true),
+                    warmup_periods::Integer = 0)
+
     return SpikingArgs(Float32(leakage),
             Float32(t_period),
             Float32(t_window),
@@ -315,7 +324,8 @@ function SpikingArgs(; leakage::Real = -0.2f0,
             Float32(threshold),
             spike_kernel,
             solver,
-            solver_args,)
+            solver_args,
+            Int(warmup_periods))
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)

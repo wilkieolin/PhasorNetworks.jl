@@ -543,7 +543,15 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return next_call, state
     else # :spiking
         train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
-        next_call = SpikingCall(train, spk_args, tspan)
+        # If warmup trimmed/shifted the spike train, the downstream layer's
+        # tspan must shrink by the same amount so its ODE integration window
+        # matches the train's effective span. Otherwise the downstream layer
+        # would integrate over a span where the input is empty after t = T·(L−w).
+        w = spk_args.warmup_periods
+        next_tspan = w > 0 ?
+            (tspan[1], tspan[2] - Float32(w) * spk_args.t_period) :
+            tspan
+        next_call = SpikingCall(train, spk_args, next_tspan)
         return next_call, state
     end
 end

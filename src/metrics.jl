@@ -128,6 +128,44 @@ function cycle_correlation(static_phases::AbstractMatrix{<:Real}, dynamic_phases
 end
 
 """
+    cycle_arc_error(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3}) -> Vector{<:Real}
+
+Worst-case per-cycle circular distance between a static reference and a
+dynamic (cycled) phase trajectory.
+
+For each cycle `i`, computes `maximum(abs(arc_error(static - dynamic[:,:,i])))`
+where `arc_error(δ) = sin(π·δ)`. The result is in `[0, 1]`: 0 means every
+element is exactly aligned (or antipodal — `arc_error` is binding-invariant);
+1 means at least one element sits at quadrature (90° off). NaN entries in
+the dynamic trace (silent cycles) are filtered before the reduction; a
+cycle with no valid entries reports `NaN`.
+
+Use this in place of `cycle_correlation` when you want to track the worst
+neuron's angular drift rather than a population correlation that's
+insensitive to circular wrap.
+
+# Arguments
+- `static_phases`: Reference phase matrix (2D), values in `[-1, 1]` (units of π)
+- `dynamic_phases`: Time-varying phase matrices (3D, cycles as third dim)
+
+# Returns
+Vector of max-abs arc errors, one per cycle.
+
+See also: [`arc_error`](@ref), [`cycle_correlation`](@ref).
+"""
+function cycle_arc_error(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractArray{<:Real,3})
+    n_cycles = axes(dynamic_phases, 3)
+    s = vec(static_phases)
+    err_vals = map(n_cycles) do i
+        δ = s .- vec(dynamic_phases[:,:,i])
+        e = abs.(arc_error(δ))
+        valid = .!isnan.(e)
+        sum(valid) == 0 ? convert(eltype(e), NaN) : maximum(e[valid])
+    end
+    return err_vals
+end
+
+"""
     cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3}) -> Vector{<:Real}
 
 Calculate the sparsity (proportion of NaN values) for each cycle of dynamic phases.

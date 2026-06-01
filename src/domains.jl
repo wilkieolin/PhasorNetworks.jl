@@ -1283,8 +1283,22 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
 
     #sample the potential at the end of each cycle
     u = solution_to_potential(sol, cycles)
+
+    # Per-layer warmup: drop the first `warmup_periods` cycle samples so the
+    # transient phase of this layer's ODE never reaches the output spike
+    # train. Remaining spikes are shifted back by the warmup duration in
+    # `_apply_warmup_shift!` below, so downstream layers see a spike train
+    # that appears to begin at t=0. See `SpikingArgs` docstring for the
+    # caveat (no end-to-end settling, only per-layer).
+    w = spk_args.warmup_periods
+    if w > 0
+        @assert w < length(cycles) "warmup_periods=$w must be < total cycles=$(length(cycles)); increase tspan or lower warmup."
+        cycles = cycles[w+1:end]
+        u = selectdim(u, ndims(u), (w+1):size(u, ndims(u)))
+    end
+
     train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset, bias=bias)
-    return train
+    return _apply_warmup_shift(train, spk_args)
 end
 
 """
@@ -1298,8 +1312,31 @@ function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector
     #sample the potential at the end of each cycle
     u = u[inds] |> stack
     ts = t[inds]
+
+    # Per-layer warmup — see comment in the ODESolution overload above.
+    w = spk_args.warmup_periods
+    if w > 0
+        @assert w < length(ts) "warmup_periods=$w must be < total cycles=$(length(ts)); increase tspan or lower warmup."
+        ts = ts[w+1:end]
+        u = selectdim(u, ndims(u), (w+1):size(u, ndims(u)))
+    end
+
     train = solution_to_train(u, ts, spk_args=spk_args, offset=offset, bias=bias)
-    return train
+    return _apply_warmup_shift(train, spk_args)
+end
+
+# Shift spike times back by `warmup_periods * t_period` so the trimmed
+# spike train appears to start at t=0. The downstream layer's tspan is
+# updated separately in `(::PhasorDense)(::CurrentCall, ...)` so its
+# ODE integration window matches the shifted train.
+function _apply_warmup_shift(train::SpikeTrain, spk_args::SpikingArgs)
+    w = spk_args.warmup_periods
+    if w == 0
+        return train
+    end
+    shift = Float32(w) * spk_args.t_period
+    new_times = train.times .- shift
+    return SpikeTrain(train.indices, new_times, train.shape, train.offset)
 end
 
 """
