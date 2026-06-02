@@ -1,5 +1,16 @@
 # Holomorphicity Requirements for hEP: Empirical Analysis
 
+> **Module:** `src/hep.jl` &nbsp;|&nbsp; **Regime:** fully complex,
+> holomorphic &nbsp;|&nbsp; **Technique:** spatial Cauchy contour.
+>
+> Empirical appendix to [`phasor_hep_derivation.tex`](phasor_hep_derivation.tex).
+> Sibling status log: [`hep_development_summary.md`](hep_development_summary.md).
+> For the unit-circle (non-holomorphic) regime and the temporal
+> real-probe lock-in technique implemented as `LockinEP`, see
+> [`phasor_lockin_derivation.tex`](phasor_lockin_derivation.tex)
+> (canonical math) and [`phasor_ep_design.md`](phasor_ep_design.md)
+> (informal background).
+
 ## The Question
 
 Does the hEP cost function need to be holomorphic for accurate gradients?

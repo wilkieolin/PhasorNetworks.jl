@@ -1,9 +1,32 @@
 # Phasor EP — porting vanilla EP to phase-based networks
 
+> **Module:** `src/ep.jl` &nbsp;|&nbsp; **Regime:** unit-circle
+> (non-holomorphic; `unit_project` activation) &nbsp;|&nbsp;
+> **Techniques:** `StaticEP` (two-phase finite difference) and
+> `LockinEP` (temporal real-probe `β(t)=ε cos(ω_p t)` demodulated by
+> `e^{-iω_p t}`).
+>
+> This document covers the *non-holomorphic* phasor-EP regime. For
+> the **formal mathematical derivation** of the lock-in technique
+> described informally below, see
+> [`phasor_lockin_derivation.tex`](phasor_lockin_derivation.tex).
+> For the fully-complex holomorphic regime implemented in `src/hep.jl`
+> (energy with self-energy `½⟨z,Kz⟩`, spatial Cauchy contour
+> `β_n = r·e^{2πin/N}`, `holotanh` activation), see
+> [`phasor_hep_derivation.tex`](phasor_hep_derivation.tex) (canonical
+> math) and [`hep_development_summary.md`](hep_development_summary.md)
+> (status log).
+>
+> Terminology: in this codebase "lock-in" is reserved for the
+> **temporal real-probe** technique described in §"Temporal lock-in for
+> phasor EP" below (and rigorously in
+> `phasor_lockin_derivation.tex`) — never for the hEP spatial contour,
+> which is called the "Cauchy contour."
+
 This note sketches how vanilla equilibrium propagation (EP) can be adapted
 to phasor networks, sidestepping the holomorphic/meromorphic activation
 constraint that limits hEP. It is intended as design background for
-`demos/phasor_ep_demo.ipynb`, which implements the simplest version.
+`demos/phasor_ep_demo.ipynb` and `demos/lockin_demo.ipynb`.
 
 ## Why phasor EP
 
@@ -207,7 +230,14 @@ energy explicit just lets us also compute the EP nudge.
   but needs a Wirtinger derivative through the softmax. Should match
   what `hep_cost_xent_grad` already does in `src/hep.jl`.
 
-## Temporal Cauchy / lock-in detection for phasor EP
+## Temporal lock-in for phasor EP
+
+(Historically this section was titled "Temporal Cauchy / lock-in
+detection." In current vocabulary the spatial method is the *Cauchy
+contour* (covered in `phasor_hep_derivation.tex`), and the technique
+described below — a real-probe temporal modulation
+`β(t) = ε·cos(ω_p t)` followed by lock-in demodulation — is what is
+called *lock-in*, implemented as `LockinEP` in `src/ep.jl`.)
 
 ### Why spatial hEP doesn't directly transfer
 

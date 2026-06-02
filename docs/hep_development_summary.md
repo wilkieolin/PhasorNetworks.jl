@@ -1,5 +1,21 @@
 # Adapting Holomorphic Equilibrium Propagation to Phasor Networks
 
+> **Module:** `src/hep.jl` &nbsp;|&nbsp; **Regime:** fully complex,
+> holomorphic (no `unit_project`) &nbsp;|&nbsp; **Technique:** spatial
+> Cauchy contour `β_n = r·e^{2πin/N}`.
+>
+> Authoritative status log for the hEP implementation. The formal
+> derivation lives in [`phasor_hep_derivation.tex`](phasor_hep_derivation.tex);
+> the empirical study of cost-function holomorphicity is in
+> [`hep_holomorphicity_analysis.md`](hep_holomorphicity_analysis.md).
+> For the *non-holomorphic* (unit-circle) regime and the temporal
+> real-probe lock-in technique (`LockinEP`), see
+> [`phasor_lockin_derivation.tex`](phasor_lockin_derivation.tex)
+> (canonical math) and [`phasor_ep_design.md`](phasor_ep_design.md)
+> (informal design background). The term "lock-in" is reserved for
+> that temporal real-probe technique; the spatial method implemented
+> in `src/hep.jl` is the "Cauchy contour".
+
 ## Development Summary
 
 ### 1. The Starting Point
@@ -147,11 +163,13 @@ measuring the result's magnitude.
 
 ### 3. Current Status
 
-**Working**: With omega=0, SGD (lr=1.0), N=16 contour points:
+**Working** (as of the last verification recorded here):
+with omega=0, SGD (lr=1.0), N=16 contour points:
 - Gradient direction verified (cosine similarity 0.80-0.89 with FD)
 - Training loss drops from 0.876 to 0.685 (chance = 0.693)
 - Per-batch minima reach 0.594
-- 464 tests pass
+- Full test suite passes (run `julia --project=. -e 'using Pkg; Pkg.test()'`
+  to re-verify against current code).
 
 ### 4. Open Issues: Connecting to Oscillatory Dynamics
 

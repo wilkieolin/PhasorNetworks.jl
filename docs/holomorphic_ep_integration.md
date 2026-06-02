@@ -1,5 +1,33 @@
 # Holomorphic Equilibrium Propagation for PhasorNetworks.jl
 
+> **Status: DEPRECATED as a specification.**
+> This document was an early aspirational design and does not reflect
+> the current `src/hep.jl` implementation. In particular, its claim
+> that phasor networks are "automatically holomorphic" elides the
+> non-holomorphicity of the `unit_project` activation used by
+> `src/ep.jl`, and its energy-function notation is loose compared to
+> what was eventually implemented.
+>
+> **For the current canonical references, see:**
+>
+> - [`phasor_hep_derivation.tex`](phasor_hep_derivation.tex) — formal
+>   math derivation of holomorphic EP (the *Cauchy contour*
+>   technique) as implemented in `src/hep.jl`.
+> - [`hep_development_summary.md`](hep_development_summary.md) —
+>   implementation log: the 7 issues actually resolved (self-energy,
+>   ω=0, gradient sign, `HolomorphicReadout`, …).
+> - [`hep_holomorphicity_analysis.md`](hep_holomorphicity_analysis.md)
+>   — empirical study of cost-function holomorphicity.
+> - [`phasor_lockin_derivation.tex`](phasor_lockin_derivation.tex) +
+>   [`phasor_ep_design.md`](phasor_ep_design.md) — the *non-holomorphic*
+>   (unit-circle) regime and the temporal real-probe lock-in technique
+>   implemented as `LockinEP` in `src/ep.jl`.
+>
+> Terminology used in the current codebase: "Cauchy contour" for the
+> spatial complex-β method; "lock-in" reserved for the temporal
+> real-probe technique. The conceptual prose below remains useful as
+> introductory background but should not be taken as a spec.
+
 ## 0. Conceptual Introduction
 
 ### Backpropagation vs Equilibrium Propagation

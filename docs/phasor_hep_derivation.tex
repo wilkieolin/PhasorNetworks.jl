@@ -35,6 +35,25 @@ via Coupled Phasor Recurrences}
 \begin{document}
 \maketitle
 
+\begin{center}\fbox{\parbox{0.95\linewidth}{\small
+\textbf{Module:} \texttt{src/hep.jl} \quad
+\textbf{Regime:} fully complex, holomorphic (no \texttt{unit\_project}) \quad
+\textbf{Technique:} spatial Cauchy contour $\beta_n = r\,e^{2\pi\im n/N}$.\\[2pt]
+This document is the canonical math reference for holomorphic EP as
+implemented in \texttt{src/hep.jl}.  For per-issue status (the
+oscillator self-energy fix, gradient sign convention, $\omega=0$
+limitation, and \texttt{HolomorphicReadout} demodulation), see
+\texttt{docs/hep\_development\_summary.md}; for empirical findings on
+cost holomorphicity, see \texttt{docs/hep\_holomorphicity\_analysis.md}.
+The companion document \texttt{docs/phasor\_ep\_design.md} covers the
+\emph{non-holomorphic} (unit-circle) regime and the temporal real-probe
+lock-in technique implemented as \texttt{LockinEP} in \texttt{src/ep.jl};
+\texttt{docs/phasor\_lockin\_derivation.tex} is the corresponding
+formal derivation.  The term ``lock-in'' is reserved for the temporal
+real-probe technique; the method derived here is referred to as the
+``Cauchy contour.''
+}}\end{center}
+
 %======================================================================
 \section{Equilibrium Propagation: Standard Formulation}\label{sec:ep}
 %======================================================================
@@ -52,25 +71,45 @@ and the \emph{pre-activation}
   \qquad \ell=1,\dots,L.
 \end{equation}
 
-The Hopfield-style energy function is
+The Hopfield-style energy function, including the oscillator
+\emph{self-energy} that couples the EP dynamics to the underlying
+phasor SSM, is
 \begin{equation}\label{eq:energy}
   \Phi(\bm{z},\theta,\beta)
   \;=\;
   \sum_{\ell=1}^{L}
-    \bigl\langle
-      \sigma(\bm{a}_\ell),\;
-      \bm{z}_\ell
-    \bigr\rangle
+    \Bigl[
+      \tfrac{1}{2}\bigl\langle\bm{z}_\ell,\,K_\ell\bm{z}_\ell\bigr\rangle
+      \;+\;
+      \bigl\langle
+        \sigma(\bm{a}_\ell),\;
+        \bm{z}_\ell
+      \bigr\rangle
+    \Bigr]
   \;-\;
   \beta\,\mathcal{C}(\bm{z}_L,\,\bm{y}),
 \end{equation}
 where $\theta=\{W_\ell,\bm{b}_\ell\}$ collects all parameters,
 $\beta\in\C$ is the nudge strength,
-$\mathcal{C}$ is the task cost, $\bm{y}$ is the target, and
+$\mathcal{C}$ is the task cost, $\bm{y}$ is the target,
+$K_\ell=\diag(\bm{k}_\ell)$ with $k_{\ell,c}=\lambda_{\ell,c}+\im\omega_{\ell,c}$
+is the per-channel oscillator eigenvalue matrix (defined fully in
+Section~\ref{sec:phasor}), and
 $\langle\bm{u},\bm{v}\rangle = \sum_j u_j\,v_j$
 is the \textbf{complex bilinear form} (no conjugation).
 
-\begin{remark}
+\begin{remark}[Why the self-energy is essential]
+Without the self-energy term, the equilibrium condition is
+$\sigma(\bm{a}_\ell)+\text{feedback}=0$, which does \emph{not}
+match the steady state of the phasor ODE
+$\dd\bm{z}_\ell/\dd t = K_\ell\bm{z}_\ell+\bm{I}_\ell$.  Adding
+$\tfrac{1}{2}\langle\bm{z}_\ell,K_\ell\bm{z}_\ell\rangle$ makes
+$\partial\Phi/\partial\bm{z}_\ell = K_\ell\bm{z}_\ell+\sigma+\text{feedback}$,
+so the EP fixed point coincides with the SSM steady state and the
+EP gradient theorem applies.  This was Issue~5 in the development log.
+\end{remark}
+
+\begin{remark}[Bilinear vs.\ Hermitian]
 Using the bilinear form rather than the Hermitian inner product
 $\bm{u}^H\bm{v}$ is essential:  the Hermitian product involves
 complex conjugation and is not holomorphic.  The bilinear form keeps
@@ -94,6 +133,8 @@ Taking the holomorphic gradient $\partial\Phi/\partial\bm{z}_\ell$:
   \boxed{
   \frac{\partial\Phi}{\partial\bm{z}_\ell}
   \;=\;
+  \underbrace{K_\ell\,\bm{z}_\ell}_{\text{self-energy}}
+  \;+\;
   \underbrace{\sigma(\bm{a}_\ell)}_{\text{drive from below}}
   \;+\;
   \underbrace{
@@ -606,8 +647,9 @@ The complete training step:
     \item Compute
       $\bm{g}_n = \partial\Phi/\partial\theta|_{\bm{z}^*(\beta_n)}$.
   \end{enumerate}
-\item \textbf{Extract gradient}:
-  $\Delta\theta = \frac{1}{N}\sum_n \Real\!\bigl(\bm{g}_n\,
+\item \textbf{Extract gradient} (with sign flip for descent; see
+  Section~\ref{sec:impl}):
+  $\Delta\theta = -\frac{1}{N}\sum_n \Real\!\bigl(\bm{g}_n\,
   e^{-2\pi\im n/N}\bigr)$.
 \item \textbf{Update}: $\theta \leftarrow \theta - \eta\,\Delta\theta$.
 \end{enumerate}
@@ -783,6 +825,83 @@ propagation with the phasor SSM framework:
   is removed and $\beta=0$), confirming consistency with both limiting
   cases.
 \end{enumerate}
+
+%======================================================================
+\section{Implementation Notes (\texttt{src/hep.jl})}\label{sec:impl}
+%======================================================================
+
+This section records places where the implementation in
+\texttt{src/hep.jl} adds details or constraints beyond what the
+derivation above states.  The development history of each item is in
+\texttt{docs/hep\_development\_summary.md}.
+
+\subsection{Gradient sign}
+
+The Cauchy contour~\eqref{eq:fourier} extracts
+$\partial\Phi/\partial\theta$ around the contour, but the loss
+$\mathcal{L}=\mathcal{C}$ enters $\Phi$ with a minus sign
+($\Phi = E - \beta\mathcal{C}$).  In the implementation this means the
+returned gradient is the \emph{negative} of $\partial\mathcal{L}/\partial\theta$.
+The implementation therefore negates the contour sum before passing it
+to the optimizer (see \texttt{hep.jl} line~459):
+\[
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  -\,\frac{1}{N}\sum_{n=0}^{N-1}
+    \Real\!\bigl[
+      g_n\,e^{-2\pi\im n/N}
+    \bigr],
+  \qquad
+  g_n = \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(\beta_n)}.
+\]
+Verified against finite-difference gradients: cosine similarity
+$0.80$--$0.89$, magnitude ratio $\sim 0.03$--$0.11$.
+
+\subsection{$\omega = 0$ during settling}
+
+With $\omega_{\ell,c}>0$, the states $\bm{z}_\ell(t)$ rotate at the
+carrier frequency and the holomorphic activation $\sigma=\tanh$ couples
+those rotations into harmonics that prevent the coupled recurrence
+from converging to a fixed point.  In the current implementation we
+therefore set $\omega_{\ell,c}=0$ during EP settling.  This reduces
+$K_\ell=\diag(\lambda_\ell)$ (purely real-decay), and the network
+becomes equivalent to a real-valued network with exponential-decay
+integration.  The trained weights can in principle be transferred to
+an oscillatory network for inference, but the training itself does
+not learn to exploit phase relationships.  Lifting this restriction
+is the main open research direction.
+
+\subsection{Demodulation at the readout}
+
+Even with $\omega=0$ during settling, the readout layer
+(\texttt{HolomorphicReadout}) is built around interference logits
+$\ell_c = (1/d)\sum_j z_{L,j}\,\overline{c_{c,j}}$, where the
+$\overline{c_{c,j}}$ are fixed-conjugate class codes.  The
+demodulation helper \texttt{\_demodulate}$(\bm{z},\omega,n,\dt) =
+\bm{z}\cdot e^{-\im\omega n\dt}$ multiplies the output state by a
+fixed-constant carrier, which is holomorphic in $\bm{z}$ even though
+it removes a global rotation phase.  Both pieces preserve the
+holomorphicity required for Cauchy extraction.
+
+\subsection{Weight initialization}
+
+Because the steady-state response of an oscillator has DC gain
+$|G_c|=1/|k_c|$ (Remark in Section~\ref{sec:coupled}), compounded
+attenuation through $L$ layers is roughly $1/|k|^L$.  Initializing
+weights with a scale proportional to $|k|$ compensates for this; see
+the comment at \texttt{hep\_equilibrium} in \texttt{hep.jl}.
+
+\subsection{Terminology}
+
+In this document and the codebase, ``Cauchy contour'' refers to the
+spatial complex-$\beta$ technique derived in
+Section~\ref{sec:holo}---the technique implemented in
+\texttt{src/hep.jl}.  The unrelated term ``lock-in'' is reserved for
+the \emph{temporal real-probe} technique
+$\beta(t) = \varepsilon\cos(\omega_p t)$ used in the non-holomorphic
+unit-circle regime, which is implemented as \texttt{LockinEP} in
+\texttt{src/ep.jl} and described in
+\texttt{docs/phasor\_ep\_design.md}.
 
 \section*{References}
 
