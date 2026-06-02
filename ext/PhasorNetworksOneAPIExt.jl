@@ -2,6 +2,9 @@ module PhasorNetworksOneAPIExt
 
 using PhasorNetworks
 using oneAPI
+using oneAPI.oneL0: ZePtr   # oneAPI exports `oneL0` (submodule) and `oneMKL` (submodule)
+                            # and `oneArray`, but NOT `ZePtr` at the top level.
+                            # Must import explicitly via the oneL0 submodule.
 using NNlib
 
 # Add a Val{:oneapi} method to PhasorNetworks.select_device. The package
@@ -35,8 +38,8 @@ NNlib._batched_gemm!(::Type{<:oneArray}, transA::Char, transB::Char,
 # NNlib's BatchedAdjoint/BatchedTranspose wrappers are passed straight
 # through to the BLAS C call; the underlying ccall needs to extract a
 # raw device pointer from them. Mirror NNlibCUDAExt's CuPtr shim using
-# ZePtr (oneAPI's device pointer type, re-exported via oneAPI's
-# `using .oneL0`).
+# ZePtr (imported above from oneAPI.oneL0 — not re-exported by the
+# top-level oneAPI module despite the internal `using .oneL0`).
 Base.unsafe_convert(::Type{ZePtr{T}}, A::NNlib.BatchedAdjOrTrans{T}) where {T} =
     Base.unsafe_convert(ZePtr{T}, parent(A))
 
