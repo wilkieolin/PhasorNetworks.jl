@@ -28,7 +28,7 @@ using Optimisers, ComponentArrays
 using Statistics: mean
 using LinearAlgebra: diag
 using Distributions: Normal
-using DifferentialEquations: Heun, Tsit5
+using DifferentialEquations: Tsit5
 #global args for all tests
 # Phase-grid resolution (vsa_tests). Was 101 — coarser is fine for the
 # check_phase logic and the comprehension-built outer matrix is O(n²).

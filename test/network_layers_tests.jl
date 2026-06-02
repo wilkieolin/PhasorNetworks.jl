@@ -6,7 +6,7 @@ using Test
 using Lux
 using PhasorNetworks
 using Random: Xoshiro, AbstractRNG
-using DifferentialEquations: Tsit5, Heun
+using DifferentialEquations: Tsit5
 
 """
 Run all network layer tests
