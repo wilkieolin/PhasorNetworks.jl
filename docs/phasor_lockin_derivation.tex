@@ -1,0 +1,757 @@
+% Phasor Lock-in Derivation — temporal real-probe EP for the
+%                              unit-circle (non-holomorphic) regime
+% Compile standalone: pdflatex phasor_lockin_derivation.tex
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\T}{\mathbb{T}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\ie}{i.e.}
+\newcommand{\eg}{e.g.}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{corollary}{Corollary}
+
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\Real}{Re}
+\DeclareMathOperator{\Imag}{Im}
+
+\title{Lock-in Equilibrium Propagation\\
+for Phasor Networks (Temporal Real Probe)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{center}\fbox{\parbox{0.95\linewidth}{\small
+\textbf{Module:} \texttt{src/ep.jl} (\texttt{LockinEP}) \quad
+\textbf{Regime:} unit-circle, non-holomorphic (\texttt{unit\_project}
+activation, real $W$) \quad
+\textbf{Technique:} temporal real-probe lock-in
+$\beta(t)=\varepsilon\cos(\omega_p t)$, demodulated at $+\omega_p$.\\[2pt]
+This document is the canonical math reference for the lock-in
+gradient extractor implemented as \texttt{LockinEP} in
+\texttt{src/ep.jl}.  Companion documents:
+\texttt{docs/phasor\_ep\_design.md} (informal design background,
+implementation sketch, demos); \texttt{docs/phasor\_hep\_derivation.tex}
+(spatial Cauchy contour in the \emph{holomorphic} regime, implemented
+in \texttt{src/hep.jl}); \texttt{docs/hep\_development\_summary.md}
+(status log for the holomorphic implementation).  Demos that
+exercise lock-in: \texttt{demos/phasor\_ep\_demo.ipynb} and
+\texttt{demos/lockin\_demo.ipynb}.\\[2pt]
+\emph{Terminology.} In this codebase ``lock-in'' is reserved for the
+temporal real-probe technique derived here; the spatial complex-$\beta$
+method of holomorphic EP is the ``Cauchy contour.''
+}}\end{center}
+
+%======================================================================
+\section{Phasor EP in the Unit-Circle Regime}\label{sec:phasor-ep}
+%======================================================================
+
+\subsection{State space and energy}
+
+A phasor network of $L$ layers has hidden state
+$\bm{z}_\ell \in \T^{d_\ell} \subset \C^{d_\ell}$ on the torus
+$\T^{d_\ell} = \{z\in\C^{d_\ell} : |z_j|=1 \text{ for all } j\}$,
+real weight matrices
+$W_\ell \in \R^{d_\ell \times d_{\ell-1}}$, and per-channel
+oscillator eigenvalues $\bm{k}_\ell = \bm{\lambda}_\ell + \im\bm{\omega}_\ell$
+with $\lambda_{\ell,c} < 0$.  The input $\bm{x} = \bm{z}_0$ is fixed
+and the dynamics are constrained to the torus by the entrywise
+\emph{unit projector}
+\begin{equation}\label{eq:unit-project}
+  \mathrm{unit\_project}(z)
+  \;=\; \frac{z}{|z|}
+  \;=\; \frac{z}{\sqrt{z\bar z}},
+  \qquad z \in \C.
+\end{equation}
+
+The Hopfield-style energy with self-energy and Hermitian inner
+product $\langle\bm{u},\bm{v}\rangle = \sum_j \bar u_j\, v_j$ is
+\begin{equation}\label{eq:energy}
+  \Phi(\bm{z},\theta,\beta)
+  \;=\;
+  \sum_{\ell=1}^{L}
+    \Bigl[
+      \tfrac{1}{2}\,\Real\!\langle\bm{z}_\ell,\,K_\ell\bm{z}_\ell\rangle
+      \;+\;
+      \Real\!\langle W_\ell\bm{z}_{\ell-1},\,\bm{z}_\ell\rangle
+    \Bigr]
+  \;-\;
+  \beta\,\mathcal{C}(\bm{z}_L,\,\bm{y}),
+\end{equation}
+where $K_\ell = \diag(\bm{k}_\ell)$, $\theta=\{W_\ell\}$ collects the
+trainable parameters, and $\mathcal{C}$ is the task cost.
+
+\begin{remark}[Two inner-product conventions]
+The Hermitian inner product in~\eqref{eq:energy} is the natural choice
+for a network whose states live on the unit circle: $\Real\langle u,v\rangle
+= \tfrac{1}{2}(u^H v + v^H u)$ is the real, unit-circle cosine
+similarity that the codebook similarity cost
+$\mathcal{C}(\bm{z}_L,\bm{y}) = 1 - \tfrac{1}{d_L}\Real\langle\bm{z}_L,\bm{y}\rangle$
+also uses.  This differs from the bilinear form
+$\langle u,v\rangle_\mathrm{bi}=\sum_j u_j v_j$ used in the
+holomorphic-regime derivation (\texttt{phasor\_hep\_derivation.tex});
+the Hermitian convention is what allows the unit-circle constraint to
+sit comfortably inside the energy at the cost of breaking
+holomorphicity in $\bm{z}$.
+\end{remark}
+
+\subsection{Settling dynamics}
+
+The settling is gradient flow on $\Phi$ projected onto the torus.
+Writing the Wirtinger gradient with respect to $\bar z_{\ell,j}$
+(see Section~\ref{sec:wirtinger}),
+\begin{equation}\label{eq:settle-grad}
+  \frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell}
+  \;=\;
+  \tfrac{1}{2}K_\ell\bm{z}_\ell
+  \;+\;
+  W_\ell\bm{z}_{\ell-1}
+  \;+\;
+  W_{\ell+1}^{\!\top}\bm{z}_{\ell+1}
+  \;-\;
+  \beta\,\delta_{\ell L}\,
+  \frac{\partial\mathcal{C}}{\partial\bar{\bm{z}}_L}.
+\end{equation}
+Discrete settling step (cf.\ \texttt{phasor\_settle} in
+\texttt{src/ep.jl}):
+\begin{equation}\label{eq:settle-step}
+  \bm{z}_\ell^{(n+1)}
+  \;=\;
+  \mathrm{unit\_project}\!\Bigl(
+    (1-\dt)\,\bm{z}_\ell^{(n)}
+    \;+\;
+    \dt\,\bm{g}_\ell^{(n)}
+  \Bigr),
+  \qquad
+  \bm{g}_\ell^{(n)} = \tfrac{\partial\Phi}{\partial\bar{\bm{z}}_\ell}\Bigr|_{\bm{z}^{(n)}}.
+\end{equation}
+At a fixed point $\bm{g}_\ell^* = \bm{z}_\ell^*$ (modulo the unit-circle
+projection), defining the free equilibrium
+$\bm{z}^*(0)$ at $\beta=0$ and the $\beta$-dependent family
+$\bm{z}^*(\beta)$ when $\beta \ne 0$.
+
+\subsection{Standard (static) EP}
+
+For real $\beta$ the Scellier--Bengio gradient theorem gives
+\begin{equation}\label{eq:static-ep}
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  \lim_{\beta \to 0}\;\frac{1}{\beta}\!\left[
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(\beta)}
+    -
+    \left.\frac{\partial\Phi}{\partial\theta}\right|_{\bm{z}^*(0)}
+  \right],
+\end{equation}
+with the corresponding two-phase Hebbian estimator
+$\Delta W_\ell \propto -\bigl(\mathrm{hebb}_\ell^{\text{nudge}} - \mathrm{hebb}_\ell^{\text{free}}\bigr)/\beta$
+(implemented as \texttt{StaticEP}).  Finite $\beta$ introduces
+$O(\beta)$ bias from the nonlinearity of $\bm{z}^*(\beta)$; the
+small-$\beta$ / large-bias trade-off is what holomorphic EP
+(\texttt{phasor\_hep\_derivation.tex}) and lock-in EP (this document)
+each address differently.
+
+%======================================================================
+\section{Wirtinger Calculus and Non-Holomorphicity}\label{sec:wirtinger}
+%======================================================================
+
+\subsection{Wirtinger derivatives}
+
+For a smooth function $f(\beta,\bar\beta)$ of a complex variable
+$\beta = \beta_R + \im\beta_I$ (treating $\beta$ and $\bar\beta$ as
+independent),
+\begin{equation}\label{eq:wirtinger}
+  \frac{\partial}{\partial\beta}
+  \;=\; \tfrac{1}{2}\!\left(\frac{\partial}{\partial\beta_R}
+                          - \im\frac{\partial}{\partial\beta_I}\right),
+  \qquad
+  \frac{\partial}{\partial\bar\beta}
+  \;=\; \tfrac{1}{2}\!\left(\frac{\partial}{\partial\beta_R}
+                          + \im\frac{\partial}{\partial\beta_I}\right).
+\end{equation}
+The function is \emph{holomorphic} iff $\partial f/\partial\bar\beta = 0$
+(the Cauchy--Riemann condition).  The real-axis directional derivative
+is
+\begin{equation}\label{eq:real-dir}
+  \frac{\dd}{\dd\beta_R} f
+  \;=\;
+  \frac{\partial f}{\partial\beta} + \frac{\partial f}{\partial\bar\beta},
+\end{equation}
+and the imaginary-axis directional derivative is
+\begin{equation}\label{eq:imag-dir}
+  \frac{\dd}{\dd\beta_I} f
+  \;=\;
+  \im\!\left(\frac{\partial f}{\partial\beta} - \frac{\partial f}{\partial\bar\beta}\right).
+\end{equation}
+
+\subsection{Non-holomorphicity of \texttt{unit\_project}}
+
+\begin{proposition}\label{prop:nonholo}
+The unit projector~\eqref{eq:unit-project} is not holomorphic in
+$z$:
+\[
+  \frac{\partial}{\partial \bar z}\!\left(\frac{z}{|z|}\right)
+  \;=\; -\frac{z}{2|z|^3} \cdot z
+  \;=\; -\frac{z^2}{2|z|^3} \ne 0.
+\]
+\end{proposition}
+\begin{proof}
+$|z| = (z\bar z)^{1/2}$, so $\partial|z|/\partial\bar z = z/(2|z|)$
+and $\partial(z/|z|)/\partial\bar z = z \cdot \bigl(-(2|z|)^{-2}\cdot(z/(2|z|))\bigr)\cdot 2|z|^{-1}\cdot \text{(chain)}$
+which simplifies to the displayed form.
+\end{proof}
+
+\begin{corollary}\label{cor:nonholo-z*}
+The equilibrium map $\bm{z}^*$ of~\eqref{eq:settle-step} is a smooth
+function of $(\beta, \bar\beta)$ jointly, not a holomorphic function
+of $\beta$.  In particular,
+$\partial \bm{z}^* / \partial \bar\beta \ne 0$ in general, so the
+chain rule for any observable $f(\bm{z}^*(\beta,\bar\beta))$ at
+$\beta = 0$ reads
+\begin{equation}\label{eq:dz-wirtinger}
+  \bm{z}^*(\beta) - \bm{z}^*(0)
+  \;=\;
+  \beta\,
+  \frac{\partial\bm{z}^*}{\partial\beta}\bigg|_0
+  \;+\;
+  \bar\beta\,
+  \frac{\partial\bm{z}^*}{\partial\bar\beta}\bigg|_0
+  \;+\;
+  O(|\beta|^2),
+\end{equation}
+with both Wirtinger sidebands present.
+\end{corollary}
+
+\subsection{Why the spatial Cauchy contour fails}
+
+The spatial Cauchy contour estimator of holomorphic EP
+(\texttt{phasor\_hep\_derivation.tex}, Section~4) evaluates
+$\partial\Phi/\partial\theta$ at $\beta_n = r\,e^{2\pi\im n/N}$ and
+takes the first Fourier coefficient $(1/N)\sum_n
+\partial\Phi/\partial\theta|_{\bm{z}^*(\beta_n)}\cdot e^{-2\pi\im n/N}$.
+
+\begin{remark}[Spatial contour contamination on non-holomorphic
+recurrences]\label{rem:contam}
+Substituting~\eqref{eq:dz-wirtinger} with $\beta_n = r\,e^{\im\varphi_n}$
+into the spatial Fourier sum, the term proportional to
+$\partial\bm{z}^*/\partial\bar\beta$ multiplies
+$\bar\beta_n\cdot e^{-\im\varphi_n} = r\,e^{-2\im\varphi_n}$, which is
+not orthogonal to the constant function in the discrete Fourier
+sense at finite $N$ for the higher harmonics.  The sideband
+contamination is at the \emph{same order in $r$} as the signal — not
+at a higher Taylor power — so neither shrinking $r$ nor increasing
+$N$ removes it.  This is the obstruction lock-in detection sidesteps.
+\end{remark}
+
+%======================================================================
+\section{Temporal Real-Probe Lock-in}\label{sec:probe}
+%======================================================================
+
+\subsection{The probe}
+
+Drive $\beta$ as a real cosine in time at the \emph{probe frequency}
+$\omega_p$:
+\begin{equation}\label{eq:probe}
+  \beta(t)
+  \;=\;
+  \varepsilon\,\cos(\omega_p t)
+  \;=\;
+  \frac{\varepsilon}{2}\bigl(e^{\im\omega_p t} + e^{-\im\omega_p t}\bigr),
+  \qquad
+  \varepsilon \in \R,\ \omega_p > 0.
+\end{equation}
+The probe stays on the real axis of $\C$ at all times.  When the
+network is in its adiabatic regime
+(Section~\ref{sec:knobs}) the equilibrium tracks the slowly varying
+$\beta(t)$, so the time-dependent state
+$\bm{z}(t) \approx \bm{z}^*(\beta(t))$.
+
+\subsection{Linear-response expansion}
+
+Substituting $\beta(t)$ from~\eqref{eq:probe} into~\eqref{eq:dz-wirtinger}
+and using $\bar\beta(t) = \beta(t) \in \R$,
+\begin{align}
+  \bm{z}(t) - \bm{z}^*(0)
+  &\;=\;
+  \varepsilon\cos(\omega_p t)\,
+  \Bigl(
+    \frac{\partial\bm{z}^*}{\partial\beta}\bigg|_0
+    +
+    \frac{\partial\bm{z}^*}{\partial\bar\beta}\bigg|_0
+  \Bigr)
+  + O(\varepsilon^2) \notag\\
+  &\;=\;
+  \varepsilon\cos(\omega_p t)\,
+  \frac{\dd\bm{z}^*}{\dd\beta_R}\bigg|_0
+  + O(\varepsilon^2), \label{eq:linres-state}
+\end{align}
+where the second line uses~\eqref{eq:real-dir}.  The real-axis
+directional derivative $\dd\bm{z}^*/\dd\beta_R$ is what the EP
+gradient theorem on real parameters needs.
+
+\subsection{Real vs.\ complex probe}
+
+\begin{proposition}[Probe equivalence in the holomorphic case]
+\label{prop:holo-equiv}
+If the recurrence is holomorphic in $\beta$ (so
+$\partial\bm{z}^*/\partial\bar\beta = 0$) then the real probe
+$\beta(t) = \varepsilon\cos(\omega_p t)$ and the complex probe
+$\beta(t) = \varepsilon\,e^{\im\omega_p t}$ extract the same linear
+coefficient $\partial\bm{z}^*/\partial\beta$ from the first
+Fourier coefficient of $\bm{z}(t)$.
+\end{proposition}
+\begin{proof}
+With $\partial/\partial\bar\beta = 0$,~\eqref{eq:dz-wirtinger}
+collapses to $\beta\,\partial\bm{z}^*/\partial\beta + O(|\beta|^2)$.
+For the real probe the Fourier coefficient at $+\omega_p$ is
+$(\varepsilon/2)\partial\bm{z}^*/\partial\beta$; for the complex probe
+it is $\varepsilon\,\partial\bm{z}^*/\partial\beta$.  They agree up
+to the factor of 2 absorbed in the gradient formula
+of Section~\ref{sec:grad}.
+\end{proof}
+
+\begin{proposition}[Complex probe fails on non-holomorphic recurrences]
+\label{prop:cplx-fail}
+If $\partial\bm{z}^*/\partial\bar\beta \ne 0$ and the probe is
+$\beta(t) = \varepsilon\,e^{\im\omega_p t}$, the first Fourier
+coefficient of $\bm{z}(t)$ at $+\omega_p$ recovers only
+$\varepsilon\,\partial\bm{z}^*/\partial\beta$.  Combining this with
+$\varepsilon\,\partial\bm{z}^*/\partial\bar\beta$ extracted at
+$-\omega_p$ gives the two Wirtinger pieces but not their sum, which
+is what $\dd\bm{z}^*/\dd\beta_R$ requires.
+\end{proposition}
+\begin{proof}
+Substitute $\beta(t) = \varepsilon\,e^{\im\omega_p t}$ and
+$\bar\beta(t) = \varepsilon\,e^{-\im\omega_p t}$
+into~\eqref{eq:dz-wirtinger}.  The $\partial/\partial\beta$ term
+oscillates at $+\omega_p$ and the $\partial/\partial\bar\beta$ term
+oscillates at $-\omega_p$; demodulating at $+\omega_p$ picks up only
+the first.
+\end{proof}
+
+\begin{corollary}[Why real probe]\label{cor:why-real}
+On a non-holomorphic recurrence (the phasor-EP regime with
+\texttt{unit\_project}), the real probe is the unique linear cosine
+modulation whose $+\omega_p$ Fourier coefficient yields the full
+$\dd\bm{z}^*/\dd\beta_R$ directional derivative — exactly the quantity
+finite-difference EP on real parameters would estimate.
+\end{corollary}
+
+%======================================================================
+\section{Lock-in Demodulation}\label{sec:demod}
+%======================================================================
+
+\subsection{Continuous-time formula}
+
+The Hebbian outer product is the parameter-gradient quantity of
+interest.  For weight matrix $W_\ell$ at layer $\ell$, define the
+time-dependent Hebbian observable
+\begin{equation}\label{eq:hebb-obs}
+  H_\ell(t)
+  \;=\;
+  \bm{z}_\ell(t)\,\bm{z}_{\ell-1}(t)^H,
+\end{equation}
+which evaluates to $\bm{z}_\ell^*(\beta(t))\,\bm{z}_{\ell-1}^*(\beta(t))^H$
+in the adiabatic regime.  The lock-in coefficient at $+\omega_p$ over
+an integer number of probe cycles $T_\text{int} = 2\pi N_c/\omega_p$
+($N_c \in \mathbb{Z}_{>0}$) is
+\begin{equation}\label{eq:lockin-cont}
+  H_\ell^{+}
+  \;=\;
+  \frac{1}{T_\text{int}}
+  \int_0^{T_\text{int}}
+  \bigl(H_\ell(t) - H_\ell^{\text{DC}}\bigr)\,
+  e^{-\im\omega_p t}\,\dd t,
+\end{equation}
+where $H_\ell^{\text{DC}} = H_\ell(\bm{z}^*(0))$ is the free-equilibrium
+Hebbian (subtracted to remove DC leakage from imperfectly cancelled
+constant terms).
+
+\subsection{Sideband bookkeeping}
+
+Expanding the integrand using~\eqref{eq:linres-state} on $\bm{z}_\ell$ and
+$\bm{z}_{\ell-1}$ separately,
+\begin{equation}\label{eq:H-expand}
+  H_\ell(t) - H_\ell^{\text{DC}}
+  \;=\;
+  \varepsilon\cos(\omega_p t)\,
+  \frac{\dd H_\ell^*}{\dd\beta_R}\bigg|_0
+  \;+\;
+  O(\varepsilon^2),
+\end{equation}
+with $H_\ell^* = \bm{z}_\ell^*\bm{z}_{\ell-1}^{*\,H}$.  Demodulating,
+\begin{equation}\label{eq:demod-step}
+  H_\ell^{+}
+  \;=\;
+  \varepsilon\cdot\frac{1}{T_\text{int}}\!\int_0^{T_\text{int}}
+  \cos(\omega_p t)\,e^{-\im\omega_p t}\,\dd t
+  \cdot \frac{\dd H_\ell^*}{\dd\beta_R}\bigg|_0
+  + O(\varepsilon^2).
+\end{equation}
+Over integer cycles
+$(1/T_\text{int})\!\int_0^{T_\text{int}}\!\cos(\omega_p t)\,e^{-\im\omega_p t}\dd t
+ = \tfrac{1}{2}$, so
+\begin{equation}\label{eq:HpHebbian}
+  H_\ell^{+}
+  \;=\;
+  \tfrac{\varepsilon}{2}\,
+  \frac{\dd H_\ell^*}{\dd\beta_R}\bigg|_0
+  \;+\;
+  O(\varepsilon^2).
+\end{equation}
+
+%======================================================================
+\section{Gradient Extraction Formula}\label{sec:grad}
+%======================================================================
+
+\subsection{Main result}
+
+Combining the EP gradient theorem~\eqref{eq:static-ep}, the chain
+rule through the equilibrium, the linear-response
+expansion~\eqref{eq:linres-state}, and the demodulation
+formula~\eqref{eq:HpHebbian}, and remembering the sign flip from
+$\Phi = E - \beta\mathcal{C}$ (the loss enters with a minus sign):
+
+\begin{theorem}[Lock-in EP gradient]\label{thm:lockin-grad}
+For the phasor energy~\eqref{eq:energy} with the real-probe
+$\beta(t) = \varepsilon\cos(\omega_p t)$ in the adiabatic regime
+(Section~\ref{sec:knobs}), the loss gradient with respect to a real
+weight matrix $W_\ell$ is
+\begin{equation}\label{eq:main-grad}
+  \boxed{
+  \frac{\dd\mathcal{L}}{\dd W_\ell}
+  \;=\;
+  -\frac{2}{\varepsilon}\,\Real\bigl(H_\ell^{+}\bigr)
+  \;+\; O(\varepsilon),
+  }
+\end{equation}
+where $H_\ell^{+}$ is the DC-subtracted lock-in
+coefficient~\eqref{eq:lockin-cont}.  The factor of 2 cancels the
+$\tfrac{1}{2}$ in~\eqref{eq:HpHebbian}; the minus sign converts
+$\partial\Phi/\partial W$ to $\dd\mathcal{L}/\dd W$ for gradient
+descent; the real part projects out the imaginary residual that would
+appear from incomplete cycle cancellation or higher-order Wirtinger
+mixing.
+\end{theorem}
+
+\subsection{Discrete-time implementation}
+
+In the discrete settling loop with time step $\dt$, the probe
+$\beta[n] = \varepsilon\cos(\omega_p\,n\,\dt)$ for
+$n = 1,\dots,T_\text{lockin}$ with
+$T_\text{lockin} = N_c \cdot (2\pi/(\omega_p\dt))$
+(integer cycles).  The discrete lock-in accumulator is
+\begin{equation}\label{eq:disc-acc}
+  \tilde H_\ell^{+}
+  \;=\;
+  \sum_{n=1}^{T_\text{lockin}}
+    \bigl(\bm{z}_\ell^{(n)} (\bm{z}_{\ell-1}^{(n)})^H - H_\ell^{\text{DC}}\bigr)
+    \cdot e^{-\im\omega_p n \dt},
+\end{equation}
+and the gradient~\eqref{eq:main-grad} becomes
+\begin{equation}\label{eq:disc-grad}
+  \widehat{\frac{\dd\mathcal{L}}{\dd W_\ell}}
+  \;=\;
+  -\frac{2}{T_\text{lockin}\,\varepsilon}\,\Real\bigl(\tilde H_\ell^{+}\bigr).
+\end{equation}
+This is the formula implemented in \texttt{ep.jl} (the
+\texttt{ep\_gradient(::LockinEP, \ldots)} method); see also the
+``Implementation sketch'' section of
+\texttt{docs/phasor\_ep\_design.md} for a side-by-side with the code.
+
+\subsection{Warm-up}
+
+Before the lock-in accumulator runs, the network settles to
+$\bm{z}^*(0)$ at $\beta=0$ (the \emph{free phase}, $T_\text{free}$
+steps) so $H_\ell^{\text{DC}}$ is well-defined.  Then $\beta(t)$ is
+switched on for $T_\text{warmup} = N_\text{warmup}\cdot(2\pi/(\omega_p\dt))$
+steps with no accumulation, to let the equilibrium catch up to the
+modulation.  Only then is the accumulator~\eqref{eq:disc-acc}
+populated.  Skipping warm-up leaks transient
+$\bm{z}(t)-\bm{z}^*(0)$ into the first cycles' integrand and biases
+the gradient toward whatever direction the transient happened to
+take.
+
+%======================================================================
+\section{Bias Gradient}\label{sec:bias}
+%======================================================================
+
+When the layer has a complex bias $\bm{b}_\ell = \bm{b}_\ell^R + \im\bm{b}_\ell^I$,
+the bias enters the energy through the coupling term as
+$\Real\langle W_\ell\bm{z}_{\ell-1} + \bm{b}_\ell, \bm{z}_\ell\rangle$.
+The Hebbian observable for the bias is simply
+$\bm{z}_\ell(t)$ (not an outer product), and the lock-in coefficient
+is
+\begin{equation}\label{eq:bias-acc}
+  \tilde H_{\ell,b}^{+}
+  \;=\;
+  \sum_{n=1}^{T_\text{lockin}}
+    \bigl(\bm{z}_\ell^{(n)} - \bm{z}_\ell^{(0)}\bigr)\,
+    e^{-\im\omega_p n\dt}.
+\end{equation}
+The real and imaginary parts of $\tilde H_{\ell,b}^{+}$ correspond
+to the gradients with respect to $\bm{b}_\ell^R$ and $\bm{b}_\ell^I$
+independently:
+\begin{equation}\label{eq:bias-grad}
+  \widehat{\frac{\dd\mathcal{L}}{\dd \bm{b}_\ell^R}}
+  \;=\;
+  -\frac{2}{T_\text{lockin}\,\varepsilon}\,\Real\bigl(\tilde H_{\ell,b}^{+}\bigr),
+  \qquad
+  \widehat{\frac{\dd\mathcal{L}}{\dd \bm{b}_\ell^I}}
+  \;=\;
+  -\frac{2}{T_\text{lockin}\,\varepsilon}\,\Imag\bigl(\tilde H_{\ell,b}^{+}\bigr).
+\end{equation}
+The implementation packages $\bm{z}_\ell^{(n)}$ directly as a complex
+number so a single demodulation accumulator handles both real and
+imaginary bias parts (see \texttt{\_ep\_lockin\_gradient} in
+\texttt{src/ep.jl}).
+
+%======================================================================
+\section{Accuracy Knobs and Failure Modes}\label{sec:knobs}
+%======================================================================
+
+\subsection{Three knobs}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Knob} & \textbf{Controls} & \textbf{Failure modes} \\
+\midrule
+$\varepsilon$ & Linearity of the response &
+  Too small: noise floor of $H_\ell^{+}$. \\
+  & & Too large: $O(\varepsilon^2)$ nonlinearity bias. \\
+$\omega_p$ & Separation from natural ω; adiabaticity &
+  Too low: probe cycle longer than budget. \\
+  & & Too high: non-adiabatic, system can't track $\bm{z}^*(\beta(t))$. \\
+$N_c$ (cycles) & Demodulator selectivity &
+  Too small: aliasing from imperfectly cancelled \\
+  & & ~~harmonics. \\
+  & & Too large: linear cost in settling time. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Stability constraints}
+
+The probe oscillation must lie outside every channel's natural
+oscillator bandwidth and inside the network's relaxation rate:
+\begin{align}
+  |\omega_p - \omega_{\ell,c}| &> |\lambda_{\ell,c}|
+  \qquad \text{for every channel } (\ell, c),
+  \label{eq:freq-sep}\\
+  \omega_p &\ll
+  R_\text{relax}
+  \;\approx\;
+  \min_{\ell,c}|\lambda_{\ell,c}| + \|W\|_\text{op}.
+  \label{eq:adiabatic}
+\end{align}
+\eqref{eq:freq-sep} is the \emph{frequency-separation} condition:
+the probe response should not be confused with the natural channel
+oscillation. \eqref{eq:adiabatic} is the \emph{adiabatic-following}
+condition: the probe period $2\pi/\omega_p$ should be much longer
+than the network's settling time scale so $\bm{z}(t)$ remains close
+to the instantaneous equilibrium $\bm{z}^*(\beta(t))$.
+
+\subsection{Integer-cycle requirement}
+
+The accumulator~\eqref{eq:disc-acc} must run for an integer number of
+probe periods.  Non-integer cycles leak even-harmonic content
+(notably the DC component of $\cos^2(\omega_p t)$) into the
+$+\omega_p$ coefficient, biasing the gradient.  Setting
+$T_\text{lockin} = N_c \cdot \mathrm{round}(2\pi/(\omega_p\dt))$ with
+$N_c \ge 2$ is the practical recipe; tighter integer alignment
+requires $\omega_p\dt$ to divide $2\pi$ exactly, which is rarely
+worth engineering.
+
+\subsection{Bifurcation cliff}
+
+The linear-response expansion~\eqref{eq:linres-state} is local
+around $\bm{z}^*(0)$.  If $\varepsilon$ is large enough that
+$\beta(t)$ pushes the network through a saddle-node or pitchfork
+bifurcation of the equilibrium map, $\bm{z}^*(\beta(t))$ jumps
+discontinuously and the lock-in estimator becomes meaningless.  The
+amplitude at which this happens is the \emph{basin radius} of
+$\bm{z}^*(0)$ in the $\beta$-direction and depends on the network
+state; in practice $\varepsilon \in [0.01, 0.1]$ is well inside the
+basin for the demonstrated networks.
+
+%======================================================================
+\section{Relationships to Other EP Variants}\label{sec:rel}
+%======================================================================
+
+\subsection{Holomorphic limit}
+
+\begin{corollary}[Lock-in $\leftrightarrow$ spatial Cauchy contour]
+\label{cor:holo-limit}
+If the recurrence is holomorphic in $\beta$ (no \texttt{unit\_project},
+holomorphic $\sigma$, bilinear inner product as in
+\texttt{phasor\_hep\_derivation.tex}), the lock-in
+formula~\eqref{eq:main-grad} agrees with the spatial Cauchy
+contour formula of holomorphic EP up to discretization.  In this
+regime both probes (real and complex) extract the same gradient
+(Proposition~\ref{prop:holo-equiv}) and the choice between them is
+purely operational.
+\end{corollary}
+
+\subsection{Small-$\varepsilon$ limit}
+
+\begin{corollary}[Lock-in $\leftrightarrow$ static EP]
+\label{cor:static-limit}
+At $N_c = 1$, $\omega_p\dt \to 0$, the
+accumulator~\eqref{eq:disc-acc} reduces to a single Hebbian
+difference $H_\ell(t_+) - H_\ell(t_-)$ with $t_\pm$ at the cosine
+peaks $\pm\varepsilon$.  This is, up to a sign and a factor of
+$1/\varepsilon$, the two-phase finite-difference estimator of
+static EP~\eqref{eq:static-ep}.  Lock-in is the time-multiplexed
+generalization that gains noise rejection from $N_c > 1$ at fixed
+$\varepsilon$.
+\end{corollary}
+
+\subsection{Frequency multiplexing}
+
+Because each parameter direction's gradient lives at a chosen
+$\omega_p$, several gradient extractions can run simultaneously
+with distinct probe frequencies $\omega_p^{(k)}$ in the same
+settle.  Each accumulator demodulates at its own
+$\omega_p^{(k)}$ and the orthogonality of distinct Fourier
+components separates them.  The frequency-separation
+condition~\eqref{eq:freq-sep} must hold for every $\omega_p^{(k)}$
+pair and against every natural $\omega_{\ell,c}$.  This is
+\emph{frequency-domain gradient parallelism}, not currently
+implemented but a natural extension of the present formula.
+
+%======================================================================
+\section{Connection to PhasorNetworks Dispatch}\label{sec:dispatch}
+%======================================================================
+
+The lock-in extractor maps onto the existing dispatch as follows:
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Symbol in this document} & \textbf{Code in \texttt{src/ep.jl}} \\
+\midrule
+$\bm{z}^{(n)}$ (settling state) & \texttt{phasor\_settle(\ldots)} return value \\
+$H_\ell^{\text{DC}}$ & \texttt{chain\_hebbians(chain, ps, st, x, s\_free)} \\
+$\beta[n] = \varepsilon\cos(\omega_p n \dt)$ & \texttt{β\_t = ε .* cos(ω\_p * t * dt)} \\
+$T_\text{free}$ & \texttt{LockinEP.T\_free} \\
+$T_\text{warmup}$ & \texttt{LockinEP.T\_warmup\_cycles} (in probe periods) \\
+$N_c$ & \texttt{LockinEP.n\_cycles} \\
+$\tilde H_\ell^{+}$ accumulator & \texttt{H\_W[key]} dict in \texttt{ep\_gradient(::LockinEP)} \\
+Discrete gradient~\eqref{eq:disc-grad} & \texttt{\_ep\_lockin\_gradient} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Default knobs}
+
+The defaults in \texttt{LockinEP} (\texttt{ε=0.05, ω\_p=0.05,
+n\_cycles=8, T\_warmup\_cycles=2, T\_free=200, dt=0.1}) place the
+operating point deep in the adiabatic basin
+(Section~\ref{sec:knobs}) for the two-layer phasor chains in
+\texttt{demos/phasor\_ep\_demo.ipynb} and
+\texttt{demos/lockin\_demo.ipynb}.  The
+\texttt{lockin\_demo} ablation sweeps (§5--§6) show that the
+gradient matches finite-difference oracles to a few percent across
+roughly a decade in each knob, and that the failure modes match
+those tabulated in Section~\ref{sec:knobs}.
+
+\subsection{Why the lock-in cell in \texttt{lockin\_demo} uses
+$\varepsilon = 0.01$, $N_\text{epochs} = 400$}
+
+The end-to-end XOR demo (\texttt{lockin\_demo.ipynb} §7) trains
+with $\varepsilon = 0.01$ and 400 epochs.  The smaller $\varepsilon$
+trades a slightly higher noise floor for a smaller
+$O(\varepsilon^2)$ nonlinearity bias, which matters once the loss
+gets close to zero; the doubled epoch count compensates for the
+roughly $5\%$ gradient-direction noise visible in the §5--§6
+sweeps, which translates into a proportionally slower descent
+compared with the noise-free static EP gradient.  Both methods
+reach 4/4 on the canonical four-corner XOR with bias-on,
+consistent $\{0°, 90°\}$ encoding (see §7.1 of the demo for the
+no-bias counter-example and the per-seed robustness sweep at the
+bottom of \texttt{demos/xor\_diagnosis\_part3.jl}).
+
+%======================================================================
+\section{Summary}\label{sec:summary}
+%======================================================================
+
+\begin{enumerate}
+\item Phasor networks in the unit-circle regime have a
+  \texttt{unit\_project} activation that is \textbf{not holomorphic}
+  in the state $\bm{z}$ and therefore not holomorphic in the
+  nudge $\beta$.  The spatial Cauchy contour of holomorphic EP
+  picks up a Wirtinger sideband at the same order as the signal
+  (Remark~\ref{rem:contam}) and cannot be repaired by tuning
+  $r$ or $N$.
+
+\item Driving $\beta$ as a \textbf{real cosine in time}
+  $\beta(t) = \varepsilon\cos(\omega_p t)$ excites both Wirtinger
+  sidebands.  Demodulating at $+\omega_p$ over integer cycles
+  extracts $\tfrac{\varepsilon}{2}\,\dd H_\ell^*/\dd\beta_R$ — the
+  real-axis directional derivative, which is exactly the quantity
+  finite-difference EP on real parameters needs
+  (Corollary~\ref{cor:why-real}).
+
+\item The complex probe $\beta(t) = \varepsilon\,e^{\im\omega_p t}$
+  would give only the holomorphic Wirtinger half
+  (Proposition~\ref{prop:cplx-fail}); it is correct in the
+  holomorphic regime (Proposition~\ref{prop:holo-equiv}) but wrong
+  in the unit-circle regime.
+
+\item The full gradient formula (Theorem~\ref{thm:lockin-grad})
+  has a factor of $2/\varepsilon$, a minus sign from the EP energy
+  convention $\Phi = E - \beta\mathcal{C}$, and the real part to
+  project out residual imaginary contributions.
+
+\item Three knobs $(\varepsilon, \omega_p, N_c)$ control three
+  failure modes; the adiabatic basin in $(\varepsilon, \omega_p)$
+  is wide and easy to land in, with $\varepsilon \in [0.01, 0.1]$
+  and $\omega_p \ll R_\text{relax}$ as the practical defaults.
+
+\item Lock-in reduces to the spatial Cauchy contour in the
+  holomorphic limit (Corollary~\ref{cor:holo-limit}) and to
+  two-phase static EP at $N_c = 1$
+  (Corollary~\ref{cor:static-limit}).  Beyond the regimes
+  recovered by those limits, it generalizes naturally to
+  \textbf{frequency multiplexing} across parameter directions.
+
+\item The implementation lives in \texttt{src/ep.jl}
+  (\texttt{LockinEP} method of \texttt{ep\_gradient}); the
+  end-to-end demonstration is \texttt{demos/lockin\_demo.ipynb}.
+\end{enumerate}
+
+\section*{References}
+
+\begin{itemize}
+\item Scellier, B.\ \& Bengio, Y.\ (2017). ``Equilibrium
+  Propagation: Bridging the Gap Between Energy-Based Models and
+  Backpropagation.'' \emph{Frontiers in Computational Neuroscience}.
+\item Laborieux, A.\ \& Zenke, F.\ (2022). ``Holomorphic Equilibrium
+  Propagation Computes Exact Gradients Through Finite Size
+  Oscillations.'' NeurIPS 2022. arXiv:2209.00530.  (The spatial
+  Cauchy contour technique adapted from this paper is derived in
+  \texttt{docs/phasor\_hep\_derivation.tex}.)
+\item Wirtinger, W.\ (1927). ``Zur formalen Theorie der Funktionen
+  von mehr komplexen Veränderlichen.'' \emph{Mathematische Annalen}
+  97, 357--375.
+\end{itemize}
+
+\end{document}
