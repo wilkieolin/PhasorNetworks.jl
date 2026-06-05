@@ -35,8 +35,13 @@ repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
 Pkg.activate(repo_root)
 
-include("../src/PhasorNetworks.jl")
-using .PhasorNetworks
+# Load PhasorNetworks as the registered package (NOT via `include` +
+# `using .PhasorNetworks`). Package extensions like
+# `PhasorNetworksOneAPIExt` are keyed to the registered package UUID;
+# `include`-loaded modules do not trigger them, so the extension's
+# `select_device(::Val{:oneapi})` method never registers and we hit
+# `backend.jl:49`'s fallback error.
+using PhasorNetworks
 
 using Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays
 using GPUArraysCore: AbstractGPUArray
@@ -188,7 +193,7 @@ acc = test(model, test_loader, pst, stt)
 println("Conventional test accuracy: ", acc)
 
 println("\n=== Phasor network ===")
-import .PhasorNetworks: default_bias, Codebook
+import PhasorNetworks: default_bias, Codebook
 p_model = Chain(FlattenLayer(),
                 LayerNorm((28^2,)),
                 x -> Phase.(tanh.(x)),
