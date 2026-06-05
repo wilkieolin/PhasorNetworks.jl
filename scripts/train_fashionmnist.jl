@@ -11,7 +11,8 @@ This script:
  3. Trains and evaluates a conventional Lux model and the PhasorNetworks model
 
 Notes:
- - It reuses the project's PhasorNetworks code via `include("../src/PhasorNetworks.jl")`.
+ - It loads PhasorNetworks via the activated project (`using PhasorNetworks`),
+   not via `include`, so package extensions can fire normally.
  - CLI parsing uses Base.ArgParse-like simple manual parsing to avoid extra dependencies.
 =#
 
@@ -35,8 +36,13 @@ cd(repo_root)  # change working directory to repository base
 Pkg.activate(repo_root)
 
 # bring project code into scope
-include("../src/PhasorNetworks.jl")
-using .PhasorNetworks
+# Load PhasorNetworks as the registered package (NOT via `include` +
+# `using .PhasorNetworks`). Package extensions are keyed to the
+# registered package UUID; include-loaded modules don't trigger them.
+# Today this script doesn't need any extensions, but it's the consistent
+# pattern with scripts/train_fashionmnist_aurora.jl and avoids the same
+# trap the moment anyone wires PhasorNetworks to a CUDA weakdep ext.
+using PhasorNetworks
 
 # dependencies used in notebook
 using Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays, CUDA
@@ -181,7 +187,7 @@ println("Conventional test accuracy: ", acc)
 
 # Phasor model
 println("\n=== Phasor network ===")
-import .PhasorNetworks: default_bias, Codebook
+import PhasorNetworks: default_bias, Codebook
 p_model = Chain(FlattenLayer(),
                 LayerNorm((28^2,)),
                 x -> Phase.(tanh.(x)),

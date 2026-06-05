@@ -2,16 +2,18 @@
 using Pkg
 Pkg.activate("..")
 
-# Include necessary source files and import packages
-include("../src/PhasorNetworks.jl")
-using .PhasorNetworks
+# Load PhasorNetworks as the registered package so package extensions
+# (e.g. PhasorNetworksOneAPIExt) can fire. `include` would create a
+# local module Main.PhasorNetworks with a different identity than the
+# registered package, and extensions would not activate.
+using PhasorNetworks
 using Lux, MLUtils, OneHotArrays, Statistics, LuxCUDA
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
 using Zygote: withgradient
 using Optimisers, ComponentArrays
 using Statistics: mean
-using DifferentialEquations: Heun, Tsit5
+using DifferentialEquations: Tsit5
 using JLD2
 
 solver_args = Dict(:adaptive => false, :dt => 0.01f0)
