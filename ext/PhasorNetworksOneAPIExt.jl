@@ -6,14 +6,30 @@ using oneAPI.oneL0: ZePtr   # oneAPI exports `oneL0` (submodule) and `oneMKL` (s
                             # and `oneArray`, but NOT `ZePtr` at the top level.
                             # Must import explicitly via the oneL0 submodule.
 using NNlib
+# `gpu_device` / `cpu_device` are not exported by PhasorNetworks, but
+# they come into PhasorNetworks's own namespace through `using Lux` in
+# src/imports.jl. The extension needs an independent import to use them.
+using Lux: gpu_device, cpu_device
 
 # Add a Val{:oneapi} method to PhasorNetworks.select_device. The package
 # defines select_device(::Symbol) → select_device(Val(backend)) plus
 # methods for :cuda, :cpu, and a fallback. Extending via Val keeps each
 # method's signature unique, so Julia's strict precompile (Aurora) does
 # not flag this as method overwriting.
+#
+# Mirrors the :cuda branch in src/backend.jl: check the backend is
+# actually functional, fall back to CPU with a warning otherwise. The
+# device type (oneAPIDevice / CUDADevice) lives in MLDataDevices/Lux,
+# not in the GPU vendor's package — `gpu_device()` auto-selects based
+# on which GPU backend is loaded and functional, so we don't need to
+# spell out `oneAPIDevice()` ourselves.
 function PhasorNetworks.select_device(::Val{:oneapi})
-    return oneAPI.oneAPIDevice()
+    if oneAPI.functional()
+        return gpu_device()
+    else
+        @warn "oneAPI requested but not functional, falling back to CPU"
+        return cpu_device()
+    end
 end
 
 # ------------------------------------------------------------------
