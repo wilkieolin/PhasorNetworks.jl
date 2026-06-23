@@ -70,9 +70,13 @@ Common dispatch summary across these layers:
 
 The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) is mathematically equivalent to the continuous ODE, linking all modes.
 
-`PhasorConv` currently still has the legacy "complex 3D in" path baked
-in; its docstring carries a note about migrating it to follow the
-encoder/phase-layer split when next touched.
+Note on `PhasorConv`: unlike `PhasorDense`, its discrete (Phase/Complex)
+path does **not** unroll the SSM kernel over time. The complex dispatch is
+a single linear convolution step (`conv(real(x)) + i·conv(imag(x)) + bias`),
+and the Phase dispatch wraps that core (`angle_to_complex` → complex step →
+activation → `complex_to_angle`). Per-channel `λ` (`log_neg_lambda`) is
+consumed only in the `CurrentCall` ODE path. Bringing the discrete path in
+line with `PhasorDense`'s temporal SSM convolution is open work.
 
 ### Lux Layer Contract
 
@@ -125,17 +129,28 @@ Input → Encoding (Phase, complex, or spike train)
 
 ### Source File Responsibilities
 
+Listed in `include()` order (see `src/PhasorNetworks.jl`), which also reflects
+the load-dependency order.
+
 | File | Role |
 |------|------|
+| `imports.jl` | Centralized `using`/`import` of all external dependencies (CUDA, Lux, DifferentialEquations, FFTW, ChainRulesCore, …); loaded first |
+| `constants.jl` | Module-level constants: `N_THREADS`, `pi_f32`, unit phasors (`z_0`, `z_90cw`, `z_90ccw`), and legacy `cdev`/`gdev` device handles (prefer `select_device`) |
 | `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
+| `backend.jl` | Backend-agnostic GPU helpers: `on_gpu` (any-backend detection via `AbstractGPUArray`), `select_device(backend)` for `:cuda`/`:cpu`/`:oneapi` |
 | `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
-| `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
-| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
-| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, encoding helpers, spiking dispatch, deprecated `PhasorSSM` compat |
+| `activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`, …) passed as the `activation` argument to layers; pure domain conversions stay in `domains.jl` |
+| `gpu.jl` | CUDA/KernelAbstractions kernels mirroring CPU paths for spike processing, scatter-add, similarity |
 | `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
-| `gpu.jl` | CUDA kernels mirroring CPU paths for spike processing, scatter-add, similarity |
+| `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
+| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch. (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
+| `attractor_ssm.jl` | `AttractorPhasorSSM`: selective SSM adding a Hopfield-style attractor pull toward learned phasor codes (`attractor_pull`); reduces to the linear SSM when pull strength α=0 |
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
+| `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
+| `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
+| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `StaticEP`/`LockinEP`, `SimilarityCost`/`CodebookCost` |
 
 ### Key Type Aliases
 

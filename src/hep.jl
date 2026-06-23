@@ -298,14 +298,6 @@ function _forward_init(weights, biases, x, activation)
     return states
 end
 
-function _state_eltype(beta, x)
-    if beta isa Complex || eltype(x) <: Complex
-        return ComplexF32
-    else
-        return Float32
-    end
-end
-
 # ================================================================
 # 6. Energy Function
 # ================================================================

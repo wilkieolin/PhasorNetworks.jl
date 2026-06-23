@@ -4,12 +4,12 @@ SSM Encoding × Initialization × Architecture Experiment
 
 Compares conditions on FashionMNIST across three axes:
 
-  Init:      uniform | hippo
+  Init:      default | hippo
   Encoding:  complex PSK | impulse
   Model:     base (SSM only) | attention (SSM + SSMSelfAttention)
 
-Base model:      PhasorSSM → PhasorSSM → SSMReadout
-Attention model: PhasorSSM → SSMSelfAttention → PhasorSSM → SSMReadout
+Base model:      PhasorDense → PhasorDense → SSMReadout
+Attention model: PhasorDense → SSMSelfAttention → PhasorDense → SSMReadout
 
 Complex PSK: pixel v → constant complex phasor exp(iπ(2v-1)) at each step.
   The phase information is present at every time step simultaneously.
@@ -36,19 +36,19 @@ using ArgParse
 # Experiment Runner
 # ================================================================
 
-function build_model(; C_in=28, D_hidden=128, n_classes=10, init_mode=:uniform,
+function build_model(; C_in=28, D_hidden=128, n_classes=10, init_mode=:default,
                        model_type=:base)
     if model_type == :attention
         return Chain(
-            PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init=init_mode),
+            PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=init_mode, use_bias=false),
             SSMSelfAttention(D_hidden => D_hidden, normalize_to_unit_circle),
-            PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
+            PhasorDense(D_hidden => D_hidden, identity; init_mode=init_mode, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
     else
         return Chain(
-            PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init=init_mode),
-            PhasorSSM(D_hidden => D_hidden, identity; init=init_mode),
+            PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=init_mode, use_bias=false),
+            PhasorDense(D_hidden => D_hidden, identity; init_mode=init_mode, use_bias=false),
             SSMReadout(D_hidden => n_classes),
         )
     end
@@ -82,8 +82,8 @@ function run_experiment(; n_epochs=20, batchsize=128, lr=3e-4, D_hidden=128,
     conditions = Tuple{String, Symbol, Symbol, Symbol}[]
     for mt in model_types
         suffix = mt == :attention ? "+attn" : ""
-        for (init_mode, encoding) in [(:uniform, :complex), (:hippo, :complex),
-                                       (:uniform, :impulse), (:hippo, :impulse)]
+        for (init_mode, encoding) in [(:default, :complex), (:hippo, :complex),
+                                       (:default, :impulse), (:hippo, :impulse)]
             name = "$(init_mode)+$(encoding)$(suffix)"
             push!(conditions, (name, init_mode, encoding, mt))
         end
@@ -154,9 +154,9 @@ end
 function plot_results(results, n_epochs)
     # Colors by init+encoding pair; linestyle by model type
     base_colors = Dict(
-        "uniform+complex"  => :blue,
+        "default+complex"  => :blue,
         "hippo+complex"    => :red,
-        "uniform+impulse"  => :cyan,
+        "default+impulse"  => :cyan,
         "hippo+impulse"    => :orange,
     )
     get_color(name) = base_colors[replace(name, "+attn" => "")]
@@ -165,8 +165,8 @@ function plot_results(results, n_epochs)
 
     # Stable ordering: base conditions first, then attention
     order = [
-        "uniform+complex",  "hippo+complex",  "uniform+impulse",  "hippo+impulse",
-        "uniform+complex+attn", "hippo+complex+attn", "uniform+impulse+attn", "hippo+impulse+attn",
+        "default+complex",  "hippo+complex",  "default+impulse",  "hippo+impulse",
+        "default+complex+attn", "hippo+complex+attn", "default+impulse+attn", "hippo+impulse+attn",
     ]
 
     # Accuracy curves
@@ -206,7 +206,7 @@ function plot_results(results, n_epochs)
     p = plot(p_acc, p_loss, p_bar;
              layout=@layout([a b; c{0.4h}]),
              size=(1100, 850),
-             plot_title="PhasorSSM: Init × Encoding × Architecture")
+             plot_title="Phasor SSM: Init × Encoding × Architecture")
 
     savefig(p, "ssm_experiment_results.png")
     println("\nPlot saved to ssm_experiment_results.png")
@@ -218,7 +218,7 @@ end
 # ================================================================
 
 function experiment_main()
-    s = ArgParseSettings(description="PhasorSSM Init × Encoding × Architecture experiment")
+    s = ArgParseSettings(description="Phasor SSM Init × Encoding × Architecture experiment")
     @add_arg_table! s begin
         "--epochs"
             help = "number of training epochs per condition"
@@ -267,8 +267,8 @@ function experiment_main()
     println("  SUMMARY")
     println("="^60)
     all_names = [
-        "uniform+complex", "hippo+complex", "uniform+impulse", "hippo+impulse",
-        "uniform+complex+attn", "hippo+complex+attn", "uniform+impulse+attn", "hippo+impulse+attn",
+        "default+complex", "hippo+complex", "default+impulse", "hippo+impulse",
+        "default+complex+attn", "hippo+complex+attn", "default+impulse+attn", "hippo+impulse+attn",
     ]
     for name in all_names
         haskey(results, name) || continue

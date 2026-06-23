@@ -228,7 +228,7 @@ end
 Build a two-layer Phasor SSM with codebook readout.
 """
 function create_model(; C_in::Int, D_hidden::Int=64, n_classes::Int=10,
-                        init_mode::Symbol=:uniform, readout_frac::Float32=0.25f0)
+                        init_mode::Symbol=:default, readout_frac::Float32=0.25f0)
     return Chain(
         PhasorDense(C_in => D_hidden, normalize_to_unit_circle;
                     init_mode=init_mode, use_bias=false),
@@ -326,7 +326,7 @@ function scale_dynamics_for_length(ps::NamedTuple, st::NamedTuple,
         # shapes the memory window at large L.
         log_neg_lambda = Float32.(log.(-λ_scaled))
         omega = ω_scaled
-    else  # :uniform
+    else  # non-hippo (:default): uniform λ/ω scaling
         λ_val = 2f0 / Float32(seq_len)
         log_neg_lambda = fill(Float32(log(λ_val)), D_hidden)
         omega = Float32.(collect(range(0.1f0, 1.5f0; length=D_hidden)))

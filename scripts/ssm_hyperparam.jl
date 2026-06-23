@@ -1,7 +1,7 @@
 #=
 scripts/ssm_hyperparam.jl
 
-Hyperparameter exploration script for PhasorSSM models on FashionMNIST.
+Hyperparameter exploration script for Phasor SSM models on FashionMNIST.
 Designed to be called by an external optimizer (e.g. Optuna via PyJulia):
 
     accuracy = run_trial(; lr=1e-3, epochs=10, activation=:hard, readout_frac=0.25)
@@ -20,7 +20,7 @@ Hyperparameters explored:
   - readout_frac:  Fraction of final time steps averaged by SSMReadout
 
 Fixed choices (per user spec):
-  - init = :uniform (SSM weight initializer)
+  - init = :default (SSM weight initializer)
   - encoding = PSK (constant phase-encoded inputs, not impulse)
 =#
 
@@ -76,8 +76,8 @@ function create_ssm_model(; D_hidden::Int=128, n_classes::Int=10, C_in::Int=28,
                             readout_frac::Float32=0.25f0)
     act = build_activation(activation; r_lo, r_hi)
     model = Chain(
-        PhasorSSM(C_in => D_hidden, act; init=:uniform),
-        PhasorSSM(D_hidden => D_hidden, identity; init=:uniform),
+        PhasorDense(C_in => D_hidden, act; init_mode=:default, use_bias=false),
+        PhasorDense(D_hidden => D_hidden, identity; init_mode=:default, use_bias=false),
         SSMReadout(D_hidden => n_classes; readout_frac),
     )
     return model
@@ -116,7 +116,7 @@ end
 """
     run_trial(; kwargs...) -> Float64
 
-Train a PhasorSSM model with the given hyperparameters and return test accuracy.
+Train a Phasor SSM model with the given hyperparameters and return test accuracy.
 This is the entry point for external optimizers (e.g. Optuna).
 
 # Keyword Arguments
@@ -179,7 +179,7 @@ end
 # ================================================================
 
 function parse_cli()
-    s = ArgParseSettings(description="PhasorSSM hyperparameter trial")
+    s = ArgParseSettings(description="Phasor SSM hyperparameter trial")
     @add_arg_table! s begin
         "--lr"
             help = "learning rate"

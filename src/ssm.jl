@@ -3,9 +3,11 @@
 # ================================================================
 #
 # Kernel math (phasor_kernel, causal_conv, hippo_legs_diagonal) is in kernels.jl.
-# PhasorSSM struct has been unified into PhasorDense (network.jl).
-# This file keeps: SSMReadout, attention layers, encoding, spiking helpers,
-# and a backward-compatible PhasorSSM(...) constructor function.
+# The former PhasorSSM struct has been unified into PhasorDense (network.jl);
+# there is NO PhasorSSM constructor. Use
+#   PhasorDense(in => out, act; init_mode=:default|:hippo, use_bias=false)
+# instead. This file keeps: SSMReadout, attention layers, encoding, and
+# spiking helpers.
 
 
 # ================================================================
@@ -774,37 +776,6 @@ end
 # ---- ODE Output Extraction ----
 
 """
-    ssm_extract_phases(sol, L::Int, t_period::Float32, activation::Function)
-
-Sample an ODE solution at L period boundaries and return a 3D complex array.
-
-# Arguments
-- `sol`: ODE solution (interpolatable at arbitrary times)
-- `L::Int`: Number of time steps to sample
-- `t_period::Float32`: Duration of each oscillation period
-- `activation::Function`: Applied after sampling (e.g. `normalize_to_unit_circle`)
-
-# Returns
-Complex array (out_dims × L × B) — the activated membrane potentials at each period.
-No per-channel derotation is applied; both discrete SSM and ODE include the same
-rotation from omega, so phases are directly comparable.
-"""
-function ssm_extract_phases(sol, L::Int, t_period::Float32, activation::Function)
-    samples = [sol(Float32(l) * t_period) for l in 1:L]
-
-    # Stack into 3D: each sample is (out_dims,) or (out_dims, B)
-    if ndims(samples[1]) == 1
-        # (out_dims,) → (out_dims, L)
-        Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
-    else
-        # (out_dims, B) → (out_dims, L, B)
-        Z = cat([reshape(s, size(s, 1), 1, size(s, 2)) for s in samples]...; dims=2)
-    end
-
-    return activation(Z)
-end
-
-"""
     sample_phases_at_periods(sol, L::Int, spk_args::SpikingArgs;
                               activation = identity,
                               unrotate::Bool = false,
@@ -867,10 +838,9 @@ phases = sample_phases_at_periods(sol, L, spk_args;
 # comparable to a (post-§4.1) `PhasorDense` 3D Phase Dirac output.
 ```
 
-See also: [`ssm_extract_phases`](@ref) (returns complex without phase
-conversion or unrotation), [`reconstruct_from_current`](@ref)
-(re-solves a bare oscillator and additionally deconvolves causal
-accumulation — used by SSM attention spiking dispatch).
+See also: [`reconstruct_from_current`](@ref) (re-solves a bare
+oscillator and additionally deconvolves causal accumulation — used by
+SSM attention spiking dispatch).
 """
 function sample_phases_at_periods(sol, L::Int, spk_args::SpikingArgs;
                                    activation = identity,
@@ -887,7 +857,7 @@ function sample_phases_at_periods(sol, L::Int, spk_args::SpikingArgs;
     end
 
     # Stack into (C_out, L, B) for 2D per-time potentials, or
-    # (C_out, L) for 1D — same convention as ssm_extract_phases.
+    # (C_out, L) for 1D.
     if ndims(samples[1]) == 1
         Z = reduce(hcat, [reshape(s, :, 1) for s in samples])
     else

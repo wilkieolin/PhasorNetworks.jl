@@ -40,7 +40,6 @@ period_to_angfreq,
 angfreq_to_period,
 normalize_to_unit_circle,
 soft_normalize_to_unit_circle,
-periodic_von_mises_kernel,
 complex_von_mises_kernel,
 
 #spiking
@@ -59,7 +58,6 @@ get_time,
 
 #vsa
 v_bundle,
-v_bundle_project,
 v_bind,
 v_unbind,
 angle_to_complex,
@@ -90,7 +88,6 @@ PhasorLSA,
 PhasorLCA,
 MakeSpikingSSM,
 ssm_phases_to_train,
-ssm_extract_phases,
 sample_phases_at_periods,
 reconstruct_from_current,
 
@@ -130,9 +127,6 @@ hep_cost_xent,
 hep_cost_xent_grad,
 HolomorphicReadout,
 hep_interference_cost,
-hep_interference_cost_grad,
-extract_hep_params,
-pack_hep_gradients,
 
 #ep
 SimilarityCost,
