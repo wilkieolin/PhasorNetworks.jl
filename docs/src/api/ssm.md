@@ -42,7 +42,6 @@ ssm_phases_to_train
 ## Output extraction
 
 ```@docs
-ssm_extract_phases
 sample_phases_at_periods
 reconstruct_from_current
 ```
