@@ -3,9 +3,10 @@ Discrete State Space Model for Phasor Networks — Demo
 =====================================================
 
 PSK-encode FashionMNIST as a complex time series and classify it
-using a stack of PhasorSSM layers with a Codebook readout and similarity loss.
+using a stack of PhasorDense (SSM-mode) layers with a Codebook readout and
+similarity loss.
 
-All SSM primitives (PhasorSSM, SSMReadout, phasor_kernel, causal_conv,
+All SSM primitives (PhasorDense, SSMReadout, phasor_kernel, causal_conv,
 hippo_legs_diagonal, psk_encode) are imported from PhasorNetworks.
 =#
 
@@ -19,10 +20,10 @@ using ArgParse
 # Model + Loss
 # ================================================================
 
-function create_model(; D_hidden=128, n_classes=10, C_in=28, init=:uniform)
+function create_model(; D_hidden=128, n_classes=10, C_in=28, init=:default)
     model = Chain(
-        PhasorSSM(C_in => D_hidden, normalize_to_unit_circle; init),
-        PhasorSSM(D_hidden => D_hidden, identity; init),
+        PhasorDense(C_in => D_hidden, normalize_to_unit_circle; init_mode=init, use_bias=false),
+        PhasorDense(D_hidden => D_hidden, identity; init_mode=init, use_bias=false),
         SSMReadout(D_hidden => n_classes),
     )
     return model
@@ -64,7 +65,7 @@ end
 # ================================================================
 
 function parse_args()
-    s = ArgParseSettings(description="PhasorSSM: Discrete state-space phasor network on FashionMNIST")
+    s = ArgParseSettings(description="Phasor SSM: Discrete state-space phasor network on FashionMNIST")
     @add_arg_table! s begin
         "--epochs"
             help = "number of training epochs"
@@ -90,9 +91,9 @@ function parse_args()
             help = "disable CUDA even if available"
             action = :store_true
         "--init"
-            help = "parameter initialization: uniform or hippo"
+            help = "parameter initialization: default or hippo"
             arg_type = String
-            default = "uniform"
+            default = "default"
     end
     return ArgParse.parse_args(s)
 end

@@ -1051,15 +1051,15 @@ Flat structure with per-channel oscillator dynamics, matching PhasorDense.
 [`period_to_angfreq`](@ref); shared across all output channels by the
 per-channel ω rule. See [`PhasorDense`](@ref) for the full rationale.
 
-!!! note "Architectural direction"
-    PhasorConv still accepts complex-valued inputs and runs the ZOH SSM
-    internally — mirroring the pre-refactor PhasorDense layout. The
-    intended direction (already applied to `PhasorDense`) is to split
-    that responsibility off into a dedicated complex→phase encoder layer
-    (cf. [`PhasorResonant`](@ref)) and have `PhasorConv` operate purely
-    in the phase domain. When you next touch this layer, consider doing
-    the same split: keep the Phase paths here, move the complex-input
-    SSM kernel into a `PhasorResonantConv` (or similar) sibling.
+!!! note "Discrete vs ODE behavior"
+    Unlike [`PhasorDense`](@ref), `PhasorConv`'s discrete path does **not**
+    unroll the SSM kernel over time. The complex dispatch is a single linear
+    step, `conv(real(x)) + i·conv(imag(x)) + bias`; the Phase dispatch wraps
+    that core (`angle_to_complex` → complex step → activation →
+    `complex_to_angle`). Per-channel `λ` (`log_neg_lambda`) is consumed only
+    in the `CurrentCall` ODE path (`dz/dt = k·z + W·I(t)`). Bringing the
+    discrete path in line with `PhasorDense`'s temporal SSM convolution
+    (a `causal_conv` over the phasor kernel) is open work.
 """
 struct PhasorConv <: Lux.AbstractLuxLayer
     _conv  # Internal Conv for forward pass mechanics

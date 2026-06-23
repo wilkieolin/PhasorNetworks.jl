@@ -145,7 +145,7 @@ end
 """
     gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
     gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real) -> Array{Float32}
-    arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real) -> Array{Float32}
+    periodic_gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real, t_period::Real) -> Array{Float32}
 
 Family of kernel functions for computing spike-induced currents.
 
@@ -157,7 +157,7 @@ Family of kernel functions for computing spike-induced currents.
 # Variants
 - `gaussian_kernel`: Standard Gaussian kernel for spike times
 - `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
-- `periodic_gaussian_kernel`: Periodic version using modulo distances
+- `periodic_gaussian_kernel`: Periodic version using modulo distances over `t_period`
 
 See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
 """

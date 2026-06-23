@@ -86,7 +86,7 @@ include("test_local_attention.jl")
 include("test_attractor_ssm.jl")
 include("test_hep.jl")
 include("test_ep.jl")
-#include("PROPOSED_spiking_operations_tests.jl")
+include("spiking_operations_tests.jl")
 
 @testset "PhasorNetworks.jl" begin
     # Backend abstraction tests — self-contained @testset, just include it.
@@ -102,7 +102,7 @@ include("test_ep.jl")
     attractor_ssm_tests()
     hep_tests()
     ep_tests()
-    #spiking_operations_tests()
+    spiking_operations_tests()
 
     # Backend-agnostic GPU test gate. `gpu_device()` auto-selects whichever
     # backend has functional hardware (CUDA on NVIDIA, oneAPI on Intel via

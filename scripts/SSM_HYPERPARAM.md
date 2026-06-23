@@ -1,11 +1,11 @@
-# PhasorSSM Hyperparameter Search
+# Phasor SSM Hyperparameter Search
 
-Two scripts for exploring the PhasorSSM parameter space on FashionMNIST:
+Two scripts for exploring the Phasor SSM parameter space on FashionMNIST:
 
 - `ssm_hyperparam.jl` — Julia script that runs a single training trial and returns accuracy
 - `ssm_optuna.py` — Python script that drives Optuna over the Julia trial script
 
-Fixed choices: uniform SSM initialization, PSK (constant phase) encoding.
+Fixed choices: `:default` SSM initialization, PSK (constant phase) encoding.
 
 ## Single Trial (Julia)
 

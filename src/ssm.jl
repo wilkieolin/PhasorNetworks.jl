@@ -3,9 +3,11 @@
 # ================================================================
 #
 # Kernel math (phasor_kernel, causal_conv, hippo_legs_diagonal) is in kernels.jl.
-# PhasorSSM struct has been unified into PhasorDense (network.jl).
-# This file keeps: SSMReadout, attention layers, encoding, spiking helpers,
-# and a backward-compatible PhasorSSM(...) constructor function.
+# The former PhasorSSM struct has been unified into PhasorDense (network.jl);
+# there is NO PhasorSSM constructor. Use
+#   PhasorDense(in => out, act; init_mode=:default|:hippo, use_bias=false)
+# instead. This file keeps: SSMReadout, attention layers, encoding, and
+# spiking helpers.
 
 
 # ================================================================
