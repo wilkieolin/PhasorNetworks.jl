@@ -18,6 +18,7 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 mutable struct Args
     lr::Float64
     lr_ssm::Float64
+    lr_alpha::Float64
     weight_decay::Float64
     cosine_schedule::Bool
     lr_min::Float64
@@ -30,6 +31,7 @@ end
 
 function Args(; lr::Float64 = 0.0003,
                lr_ssm::Float64 = 0.0,
+               lr_alpha::Float64 = 0.0,
                weight_decay::Float64 = 0.0,
                cosine_schedule::Bool = false,
                lr_min::Float64 = 1e-6,
@@ -43,7 +45,7 @@ function Args(; lr::Float64 = 0.0003,
         Base.depwarn("Args(use_cuda=...) is deprecated, use Args(backend=:cuda/:cpu) instead", :Args)
         backend = use_cuda ? :cuda : :cpu
     end
-    return Args(lr, lr_ssm, weight_decay, cosine_schedule, lr_min,
+    return Args(lr, lr_ssm, lr_alpha, weight_decay, cosine_schedule, lr_min,
                 gc_interval, batchsize, epochs, backend, rng)
 end
 

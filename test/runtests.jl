@@ -64,6 +64,7 @@ tbase = collect(tspan[1]:spk_args.solver_args[:dt]:tspan[2])
 @kwdef mutable struct Args
     lr::Float64 = 3e-4       ## learning rate
     lr_ssm::Float64 = 0.0    ## SSM dynamics learning rate (0 = use lr)
+    lr_alpha::Float64 = 0.0  ## ReZero gate (alpha) learning rate (0 = use lr)
     weight_decay::Float64 = 0.0 ## weight decay (weights only, not SSM params)
     cosine_schedule::Bool = false ## cosine LR annealing
     lr_min::Float64 = 1e-6   ## minimum LR for cosine schedule

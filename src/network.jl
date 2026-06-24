@@ -1565,45 +1565,80 @@ Residual blocks
 """
 
 """
-    ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
+    ResidualBlock(dimensions, activation = normalize_to_unit_circle;
+                  gate = :none, alpha0 = 0.1f0, branch_init_scale = 0.1f0, kwargs...)
 
-Residual block for phase-based neural networks, implementing skip connections
-through phase binding.
+Residual block for phase networks: `y = v_bind(x, g · ff(x))`, a phase-domain skip
+connection (`v_bind(x, z) = remap_phase(x + z)` — addition in the phase domain,
+whose identity element is `ff(x) = 0`).
+
+# Identity-at-init (why the defaults matter)
+
+To train deep stacks the branch must start *≈ identity*, i.e. emit output phase
+≈ 0 at initialization. Otherwise each block applies a real phase rotation, those
+rotations compound across depth into a random walk, and the representation
+scrambles (the network collapses past a depth ceiling). The block ships with two
+mechanisms that enforce identity-at-init:
+
+- **Down-scaled branch init (default).** The branch `PhasorDense` weights are
+  initialized with `branch_init_scale · glorot_uniform` (default γ = 0.1), so
+  `ff(x) ≈ 0` at init and the block ≈ identity. Robust default — depth-robust
+  with no extra parameters. Override with your own `init_weight`.
+- **ReZero gate (`gate = :rezero`).** Adds a learnable scalar `α` per block
+  (initialized to `alpha0`, default 0.1): `y = v_bind(x, α · ff(x))`. `α` lets the
+  optimizer set each block's contribution (it typically shrinks with depth —
+  adaptive depth allocation). Best for very deep stacks (≳30 layers). It benefits
+  from a higher learning rate on `α` (e.g. ~5×) and adequate training epochs to
+  warm up; with too small a budget it can underperform the plain down-scaled init.
+
+Bias is on by default (the dominant conditioner for phase layers) — keep it on for
+residual use.
 
 # Fields
-- `ff`: Feed-forward chain of phase-based layers
+- `ff`: feed-forward `Chain` of `PhasorDense` layers
+- `gate`: `:none` (plain bind) or `:rezero` (learnable α gate)
+- `alpha0`: ReZero gate initialization (used when `gate === :rezero`)
 
-# Implementation Details
-1. Processes input through feed-forward path
-2. Binds (combines) original input with processed output
-3. Maintains phase-based representation throughout
-
-Used to build deep phase networks while mitigating phase degradation,
-similar to residual connections in standard neural networks but using
-phase binding for combination.
-
-See also: [`v_bind`](@ref) for the phase binding operation
+See also: [`v_bind`](@ref) for the phase binding operation.
 """
-struct ResidualBlock <: LuxCore.AbstractLuxContainerLayer{(:ff,)}
-    ff
+struct ResidualBlock{F} <: Lux.AbstractLuxLayer
+    ff::F
+    gate::Symbol
+    alpha0::Float32
 end
 
-function ResidualBlock(dimensions::Tuple{Vararg{Int}}, activation::Function; kwargs...)
+function ResidualBlock(dimensions::Tuple{Vararg{Int}},
+                       activation = normalize_to_unit_circle;
+                       gate::Symbol = :none,
+                       alpha0::Real = 0.1f0,
+                       branch_init_scale::Real = 0.1f0,
+                       init_weight = nothing,
+                       kwargs...)
     @assert length(dimensions) >= 2 "Must have at least 1 layer"
-    #construct a Phasor MLP based on the given dimensions
+    gate in (:none, :rezero) || throw(ArgumentError("gate must be :none or :rezero, got :$gate"))
+    # Start the branch ≈ identity by down-scaling its weight init, unless the
+    # caller supplies their own init_weight.
+    iw = init_weight === nothing ?
+        ((rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)) :
+        init_weight
     pairs = [dimensions[i] => dimensions[i+1] for i in 1:length(dimensions) - 1]
-    layers = [PhasorDense(pair, activation; kwargs...) for pair in pairs]
+    layers = [PhasorDense(pair, activation; init_weight = iw, kwargs...) for pair in pairs]
     ff = Chain(layers...)
-
-    return ResidualBlock(ff)
+    return ResidualBlock(ff, gate, Float32(alpha0))
 end
+
+function Lux.initialparameters(rng::AbstractRNG, rb::ResidualBlock)
+    ps = (ff = Lux.initialparameters(rng, rb.ff),)
+    return rb.gate === :rezero ? merge(ps, (alpha = Float32[rb.alpha0],)) : ps
+end
+Lux.initialstates(rng::AbstractRNG, rb::ResidualBlock) = (ff = Lux.initialstates(rng, rb.ff),)
 
 function (rb::ResidualBlock)(x, ps, st)
-    # MLP path
+    # branch path
     ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
-    y = v_bind(x, ff_out)
-    
-    return y, (ff=st_ff,)
+    # phase-domain skip; ReZero gate scales the branch (α=0 ⇒ exact identity)
+    y = rb.gate === :rezero ? v_bind(x, ps.alpha .* ff_out) : v_bind(x, ff_out)
+    return y, (ff = st_ff,)
 end
 
 """
@@ -1830,6 +1865,27 @@ function _adjust_ssm_lr!(opt_state, ps, lr_ssm)
 end
 
 """
+    _adjust_alpha_lr!(opt_state, ps, lr_alpha)
+
+Walk the optimizer state tree and set the learning rate for ReZero gate
+parameters (`alpha`, from `ResidualBlock(gate=:rezero)`) to `lr_alpha`, leaving
+all other parameters unchanged. The gate warms up from a small value, so it
+typically benefits from a higher LR than the rest of the network (e.g. ~5×).
+Supports integer indices in the parameter path (e.g. gates held in a `Vector`).
+"""
+function _adjust_alpha_lr!(opt_state, ps, lr_alpha)
+    for (kp, _) in Optimisers.trainables(ps, path=true)
+        if last(kp.keys) === :alpha
+            node = opt_state
+            for k in kp.keys
+                node = k isa Integer ? node[k] : getproperty(node, k)
+            end
+            Optimisers.adjust!(node, lr_alpha)
+        end
+    end
+end
+
+"""
     _apply_weight_decay(gs, ps, wd)
 
 Add L2 weight decay to gradients for `:weight` parameters only.
@@ -1888,7 +1944,9 @@ Automatically handles CPU/GPU device placement based on args.backend.
 
 # Training features
 - **Differential LR**: Set `args.lr_ssm` to use a lower learning rate for SSM dynamics
-  parameters (`log_neg_lambda`, `omega`) vs connection weights.
+  parameters (`log_neg_lambda`, `omega`) vs connection weights. Set `args.lr_alpha`
+  to use a separate (typically higher, e.g. ~5×) learning rate for `ResidualBlock`
+  ReZero gate parameters (`alpha`), which warm up from a small value.
 - **Weight decay**: Set `args.weight_decay > 0` to apply L2 regularization to weight
   matrices only (not SSM dynamics parameters).
 - **Cosine schedule**: Set `args.cosine_schedule = true` to anneal learning rates from
@@ -1912,6 +1970,12 @@ function train(model, ps, st, train_loader, loss, args;
    use_ssm_lr = args.lr_ssm > 0 && args.lr_ssm != args.lr
    if use_ssm_lr
        _adjust_ssm_lr!(opt_state, ps, args.lr_ssm)
+   end
+
+   # Differential learning rate for ReZero gate parameters (`alpha`)
+   use_alpha_lr = args.lr_alpha > 0 && args.lr_alpha != args.lr
+   if use_alpha_lr
+       _adjust_alpha_lr!(opt_state, ps, args.lr_alpha)
    end
 
    # Precompute total steps for cosine schedule
@@ -1961,6 +2025,10 @@ function train(model, ps, st, train_loader, loss, args;
                if use_ssm_lr
                    lr_ssm_t = args.lr_min + (args.lr_ssm - args.lr_min) * cos_mult
                    _adjust_ssm_lr!(opt_state, ps, lr_ssm_t)
+               end
+               if use_alpha_lr
+                   lr_alpha_t = args.lr_min + (args.lr_alpha - args.lr_min) * cos_mult
+                   _adjust_alpha_lr!(opt_state, ps, lr_alpha_t)
                end
            end
 
