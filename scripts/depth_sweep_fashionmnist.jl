@@ -142,21 +142,9 @@ function (b::ReZeroResidualBlock)(x, ps, st)
     return y, (ff = st_ff,)
 end
 
-"""
-    PhaseRecenter()
-
-LayerNorm-style recentering for the phase domain: subtract the per-sample
-circular mean across the channel axis (dim 1), pulling phases back toward 0.
-Parameter-free.
-"""
-struct PhaseRecenter <: Lux.AbstractLuxLayer end
-Lux.initialparameters(::AbstractRNG, ::PhaseRecenter) = NamedTuple()
-Lux.initialstates(::AbstractRNG, ::PhaseRecenter) = NamedTuple()
-function (::PhaseRecenter)(x, ps, st)
-    z  = angle_to_complex(x)
-    mθ = complex_to_angle(sum(z, dims = 1))   # circular mean angle over channels
-    return v_bind(x, .-mθ), st
-end
+# NOTE: `PhaseRecenter` (phase-domain pre-norm) now lives in `src/ssm.jl` and is
+# exported by PhasorNetworks; the former script-local definition was removed to
+# avoid clobbering the exported name.
 
 """
     make_block(D; use_bias, use_residual, lnl, residual_mode=:bind,

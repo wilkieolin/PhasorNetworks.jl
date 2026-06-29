@@ -964,3 +964,161 @@ function (l::SSMReadout)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
     z_3d = reconstruct_from_current(x, L, x.spk_args)
     return l(z_3d, ps, st)
 end
+
+# ================================================================
+# 8. Phase-domain pre-norm, residual wrapper, and transformer block
+# ================================================================
+#
+# Building blocks for *stacking* the local-attention layers (PhasorLSA /
+# PhasorLCA) into deep transformer towers. PhasorLSA/PhasorLCA are bare
+# attention layers (no skip connection); a residual wrapper + a phase-domain
+# pre-norm are what make them stackable at depth without the representation
+# scrambling into a random walk (see the identity-at-init analysis behind
+# `ResidualBlock`, and `results/lsa_lca_residual/`).
+
+"""
+    PhaseRecenter() <: Lux.AbstractLuxLayer
+
+Phase-domain pre-norm: subtract the per-sample circular mean across the
+channel axis (dim 1), pulling the representation back toward phase 0. The
+phase analog of LayerNorm's centering step; parameter-free.
+
+Operates on `(C, …)` Phase arrays of any rank (2D `(C, B)` or 3D
+`(C, L, B)`) and returns a `Phase` array of the same shape. The circular
+mean is computed in the complex domain (`angle_to_complex` → sum over
+channels → `complex_to_angle`) so it is well-defined under wraparound.
+"""
+struct PhaseRecenter <: Lux.AbstractLuxLayer end
+Lux.initialparameters(::AbstractRNG, ::PhaseRecenter) = NamedTuple()
+Lux.initialstates(::AbstractRNG, ::PhaseRecenter) = NamedTuple()
+function (::PhaseRecenter)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTuple)
+    z  = angle_to_complex(x)
+    mθ = complex_to_angle(sum(z, dims = 1))   # circular mean angle over channels
+    return v_bind(x, .-mθ), st
+end
+
+"""
+    PhasorResidual(layer; gate = :none, alpha0 = 0.1f0) <: Lux.AbstractLuxLayer
+
+Identity-at-init residual wrapper around an arbitrary **shape-preserving**
+phase layer: `y = v_bind(x, g · layer(x))`. `v_bind` is phase-domain
+addition (its identity element is a branch output of 0, and it passes a
+straight-through gradient of 1 to *both* the skip and the branch), and `g`
+is the gate:
+
+- `:none` — `g = 1`. Identity-at-init then depends on `layer` itself
+  emitting ≈ 0 output phase at init (e.g. a down-scaled `PhasorDense`
+  branch).
+- `:rezero` — `g = α`, a single learnable scalar initialized to `alpha0`.
+  With `alpha0 = 0` the block is **exactly** identity at init (`dy/dx = I`)
+  regardless of what `layer` computes. This is the right identity-at-init
+  mechanism for attention sublayers, whose output is a head-mix / binding
+  rotation that weight-downscaling cannot cleanly drive to zero phase.
+
+Unlike [`ResidualBlock`](@ref) — which builds and wraps its *own*
+`PhasorDense` chain — `PhasorResidual` wraps **any** pre-built layer
+(`PhasorLSA`, `PhasorLCA`, `SSMSelfAttention`, a `Chain`, …), so it is the
+residual unit used by [`PhasorTransformerBlock`](@ref). `layer` must map
+`(C, …)` → `(C, …)` (in_dims == out_dims) for the skip to be well-typed.
+
+# Parameters
+- `layer` — the wrapped layer's parameter tree.
+- `alpha` — `Float32[alpha0]` (only when `gate = :rezero`).
+"""
+struct PhasorResidual{L} <: Lux.AbstractLuxLayer
+    layer::L
+    gate::Symbol
+    alpha0::Float32
+end
+
+function PhasorResidual(layer; gate::Symbol = :none, alpha0::Real = 0.1f0)
+    gate in (:none, :rezero) ||
+        throw(ArgumentError("gate must be :none or :rezero, got :$gate"))
+    return PhasorResidual(layer, gate, Float32(alpha0))
+end
+
+function Lux.initialparameters(rng::AbstractRNG, r::PhasorResidual)
+    ps = (layer = Lux.initialparameters(rng, r.layer),)
+    return r.gate === :rezero ? merge(ps, (alpha = Float32[r.alpha0],)) : ps
+end
+Lux.initialstates(rng::AbstractRNG, r::PhasorResidual) =
+    (layer = Lux.initialstates(rng, r.layer),)
+Lux.parameterlength(r::PhasorResidual) =
+    Lux.parameterlength(r.layer) + (r.gate === :rezero ? 1 : 0)
+
+function (r::PhasorResidual)(x, ps::LuxParams, st::NamedTuple)
+    branch, st_layer = r.layer(x, ps.layer, st.layer)
+    y = r.gate === :rezero ? v_bind(x, ps.alpha .* branch) : v_bind(x, branch)
+    return y, (layer = st_layer,)
+end
+
+"""
+    PhasorTransformerBlock(d_model, attn; d_ff = d_model,
+                           activation = normalize_to_unit_circle,
+                           gate = :rezero, alpha0 = 0.1f0,
+                           branch_init_scale = 0.1f0, recenter = true)
+
+Pre-norm phasor transformer block:
+
+```
+x → [recenter] → PhasorResidual(attn) → [recenter] → PhasorResidual(FFN) → y
+```
+
+with `v_bind` (phase-addition) skip connections. `attn` is any
+shape-preserving `d_model ⇒ d_model` phase attention layer
+([`PhasorLSA`](@ref), [`PhasorLCA`](@ref), [`SSMSelfAttention`](@ref)),
+constructed by the caller; `FFN` is a two-layer `PhasorDense` MLP
+(`d_model → d_ff → d_model`). When `recenter = true` a [`PhaseRecenter`]
+(@ref) sits at the head of each residual *branch* (true pre-norm — the
+skip path is left untouched).
+
+The residual treatment is fully configurable, so one struct expresses both
+the pre-identity-at-init regime (`gate = :none, branch_init_scale = 1,
+recenter = false`) and the identity-at-init regime (`gate = :rezero`
+and/or `branch_init_scale < 1`):
+
+- `branch_init_scale` down-scales the **FFN** `PhasorDense` weight init
+  toward a near-identity branch.
+- the **attention** sublayer is brought to identity-at-init by the ReZero
+  gate (`gate = :rezero`, `alpha0 → 0`), since down-scaling Q/K/V does not
+  cleanly zero the attention output.
+
+Phase-domain only: operates on `(d_model, L, B)` (or `(d_model, B)`) Phase
+arrays. For spiking evaluation, run an upstream encoder through the ODE
+path and feed the sampled per-period phases here in discrete dispatch
+(see `scripts/local_attention_compare.jl`).
+
+# Fields
+- `attn_res::PhasorResidual` — residual-wrapped attention (+ optional pre-norm).
+- `ffn_res::PhasorResidual` — residual-wrapped feed-forward MLP (+ optional pre-norm).
+
+See also: [`PhasorResidual`](@ref), [`PhaseRecenter`](@ref),
+[`ResidualBlock`](@ref), [`PhasorLSA`](@ref), [`PhasorLCA`](@ref).
+"""
+struct PhasorTransformerBlock{A, F} <: LuxCore.AbstractLuxContainerLayer{(:attn_res, :ffn_res)}
+    attn_res::A
+    ffn_res::F
+end
+
+function PhasorTransformerBlock(d_model::Int, attn;
+                               d_ff::Int = d_model,
+                               activation = normalize_to_unit_circle,
+                               gate::Symbol = :rezero,
+                               alpha0::Real = 0.1f0,
+                               branch_init_scale::Real = 0.1f0,
+                               recenter::Bool = true)
+    iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
+    ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw),
+                PhasorDense(d_ff => d_model, activation; use_bias = true, init_weight = iw))
+    attn_branch = recenter ? Chain(PhaseRecenter(), attn) : attn
+    ffn_branch  = recenter ? Chain(PhaseRecenter(), ffn) : ffn
+    attn_res = PhasorResidual(attn_branch; gate = gate, alpha0 = alpha0)
+    ffn_res  = PhasorResidual(ffn_branch;  gate = gate, alpha0 = alpha0)
+    return PhasorTransformerBlock(attn_res, ffn_res)
+end
+
+function (b::PhasorTransformerBlock)(x, ps::LuxParams, st::NamedTuple)
+    h, st_a = b.attn_res(x, ps.attn_res, st.attn_res)
+    y, st_f = b.ffn_res(h, ps.ffn_res, st.ffn_res)
+    return y, (attn_res = st_a, ffn_res = st_f)
+end
