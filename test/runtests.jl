@@ -118,6 +118,7 @@ include("spiking_operations_tests.jl")
             try
                 include("test_cuda.jl")
                 cuda_core_tests() # Call the main test function from test_cuda.jl
+                gpu_kernel_compile_tests()
                 ssm_gpu_tests()
                 local_attention_gpu_tests()
             catch e

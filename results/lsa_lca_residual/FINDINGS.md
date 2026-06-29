@@ -169,19 +169,50 @@ PhasorLSA/PhasorLCA depth-robust **specifically via the ReZero gate**, turning a
 depth-2 collapse into monotonic improvement through depth 16. This is the trained
 confirmation of the Exp 1 gradient/forward-scramble signature.
 
-## Exp 3 — spiking gap (pending the targeted LSA/LCA run)
+## Exp 3 — spiking gap (was BLOCKED by a GPU kernel bug — now FIXED)
 
-The depth-8 discrete-vs-spiking gap is queued for a focused run over
-`kinds=(:local_self,:local_cross)` (the full-matrix driver's spiking step is
-gated behind all three kinds completing, which `ssm_self` is currently blocking).
+The targeted depth-8 discrete-vs-spiking run (`kinds=(:local_self,:local_cross)`)
+initially failed: the spiking branch errored for both kinds with
+
+```
+InvalidIRError: compiling MethodInstance for
+  PhasorNetworks.gpu_raised_cosine_kernel_ka!(...) resulted in invalid LLVM IR
+Reason: unsupported dynamic function invocation (call to *) @ src/gpu.jl:17
+```
+
+**Root cause (fixed).** `pi_f32` in `src/constants.jl` was declared as a plain
+module global (`pi_f32 = convert(Float32, pi)`), not `const`. A non-`const`
+global has inferred type `Any`, so referencing it inside a `@kernel` made every
+downstream op (`*`, `/`, `cos`, `+`) a dynamic dispatch — illegal in GPU code.
+The kernel originally used a `3.1415927f0` literal; commit `7aab936` ("cleaning
+up manual pi to constant ref") swapped it for `pi_f32`, silently breaking GPU
+codegen for `raised_cosine_kernel_ka!` and `periodic_raised_cosine_kernel_ka!`
+(the spike-current / bias-current path, reached here via `ssm_phases_to_train`).
+
+**Fix.** Made `pi_f32` (and the unit-phasor constants `z_0`, `z_90cw`, `z_90ccw`)
+`const` in `src/constants.jl`. This preserves the cleanup's intent and makes the
+constant legal to reference from kernels — better than reverting to the literal.
+
+**Why the suite missed it.** The existing `cuda_core_tests` bundling path does
+not invoke this kernel. Added `gpu_kernel_compile_tests()` (`test/test_cuda.jl`,
+wired into `runtests.jl`) which directly invokes all three raised-cosine KA
+kernels on a GPU array and checks them against the scalar host helpers — forcing
+GPU codegen so this can't silently regress again. Full suite: 1045/1045.
+
+The spiking gap can now run on GPU:
 
 ```julia
 include("scripts/lsa_lca_residual_sweep.jl")
 main_lsa_lca_sweep(; kinds=(:local_self,:local_cross), depths=(1,2,4,8,16),
                    seeds=1:3, epochs=8, batchsize=32, checkpoint=true,
                    init_probe=false, spiking_depth=8, best_treatment=:rezero,
-                   resume=true, outdir="results/lsa_lca_residual/exp2_final")
+                   resume=true,
+                   outdir="results/lsa_lca_residual/exp2_final")
 ```
+
+Note: this gap is a *robustness check* (does the residual change widen the known
+finite-L spiking↔static gap?), not part of the core depth-robustness claim, which
+Exp 1 + Exp 2 establish.
 
 ---
 

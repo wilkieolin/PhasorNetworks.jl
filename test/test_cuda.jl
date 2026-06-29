@@ -3,6 +3,7 @@
 
 using CUDA
 using Adapt
+using KernelAbstractions
 using DifferentialEquations: Tsit5
 
 function cuda_core_tests()
@@ -64,5 +65,54 @@ function cuda_core_tests()
         # sign on round-off and produce spurious ~2.0 errors.
         max_comparative_error = maximum(abs.(arc_error(Float32.(err_cpu) .- Float32.(err_gpu))))
         @test max_comparative_error < 1e-3
+    end
+end
+
+# Direct compile+correctness coverage for the raised-cosine KA kernels.
+#
+# Regression guard for the bug where `pi_f32` was a non-`const` module global:
+# referencing it inside a `@kernel` made the type `Any`, so every downstream
+# op (`*`, `/`, `cos`, `+`) became a dynamic dispatch and the kernel failed to
+# compile with `InvalidIRError: unsupported dynamic function invocation`.
+# These kernels back `spike_current(::SpikeTrainGPU)` / `bias_current` — a
+# central GPU spiking path that the bundling test above does not exercise.
+# We invoke each kernel directly (forcing GPU codegen) and check its output
+# against the scalar host helper.
+function gpu_kernel_compile_tests()
+    if !(CUDA.functional() || ONEAPI_AVAILABLE)
+        @info "No functional GPU; skipping gpu_kernel_compile_tests."
+        return
+    end
+
+    @testset "GPU raised-cosine kernel compilation" begin
+        dev = gpu_device()
+        t = 0.5f0
+        t_sigma = 0.1f0
+        t_period = 1.0f0
+        times_cpu = collect(range(0.0f0, 1.0f0; length = 32))
+        times = times_cpu |> dev
+        backend = KernelAbstractions.get_backend(times)
+        n = length(times)
+
+        # raised_cosine
+        out = KernelAbstractions.zeros(backend, Float32, n)
+        PhasorNetworks.raised_cosine_kernel_ka!(backend)(out, times, t, t_sigma; ndrange = n)
+        KernelAbstractions.synchronize(backend)
+        ref = PhasorNetworks.raised_cosine_kernel_gpu.(times_cpu, t, t_sigma)
+        @test maximum(abs.(Array(out) .- ref)) < 1e-5
+
+        # periodic_raised_cosine
+        out_p = KernelAbstractions.zeros(backend, Float32, n)
+        PhasorNetworks.periodic_raised_cosine_kernel_ka!(backend)(out_p, times, t, t_sigma, t_period; ndrange = n)
+        KernelAbstractions.synchronize(backend)
+        ref_p = PhasorNetworks.periodic_raised_cosine_kernel_gpu.(times_cpu, t, t_sigma, t_period)
+        @test maximum(abs.(Array(out_p) .- ref_p)) < 1e-5
+
+        # gaussian (no globals — sanity baseline)
+        out_g = KernelAbstractions.zeros(backend, Float32, n)
+        PhasorNetworks.gaussian_kernel_ka!(backend)(out_g, times, t, t_sigma; ndrange = n)
+        KernelAbstractions.synchronize(backend)
+        ref_g = PhasorNetworks.gaussian_kernel_gpu.(times_cpu, t, t_sigma)
+        @test maximum(abs.(Array(out_g) .- ref_g)) < 1e-5
     end
 end
