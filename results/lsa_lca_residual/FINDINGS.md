@@ -199,7 +199,7 @@ wired into `runtests.jl`) which directly invokes all three raised-cosine KA
 kernels on a GPU array and checks them against the scalar host helpers — forcing
 GPU codegen so this can't silently regress again. Full suite: 1045/1045.
 
-The spiking gap can now run on GPU:
+The spiking gap then ran on GPU end-to-end (no `InvalidIRError`):
 
 ```julia
 include("scripts/lsa_lca_residual_sweep.jl")
@@ -209,6 +209,18 @@ main_lsa_lca_sweep(; kinds=(:local_self,:local_cross), depths=(1,2,4,8,16),
                    resume=true,
                    outdir="results/lsa_lca_residual/exp2_final")
 ```
+
+**Result** (depth-8, `rezero`, seed 1; `spiking_gap.csv`):
+
+| kind                  | discrete acc | spiking acc | gap     |
+|-----------------------|-------------:|------------:|--------:|
+| LSA (`local_self`)    | 0.782        | 0.779       | 0.0030  |
+| LCA (`local_cross`)   | 0.7705       | 0.770       | 0.0005  |
+
+The gap is negligible (~0.3% / ~0.05%). The discrete-trained depth-8 stack
+transfers to the continuous spiking ODE with essentially no degradation — the
+ReZero residual change does **not** widen the finite-L spiking↔static gap. So the
+stacked LSA/LCA blocks are both depth-robust (Exp 2) and spiking-robust.
 
 Note: this gap is a *robustness check* (does the residual change widen the known
 finite-L spiking↔static gap?), not part of the core depth-robustness claim, which
