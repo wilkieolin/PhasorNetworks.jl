@@ -55,15 +55,29 @@ end
 #
 #   dz = ȳ · (-b + i·a) / (π · |z|²) = ȳ · (i · z) / (π · |z|²)
 #
-# At z = 0, atan(0, 0) is conventionally 0 (Julia's convention), but the
-# derivative is undefined (0/0 = NaN). We zero the cotangent for
-# sub-threshold elements — same short-circuit pattern as the
-# `normalize_to_unit_circle` rrule, for the same reason: a real
-# pipeline like sparse-input PhasorResonant lands on exact zeros after
-# the SSM kernel underflows, and the abs(0) / atan(0,0) chain rules
-# would otherwise propagate NaN through the rest of the gradient.
+# Near-origin gradient gate. The backward `dz = ȳ · i·z / (π · |z|²)` blows up as
+# |z| → 0 (the `1/|z|²` singularity). In the SSM/ODE views a phasor sum can cancel
+# to |z| ≈ 1e-9 — the exact `k = λ+iω`, magnitude-and-phase behaviour of those
+# views is *derived* and must be kept, and it converges to the 2D solution only in
+# **phase** (leakage has no 2D analogue), so near-origin magnitudes are intrinsic
+# and not directly fixable by a magnitude offset like bias. But a phasor that has
+# collapsed to the origin carries no useful phase — its angle is undefined/noise —
+# so its gradient contributes nothing meaningful downstream. We therefore **gate**
+# (zero) the cotangent for `|z| < threshold`. This caps `max|dz|` at
+# `≈ |ȳ|/(π·threshold)` (from elements just above the gate) and removes the NaN,
+# with the forward pass completely unchanged (parity-safe). The old 1e-10 gate was
+# far too small to protect against ~1e-9 cancellations; `threshold = 1e-3`
+# (|z| ≳ 1e-3) gates only genuinely-collapsed phasors, leaving normal O(1)-magnitude
+# signals untouched. `threshold` is tunable per call if a different floor is needed.
+#
+# Debug probe (off by default): when `_cta_probe[]` holds a Vector, each backward
+# appends `(min|z|, max|dz|)` — the singularity source and its capped gradient.
+# Zero cost when unset; arm it around a single layer's forward+backward to attribute
+# the numbers to that layer.
+const _cta_probe = Ref{Union{Nothing, Vector{Tuple{Float32,Float32}}}}(nothing)
+
 function ChainRulesCore.rrule(::typeof(complex_to_angle), x::AbstractArray;
-                              threshold::Real = 1.0f-10)
+                              threshold::Real = 1.0f-3)
     y = complex_to_angle(x)
     th2 = Float32(threshold)^2
     r2 = abs2.(real.(x)) .+ abs2.(imag.(x))
@@ -72,11 +86,14 @@ function ChainRulesCore.rrule(::typeof(complex_to_angle), x::AbstractArray;
         ȳ = unthunk(ȳ_)
         # ȳ may be a Phase array (Real subtype); coerce to Float32 for arithmetic.
         ȳf = Float32.(ȳ)
-        active = r2 .> th2
-        safe_r2 = max.(r2, th2)
-        # dz = ȳ · i·z / (π · |z|²)  for active; 0 otherwise.
+        active = r2 .> th2                      # gate: only |z| ≥ threshold get gradient
+        safe_r2 = max.(r2, th2)                 # denominator floor (bounds |dz|)
+        # dz = ȳ · i·z / (π · |z|²)  for active; 0 (gated) otherwise.
         dz_active = ȳf .* (1.0f0im) .* x ./ (pi_f32 .* safe_r2)
         dz = ifelse.(active, dz_active, zero(eltype(x)))
+        if _cta_probe[] !== nothing
+            push!(_cta_probe[], (Float32(sqrt(minimum(r2))), Float32(maximum(abs.(dz)))))
+        end
         return (NoTangent(), dz)
     end
     return y, complex_to_angle_pullback
