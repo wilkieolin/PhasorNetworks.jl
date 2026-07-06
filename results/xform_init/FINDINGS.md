@@ -100,11 +100,13 @@ follow-up experiment.
 - **Keep the long-`:hippo` fix** (`src/kernels.jl`) — it is a strict improvement:
   it makes `:hippo` a real short-AND-long basis and gentles the origin-collapse
   the fast end used to cause.
-- **Do not flip the package default yet.** The data support "a long tape must
-  exist somewhere," not "the FFN is the uniquely correct home for it." The
-  current default (QKV=hippo, FFN=default, config A) performs as well as the
-  proposed swap (B) on this task, so there is no evidence to justify changing it
-  until the discriminating (routing + memory) task is run.
+- **This task alone does not justify a placement change** — it shows only that a
+  long tape must exist *somewhere*. The discriminating experiment is the
+  follow-up MQAR-noisy-tape study (`results/xform_mqar/`), which stresses content
+  routing and *does* separate the schemes: uniform-QKV + hippo-FFN (config B)
+  wins decisively. **Based on that result the defaults were flipped to config B**
+  (`PhasorLSA`/`PhasorLCA` `init_mode` → `:default`; `PhasorTransformerBlock`
+  `ffn_init_mode` → `:hippo`). See `results/xform_mqar/FINDINGS.md`.
 
 ## Reproduce
 
