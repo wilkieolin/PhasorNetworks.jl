@@ -405,7 +405,10 @@ the V tensor in the complex domain. Output shape: `(D, L, B)` Phase.
 # Keyword arguments
 - `init_scale::Real = 3f0` — Initial value of the trainable scalar
   `β` (the exponential's inverse temperature).
-- `init_mode::Symbol = :hippo` — `PhasorDense` λ-initialization mode.
+- `init_mode::Symbol = :default` — `PhasorDense` λ-init mode for the Q/K/V
+  projections. Defaults to `:default` (uniform, single-timescale) so the read
+  heads stay sharp for content routing; the MQAR ablation
+  (`results/xform_mqar/`) shows `:hippo` here *hurts* long-range recall.
 - `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics
   for the projections.
 
@@ -428,7 +431,7 @@ end
 function PhasorLSA(dims::Pair{Int,Int}, n_heads::Int,
                    act = normalize_to_unit_circle;
                    init_scale::Real = 3f0,
-                   init_mode::Symbol = :hippo,
+                   init_mode::Symbol = :default,
                    spk_args::SpikingArgs = SpikingArgs())
     in_dims, d_model = dims.first, dims.second
     @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
@@ -575,7 +578,8 @@ richer cross-head interaction.
 
 # Keyword arguments
 - `init_scale::Real = 3f0` — Initial value of the trainable scalar `β`.
-- `init_mode::Symbol = :hippo` — `PhasorDense` λ-init mode.
+- `init_mode::Symbol = :default` — `PhasorDense` λ-init mode for the K/V
+  projections; uniform read heads (see `PhasorLSA` / `results/xform_mqar/`).
 - `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics.
 
 # Trainable parameters
@@ -597,7 +601,7 @@ end
 function PhasorLCA(dims::Pair{Int,Int}, n_heads::Int, n_anchors::Int,
                    act = normalize_to_unit_circle;
                    init_scale::Real = 3f0,
-                   init_mode::Symbol = :hippo,
+                   init_mode::Symbol = :default,
                    spk_args::SpikingArgs = SpikingArgs())
     in_dims, d_model = dims.first, dims.second
     @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
@@ -1083,10 +1087,12 @@ and/or `branch_init_scale < 1`):
   gate (`gate = :rezero`, `alpha0 → 0`), since down-scaling Q/K/V does not
   cleanly zero the attention output.
 - `ffn_init_mode` sets the per-channel `λ` init of **both FFN `PhasorDense`
-  layers** (`:default` uniform λ=−0.2, or `:hippo` multi-timescale). The
-  attention projections' `λ` init is set by the caller via the `attn`
-  layer's own `init_mode`. Note `λ` only shapes dynamics in the 3D SSM /
-  ODE path — it is a no-op in 2D static.
+  layers** (`:hippo` multi-timescale tape — the default — or `:default`
+  uniform λ=−0.2). The residual-stream FFN defaults to `:hippo` because the
+  MQAR ablation (`results/xform_mqar/`) shows the multi-timescale memory tape
+  belongs here, while the attention projections should stay uniform (their
+  `init_mode` defaults to `:default`). Note `λ` only shapes dynamics in the
+  3D SSM / ODE path — it is a no-op in 2D static.
 
 Phase-domain only: operates on `(d_model, L, B)` (or `(d_model, B)`) Phase
 arrays. For spiking evaluation, run an upstream encoder through the ODE
@@ -1111,7 +1117,7 @@ function PhasorTransformerBlock(d_model::Int, attn;
                                gate::Symbol = :rezero,
                                alpha0::Real = 0.1f0,
                                branch_init_scale::Real = 0.1f0,
-                               ffn_init_mode::Symbol = :default,
+                               ffn_init_mode::Symbol = :hippo,
                                recenter::Bool = true)
     iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
     ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode),
