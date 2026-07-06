@@ -133,6 +133,83 @@ function gen_batches(rng, Vfloat, cue_far, cue_near; D, L, n_vocab, B, near_gap,
 end
 
 # ---------------------------------------------------------------------
+# Data — MQAR along a noisy tape (routing + interference; stresses read heads)
+# ---------------------------------------------------------------------
+#
+# Separate key/value tokens (MQAR-standard): a (key, value) pair is two ADJACENT
+# tokens [key@p, value@p+1]. The query presents a bare key; the answer is the
+# value that followed it. Two targets (far, near); the rest of the tape is filled
+# with random single-token distractors at probability `density` (task-irrelevant
+# noise). With full attention the *gap* is largely shortcut, so `density` (SNR) is
+# the discriminating knob — it stresses the read heads' ability to extract the
+# clean key/value from noise (and the key→value+1 induction).
+
+"Positions for the MQAR layout: far pair at the front, near pair at the end, both queried."
+function _mqar_layout(L, near_gap)
+    pfar_k, pfar_v = 1, 2                 # far pair (key, value)
+    pnear_k = L - near_gap                # near key
+    pnear_v = L - near_gap + 1            # near value
+    qnear   = L                           # near query key
+    qfar    = pnear_k - 2                 # far query key (before the near pair)
+    return pfar_k, pfar_v, qfar, pnear_k, pnear_v, qnear
+end
+
+"Fixed MQAR task: key alphabet (routing) + value alphabet (readout classes)."
+function setup_mqar_task(rng; D, n_keys, n_vals)
+    Kfloat = 2f0 .* rand(rng, Float32, D, n_keys) .- 1f0
+    Vfloat = 2f0 .* rand(rng, Float32, D, n_vals) .- 1f0
+    return Kfloat, Vfloat
+end
+
+"""
+    gen_mqar_batch(rng, Kfloat, Vfloat; D, L, n_keys, n_vals, B, near_gap, density)
+
+One MQAR batch. Two target pairs (far@1-2, near@L-near_gap..). Non-reserved
+positions get a random distractor token with probability `density`, else neutral
+filler. Returns `(x, tgt_far, tgt_near, qfar, qnear)` (1-based value targets).
+"""
+function gen_mqar_batch(rng::AbstractRNG, Kfloat::Matrix{Float32}, Vfloat::Matrix{Float32};
+                        D::Int, L::Int, n_keys::Int, n_vals::Int, B::Int,
+                        near_gap::Int, density::Float64)
+    @assert n_keys ≥ 2 "need ≥2 keys for two distinct targets"
+    pfar_k, pfar_v, qfar, pnear_k, pnear_v, qnear = _mqar_layout(L, near_gap)
+    reserved = (pfar_k, pfar_v, qfar, pnear_k, pnear_v, qnear)
+
+    X = zeros(Float32, D, L, B)
+    tgt_far  = Vector{Int}(undef, B)
+    tgt_near = Vector{Int}(undef, B)
+
+    for b in 1:B
+        kf = rand(rng, 1:n_keys)
+        kn = rand(rng, 1:n_keys); while kn == kf; kn = rand(rng, 1:n_keys); end
+        vf = rand(rng, 1:n_vals); vn = rand(rng, 1:n_vals)
+        tgt_far[b] = vf; tgt_near[b] = vn
+
+        X[:, pfar_k,  b] = @view Kfloat[:, kf]
+        X[:, pfar_v,  b] = @view Vfloat[:, vf]
+        X[:, pnear_k, b] = @view Kfloat[:, kn]
+        X[:, pnear_v, b] = @view Vfloat[:, vn]
+        X[:, qfar,    b] = @view Kfloat[:, kf]      # far query key
+        X[:, qnear,   b] = @view Kfloat[:, kn]      # near query key
+
+        for p in 1:L
+            p in reserved && continue
+            if rand(rng) < density                   # task-irrelevant noise token
+                X[:, p, b] = 2f0 .* rand(rng, Float32, D) .- 1f0
+            end                                       # else neutral filler (0)
+        end
+    end
+    return (x = Phase.(X), tgt_far = tgt_far, tgt_near = tgt_near,
+            qfar = qfar, qnear = qnear)
+end
+
+"Generate `n_batches` MQAR batches at a fixed distractor `density`."
+function gen_mqar_batches(rng, Kfloat, Vfloat; D, L, n_keys, n_vals, B, near_gap, density, n_batches)
+    return [gen_mqar_batch(rng, Kfloat, Vfloat; D, L, n_keys, n_vals, B, near_gap, density)
+            for _ in 1:n_batches]
+end
+
+# ---------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------
 
@@ -390,6 +467,107 @@ function make_plots(rows, lnl_snaps, outdir)
         savefig(p2, joinpath(outdir, "lambda_spectra.png"))
     end
     @info "wrote plots" dir = outdir
+end
+
+# ---------------------------------------------------------------------
+# MQAR density-sweep driver (routing / read-head stress)
+# ---------------------------------------------------------------------
+
+"""
+    main_mqar(; densities, ...) -> rows
+
+Sweep distractor `density` on the MQAR-along-a-noisy-tape task for all four
+init configs. Headline: far/near accuracy vs density (expect curves to fan out
+if a scheme is more noise-robust for routing). Writes results/xform_mqar/.
+"""
+function main_mqar(; D::Int = 64, L::Int = 48, n_heads::Int = 4, n_blocks::Int = 2,
+                   n_keys::Int = 8, n_vals::Int = 8, near_gap::Int = 4, B::Int = 64,
+                   densities = [0.0, 0.25, 0.5, 0.75, 1.0],
+                   n_train_batches::Int = 50, n_eval_batches::Int = 15,
+                   epochs::Int = 40, lr::Real = 1f-3, seeds = 1:1,
+                   attn_kind::Symbol = :lsa, use_cuda::Bool = true,
+                   outdir::String = joinpath(@__DIR__, "..", "results", "xform_mqar"),
+                   smoke::Bool = false)
+
+    if smoke
+        D = 32; L = 20; n_blocks = 1; n_keys = 4; n_vals = 4; near_gap = 3; B = 16
+        densities = [0.0, 1.0]; n_train_batches = 6; n_eval_batches = 3; epochs = 2; seeds = 1:1
+    end
+
+    dev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
+    @info "device (MQAR)" dev L near_gap densities
+    mkpath(outdir)
+
+    Kfloat, Vfloat = setup_mqar_task(Xoshiro(777); D, n_keys, n_vals)
+    Vc = angle_to_complex(Phase.(Vfloat)) |> dev
+
+    rows = NamedTuple[]
+    for density in densities
+        eval_b = gen_mqar_batches(Xoshiro(9999), Kfloat, Vfloat;
+                                  D, L, n_keys, n_vals, B, near_gap, density, n_batches = n_eval_batches)
+        for (cfg_key, cfg) in pairs(CONFIGS)
+            for seed in seeds
+                train_b = gen_mqar_batches(Xoshiro(seed), Kfloat, Vfloat;
+                                           D, L, n_keys, n_vals, B, near_gap, density, n_batches = n_train_batches)
+                model = build_model(; D, n_heads, n_blocks, attn_mode = cfg.attn,
+                                    ffn_mode = cfg.ffn, attn_kind)
+                ps, st = Lux.setup(Xoshiro(seed + 1), model)
+                ps = ps |> dev; st = st |> dev
+
+                ps, losses = train!(model, ps, st, train_b, Vc, n_vals, epochs, lr, dev)
+                far_acc, near_acc = eval_accuracy(model, ps, st, eval_b, Vc, n_vals, dev)
+
+                @info(@sprintf("  density %.2f  cfg %s seed %d: far=%.3f near=%.3f  loss %.3f→%.3f",
+                               density, String(cfg_key), seed, far_acc, near_acc, losses[1], losses[end]))
+                push!(rows, (density = density, config = String(cfg_key), label = cfg.label,
+                             seed = seed, far_acc = far_acc, near_acc = near_acc,
+                             init_loss = losses[1], final_loss = losses[end]))
+            end
+        end
+    end
+
+    write_csv(joinpath(outdir, "results.csv"), rows)
+    summarize_mqar(rows, densities)
+    PLOTS_OK && make_mqar_plots(rows, densities, outdir)
+    @info "done (MQAR)" outdir
+    return rows
+end
+
+function summarize_mqar(rows, densities)
+    println("\n============ MQAR SUMMARY: far-acc (mean±std) vs density ============")
+    print(rpad("cfg", 6)); for d in densities; print(rpad(@sprintf("d=%.2f", d), 14)); end; println()
+    for cfg in (:A, :B, :C, :D)
+        print(rpad(String(cfg), 6))
+        for d in densities
+            rs = filter(r -> r.config == String(cfg) && r.density == d, rows)
+            if isempty(rs); print(rpad("-", 14)); continue; end
+            m = mean(getproperty.(rs, :far_acc)); s = length(rs) > 1 ? std(getproperty.(rs, :far_acc)) : 0f0
+            print(rpad(@sprintf("%.2f±%.2f", m, s), 14))
+        end
+        println()
+    end
+    println("====================================================================\n")
+end
+
+function make_mqar_plots(rows, densities, outdir)
+    cfgs = (:A, :B, :C, :D)
+    mean_at(cfg, d, f) = (rs = filter(r -> r.config == String(cfg) && r.density == d, rows);
+                          isempty(rs) ? NaN : mean(getproperty.(rs, f)))
+    p = plot(; xlabel = "distractor density", ylabel = "far-acc", ylims = (0, 1),
+             title = "MQAR far-recall vs tape noise", legend = :bottomleft)
+    for c in cfgs
+        ys = [mean_at(c, d, :far_acc) for d in densities]
+        plot!(p, densities, ys; marker = :circle, label = String(c))
+    end
+    savefig(p, joinpath(outdir, "far_vs_density.png"))
+    pn = plot(; xlabel = "distractor density", ylabel = "near-acc", ylims = (0, 1),
+              title = "MQAR near-recall vs tape noise", legend = :bottomleft)
+    for c in cfgs
+        ys = [mean_at(c, d, :near_acc) for d in densities]
+        plot!(pn, densities, ys; marker = :circle, label = String(c))
+    end
+    savefig(pn, joinpath(outdir, "near_vs_density.png"))
+    @info "wrote MQAR plots" dir = outdir
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
