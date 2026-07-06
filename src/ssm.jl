@@ -1082,6 +1082,11 @@ and/or `branch_init_scale < 1`):
 - the **attention** sublayer is brought to identity-at-init by the ReZero
   gate (`gate = :rezero`, `alpha0 → 0`), since down-scaling Q/K/V does not
   cleanly zero the attention output.
+- `ffn_init_mode` sets the per-channel `λ` init of **both FFN `PhasorDense`
+  layers** (`:default` uniform λ=−0.2, or `:hippo` multi-timescale). The
+  attention projections' `λ` init is set by the caller via the `attn`
+  layer's own `init_mode`. Note `λ` only shapes dynamics in the 3D SSM /
+  ODE path — it is a no-op in 2D static.
 
 Phase-domain only: operates on `(d_model, L, B)` (or `(d_model, B)`) Phase
 arrays. For spiking evaluation, run an upstream encoder through the ODE
@@ -1106,10 +1111,11 @@ function PhasorTransformerBlock(d_model::Int, attn;
                                gate::Symbol = :rezero,
                                alpha0::Real = 0.1f0,
                                branch_init_scale::Real = 0.1f0,
+                               ffn_init_mode::Symbol = :default,
                                recenter::Bool = true)
     iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
-    ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw),
-                PhasorDense(d_ff => d_model, activation; use_bias = true, init_weight = iw))
+    ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode),
+                PhasorDense(d_ff => d_model, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode))
     attn_branch = recenter ? Chain(PhaseRecenter(), attn) : attn
     ffn_branch  = recenter ? Chain(PhaseRecenter(), ffn) : ffn
     attn_res = PhasorResidual(attn_branch; gate = gate, alpha0 = alpha0)

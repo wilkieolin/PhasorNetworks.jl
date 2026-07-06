@@ -405,26 +405,40 @@ end
 # 4. HiPPO-LegS Initialization
 # ================================================================
 
+# Time-constant span (in discrete steps, Δt=1) for the log-spaced :hippo
+# spectrum. τ = 1/|λ|, so these bound how far back each channel remembers.
+#   HIPPO_TAU_MIN — fastest channel: a near-instant "read what's here now" tap.
+#   HIPPO_TAU_MAX — slowest channel: a long-memory integrator (a genuine tape).
+# Rationale: the earlier default (λ log-spaced 0.5 … N-0.5) capped the SLOWEST
+# channel at τ=2 steps — i.e. it was a spread of *short* timescales, not a tape,
+# and its extreme fast end (λ≈-63.5) drove projection outputs to the origin
+# (complex_to_angle gradient blow-up). Anchoring the slow end at τ=HIPPO_TAU_MAX
+# makes :hippo a real short-AND-long multi-timescale basis and gentles the fast
+# end. λ only shapes dynamics in the 3D SSM / ODE path (no-op in 2D static).
+const HIPPO_TAU_MIN = 0.5f0
+const HIPPO_TAU_MAX = 64.0f0
+
 """
-    hippo_legs_diagonal(N; clip_decay=nothing) -> (λ, ω)
+    hippo_legs_diagonal(N; tau_max=nothing, clip_decay=nothing) -> (λ, ω)
 
-HiPPO-LegS (Legendre Scaled) diagonal initialization from S4D.
+HiPPO-LegS (Legendre Scaled) inspired diagonal initialization.
 
-The HiPPO framework defines optimal state matrices for online function
-approximation.  The LegS variant projects input history onto a scaled
-Legendre polynomial basis, giving a principled multi-timescale memory.
-
-Diagonalizing the N×N HiPPO-LegS matrix yields N complex eigenvalues:
-
-    k_n = -(n + 1/2) + iπ(n + 1/2),   n = 0, 1, ..., N-1
+The HiPPO framework defines state matrices for online function approximation;
+the LegS variant projects input history onto a scaled Legendre basis, giving a
+principled multi-timescale memory. This routine returns a diagonal (per-channel)
+λ spectrum log-spaced across time-constants so a layer holds a spread of memory
+horizons simultaneously — short (recent detail) through long (a memory tape).
 
 # Arguments
 - `N::Int` — Number of oscillators (state dimension).
 
 # Keyword arguments
-- `clip_decay`: Maximum magnitude of λ.  When `nothing` (default), eigenvalues
-  are log-spaced from 0.5 to N-0.5 across N channels, preserving the HiPPO
-  multi-timescale structure while keeping all channels in a trainable range.
+- `tau_max`: Longest time-constant (in steps) of the slowest channel. When
+  `nothing` (default), uses `HIPPO_TAU_MAX`. λ magnitudes are log-spaced from
+  `1/tau_max` (slow, long memory) up to `1/HIPPO_TAU_MIN` (fast, near-instant),
+  giving τ ∈ [`HIPPO_TAU_MIN`, `tau_max`] across the N channels.
+- `clip_decay`: Legacy linear-HiPPO path. When set, λ magnitudes are
+  `min(n + 1/2, clip_decay)` for n = 0…N-1 (overrides `tau_max`).
 
 # Returns
 Tuple `(λ, ω)` of Float32 vectors of length N.  Caller must map to the
@@ -439,14 +453,19 @@ log-parameterization (`log_neg_lambda = log.(-λ)`).
     HD-VSA downstream operations. Only `λ` from this function is used
     by those layers' `:hippo` init mode.
 """
-function hippo_legs_diagonal(N::Int; clip_decay::Union{Nothing, Real}=nothing)
-    if clip_decay === nothing
-        # Log-spaced variant: span from λ=-0.5 to λ=-N+0.5 on a log scale.
-        λ_mag = Float32.(exp.(range(log(0.5), log(N - 0.5); length=N)))
-    else
-        # Linear HiPPO with hard clip
+function hippo_legs_diagonal(N::Int; tau_max::Union{Nothing, Real}=nothing,
+                             clip_decay::Union{Nothing, Real}=nothing)
+    if clip_decay !== nothing
+        # Legacy linear HiPPO with hard clip.
         ns = Float32.(0:N-1)
         λ_mag = min.(ns .+ 0.5f0, Float32(clip_decay))
+    else
+        # Log-spaced time-constants τ ∈ [HIPPO_TAU_MIN, tau_max]: the slow end
+        # is a long-memory integrator, the fast end a near-instant read tap.
+        τmax   = tau_max === nothing ? HIPPO_TAU_MAX : Float32(tau_max)
+        λ_slow = 1f0 / τmax            # small |λ| → long memory
+        λ_fast = 1f0 / HIPPO_TAU_MIN   # large |λ| → short memory
+        λ_mag  = Float32.(exp.(range(log(λ_slow), log(λ_fast); length=N)))
     end
     λ = -λ_mag
     # Frequency paired to decay: one oscillation per memory window

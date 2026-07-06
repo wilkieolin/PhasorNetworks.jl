@@ -275,9 +275,13 @@ diversity comes from `λ` and the weight matrix, not from `ω`. Use
 `ω` so the rest of the network can resume phase-locked operation.
 
 # Init Modes
-- `:default` — `log_neg_lambda = fill(log(0.2), out)`, single timescale.
-- `:hippo`   — `log_neg_lambda` from log-spaced HiPPO-LegS λ spectrum
-  (per-channel multi-timescale memory). ω stays at `2π`.
+- `:default` — `log_neg_lambda = fill(log(0.2), out)`, single timescale
+  (τ = 5 steps for every channel).
+- `:hippo`   — `log_neg_lambda` from the log-spaced HiPPO-LegS λ spectrum
+  ([`hippo_legs_diagonal`](@ref)): per-channel time-constants span
+  τ ∈ [`HIPPO_TAU_MIN`, `HIPPO_TAU_MAX`] (short recent detail through a
+  long memory tape). ω stays at `2π`. Note λ only shapes dynamics in the
+  3D SSM / ODE path — it is a no-op in the 2D static path.
 
 When `init_log_neg_lambda` is set, it replaces the per-channel value
 uniformly across `out` for both modes (overrides the HiPPO spread in
