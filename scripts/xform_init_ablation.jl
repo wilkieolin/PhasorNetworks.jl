@@ -216,12 +216,12 @@ end
 "Stack of `n_blocks` PhasorTransformerBlocks with the given QKV / FFN init modes."
 function build_model(; D::Int, n_heads::Int, n_blocks::Int,
                      attn_mode::Symbol, ffn_mode::Symbol, attn_kind::Symbol = :lsa,
-                     n_anchors::Int = 8)
+                     n_anchors::Int = 8, recenter::Bool = true)
     blocks = ntuple(n_blocks) do _
         attn = attn_kind === :lca ?
             PhasorLCA(D => D, n_heads, n_anchors; init_mode = attn_mode) :
             PhasorLSA(D => D, n_heads; init_mode = attn_mode)
-        PhasorTransformerBlock(D, attn; ffn_init_mode = ffn_mode, gate = :rezero)
+        PhasorTransformerBlock(D, attn; ffn_init_mode = ffn_mode, gate = :rezero, recenter = recenter)
     end
     return Chain(blocks...)
 end
@@ -568,6 +568,93 @@ function make_mqar_plots(rows, densities, outdir)
     end
     savefig(pn, joinpath(outdir, "near_vs_density.png"))
     @info "wrote MQAR plots" dir = outdir
+end
+
+# ---------------------------------------------------------------------
+# PhaseRecenter ablation (usefulness + gradient-blowup source)
+# ---------------------------------------------------------------------
+
+"""
+    main_recenter(; ...) -> rows
+
+Toggle `recenter ∈ {true,false}` on the MQAR clean task (d=0) for a chosen
+config (default B, which ran closest to the origin in earlier probes). Reports
+far/near accuracy AND grad-health (min|z|, max|dz| from the `_cta_probe`, which
+captures the recenter's own `complex_to_angle` backward) at init and after
+training — so we can see if PhaseRecenter helps and whether it is a blow-up
+source.
+"""
+function main_recenter(; D::Int = 64, L::Int = 48, n_heads::Int = 4, n_blocks::Int = 2,
+                       n_keys::Int = 8, n_vals::Int = 8, near_gap::Int = 4, B::Int = 64,
+                       configs = (:B, :C), n_train_batches::Int = 50, n_eval_batches::Int = 15,
+                       epochs::Int = 40, lr::Real = 1f-3, seeds = 1:5,
+                       attn_kind::Symbol = :lsa, use_cuda::Bool = true,
+                       outdir::String = joinpath(@__DIR__, "..", "results", "xform_recenter"),
+                       smoke::Bool = false)
+
+    if smoke
+        D = 32; L = 20; n_blocks = 1; n_keys = 4; n_vals = 4; near_gap = 3; B = 16
+        configs = (:B,); n_train_batches = 6; n_eval_batches = 3; epochs = 2; seeds = 1:1
+    end
+
+    dev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
+    @info "device (recenter)" dev configs
+    mkpath(outdir)
+
+    Kfloat, Vfloat = setup_mqar_task(Xoshiro(777); D, n_keys, n_vals)
+    Vc = angle_to_complex(Phase.(Vfloat)) |> dev
+    eval_b = gen_mqar_batches(Xoshiro(9999), Kfloat, Vfloat;
+                              D, L, n_keys, n_vals, B, near_gap, density = 0.0, n_batches = n_eval_batches)
+
+    rows = NamedTuple[]
+    for cfg_key in configs
+        cfg = getproperty(CONFIGS, cfg_key)
+        for recenter in (true, false)
+            for seed in seeds
+                train_b = gen_mqar_batches(Xoshiro(seed), Kfloat, Vfloat;
+                                           D, L, n_keys, n_vals, B, near_gap, density = 0.0, n_batches = n_train_batches)
+                model = build_model(; D, n_heads, n_blocks, attn_mode = cfg.attn,
+                                    ffn_mode = cfg.ffn, attn_kind, recenter)
+                ps, st = Lux.setup(Xoshiro(seed + 1), model)
+                ps = ps |> dev; st = st |> dev
+
+                yof0 = onehot_dev(train_b[1].tgt_far, n_vals, dev)
+                yon0 = onehot_dev(train_b[1].tgt_near, n_vals, dev)
+                gh0 = grad_health(model, ps, st, train_b[1], Vc, yof0, yon0, dev)
+                ps, losses = train!(model, ps, st, train_b, Vc, n_vals, epochs, lr, dev)
+                gh1 = grad_health(model, ps, st, train_b[1], Vc, yof0, yon0, dev)
+                far_acc, near_acc = eval_accuracy(model, ps, st, eval_b, Vc, n_vals, dev)
+
+                @info(@sprintf("  cfg %s recenter=%-5s seed %d: far=%.3f near=%.3f  loss %.3f→%.3f  max|dz| init=%.1e trn=%.1e min|z|=%.1e",
+                               String(cfg_key), string(recenter), seed, far_acc, near_acc,
+                               losses[1], losses[end], gh0.max_absdz, gh1.max_absdz, min(gh0.min_absz, gh1.min_absz)))
+                push!(rows, (config = String(cfg_key), recenter = recenter, seed = seed,
+                             far_acc = far_acc, near_acc = near_acc,
+                             init_loss = losses[1], final_loss = losses[end],
+                             max_absdz_init = gh0.max_absdz, max_absdz_trained = gh1.max_absdz,
+                             min_absz = min(gh0.min_absz, gh1.min_absz)))
+            end
+        end
+    end
+
+    write_csv(joinpath(outdir, "results.csv"), rows)
+    summarize_recenter(rows, configs)
+    @info "done (recenter)" outdir
+    return rows
+end
+
+function summarize_recenter(rows, configs)
+    println("\n===== RECENTER ABLATION (mean±std over seeds) =====")
+    println("cfg  recenter  far-acc         near-acc        max|dz|(init) max|dz|(trn)  min|z|")
+    for cfg in configs, rc in (true, false)
+        rs = filter(r -> r.config == String(cfg) && r.recenter == rc, rows)
+        isempty(rs) && continue
+        m(f) = mean(getproperty.(rs, f)); s(f) = length(rs) > 1 ? std(getproperty.(rs, f)) : 0f0
+        println(@sprintf("%-4s %-9s far=%.3f±%.3f near=%.3f±%.3f  %.1e      %.1e     %.1e",
+                         String(cfg), string(rc), m(:far_acc), s(:far_acc), m(:near_acc), s(:near_acc),
+                         m(:max_absdz_init), m(:max_absdz_trained), m(:min_absz)))
+    end
+    println("==================================================\n")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

@@ -1060,7 +1060,7 @@ end
     PhasorTransformerBlock(d_model, attn; d_ff = d_model,
                            activation = normalize_to_unit_circle,
                            gate = :rezero, alpha0 = 0.1f0,
-                           branch_init_scale = 0.1f0, recenter = true)
+                           branch_init_scale = 0.1f0, recenter = false)
 
 Pre-norm phasor transformer block:
 
@@ -1075,6 +1075,15 @@ constructed by the caller; `FFN` is a two-layer `PhasorDense` MLP
 (`d_model → d_ff → d_model`). When `recenter = true` a [`PhaseRecenter`]
 (@ref) sits at the head of each residual *branch* (true pre-norm — the
 skip path is left untouched).
+
+!!! note "recenter defaults to false"
+    `PhaseRecenter` computes `complex_to_angle(sum(z))` over channels, which is
+    ill-conditioned when channel phasors cancel (`|sum| → 0`) — a
+    gradient-blow-up source. The MQAR ablation (`results/xform_recenter/`) found
+    it both *hurts* trainability (recenter=false solved 5/5 seeds vs 2/5 stuck
+    with recenter=true) and *amplifies* near-origin gradients (~3× larger
+    `max|dz|`), so it is **off by default**. It may still help very deep stacks
+    (standard pre-norm rationale); re-enable with `recenter = true` and verify.
 
 The residual treatment is fully configurable, so one struct expresses both
 the pre-identity-at-init regime (`gate = :none, branch_init_scale = 1,
@@ -1118,7 +1127,7 @@ function PhasorTransformerBlock(d_model::Int, attn;
                                alpha0::Real = 0.1f0,
                                branch_init_scale::Real = 0.1f0,
                                ffn_init_mode::Symbol = :hippo,
-                               recenter::Bool = true)
+                               recenter::Bool = false)
     iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
     ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode),
                 PhasorDense(d_ff => d_model, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode))
