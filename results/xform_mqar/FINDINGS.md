@@ -67,17 +67,40 @@ clean d=0 × 5-seed × full-budget run (`results/xform_mqar_d0/`) settles this.
    support for "uniform QKV."** The originally-hypothesized "hippo-in-QKV is
    harmful" is *not* borne out.
 
-## Decision (provisional)
+## Clean confirmation (d=0, 5 seeds, FULL budget) — `results/xform_mqar_d0/`
 
-Defaults were flipped to **config B** on the strength of the 1-seed run:
-`PhasorLSA`/`PhasorLCA` `init_mode` `:hippo→:default`; `PhasorTransformerBlock`
-`ffn_init_mode` `:default→:hippo`. All 1045 tests pass.
+The 3-seed muddiness was the training-budget confound. Re-running clean d=0 at
+the full 40-epoch / 50-batch budget × 5 seeds restores the effect. far-acc 2×2:
 
-- The **FFN→`:hippo`** half is supported (noise-robust far-recall + delayed-cue
-  tape-necessity).
-- The **QKV→`:default`** half is **not** supported by the 3-seed data and is
-  pending the clean d=0 × 5-seed confirmation (`results/xform_mqar_d0/`). If that
-  run does not favor uniform QKV, revert `PhasorLSA`/`PhasorLCA` to `:hippo`.
+|              | FFN=uniform      | FFN=hippo        |
+|--------------|------------------|------------------|
+| **QKV=hippo**   | A: 0.67 ± 0.32 | C: 0.83 ± 0.22 |
+| **QKV=uniform** | D: 0.81 ± 0.26 | **B: 0.90 ± 0.21** |
+
+Both main effects point the hypothesized way in *every* within-pair comparison:
+
+- uniform-QKV ≥ hippo-QKV: **B>C** (0.90>0.83) and **D>A** (0.81>0.67).
+- hippo-FFN ≥ uniform-FFN: **B>D** (0.90>0.81) and **C>A** (0.83>0.67).
+- **B (uniform QKV + hippo FFN) is the best cell; A (old default) the worst.**
+
+Reliability (seeds solved, far≥0.95): **B 4/5, C 3/5, A 2/5, D 1/5** — B
+converges most reliably. Effects are modest (0.07–0.16) with high seed variance
+(far-recall is near-bimodal: a seed either converges to ~1.0 or sticks ~0.3–0.6),
+but the **direction is consistent across all four comparisons**.
+
+## Decision
+
+Defaults flipped to **config B** and **kept** — supported by the clean run:
+`PhasorLSA`/`PhasorLCA` `init_mode` `:hippo→:default` (sharp uniform read heads);
+`PhasorTransformerBlock` `ffn_init_mode` `:default→:hippo` (multi-timescale tape
+in the residual stream). All 1045 tests pass.
+
+Confidence: **FFN→`:hippo`** is well-supported (clean 2×2 + noise-robustness +
+delayed-cue tape-necessity). **QKV→`:default`** is supported but *modestly*
+(consistent direction, overlapping error bars) — worth revisiting if a future
+task shows hippo-QKV helping. The near-recall-under-noise trade-off (uniform-FFN
+more robust to recent noise) remains the main reason a workload might prefer
+uniform FFN.
 
 ## Reproduce
 
