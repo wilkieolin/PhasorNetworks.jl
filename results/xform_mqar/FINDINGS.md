@@ -30,48 +30,54 @@ C: all-hippo; D: all-uniform), same harness.
 | C | hippo / hippo | 0.61 | 0.25 | 0.19 |
 | A | hippo / uniform | 0.32 | 0.13 | 0.12 |
 
-near-recall is ~1.00 for all at d=0; the gap-40 far-recall is what separates
-configs. (3-seed × finer-density confirmation: see `results.csv`.)
+near-recall is ~1.00 for all at d=0. **⚠ The 1-seed numbers above did NOT
+replicate — see below.**
 
-<!-- FINAL_MQAR_TABLE -->
+**3-seed confirmation (finer density [0,0.1,0.2,0.3,0.4], 30 epochs, far-acc
+mean±std):**
 
-## Interpretation — both halves of the hypothesis confirmed
+| cfg | QKV/FFN | d=0.0 | d=0.1 | d=0.2 | d=0.3 | d=0.4 |
+|---|---|---|---|---|---|---|
+| A | hippo/uniform  | 0.70±0.25 | 0.27±0.25 | 0.13 | 0.13 | 0.11 |
+| B | uniform/hippo  | 0.44±0.08 | 0.37±0.02 | 0.29 | 0.44±0.32 | 0.22 |
+| C | hippo/hippo    | 0.69±0.27 | 0.35±0.05 | 0.29 | 0.26 | 0.25 |
+| D | uniform/uniform| 0.45±0.13 | 0.14 | 0.13 | 0.12 | 0.13 |
 
-At the discriminating point (clean, d=0), far-recall ranks
-**B (1.00) > D (0.86) > C (0.61) > A (0.32)**:
+## Interpretation — the QKV claim did NOT survive replication
 
-1. **HiPPO-in-QKV is harmful for long-range routing.** The two *uniform-QKV*
-   configs (B, D) are the two best; the two *hippo-QKV* configs (A, C) are the
-   two worst. Slow-channel read heads blur adjacent tokens, degrading the
-   key-match / induction across the gap. ✔ "QKV should be uniform."
-2. **HiPPO-in-FFN helps memory.** Within each QKV pairing, hippo-FFN beats
-   uniform-FFN: B>D and C>A. ✔ "FFN should be the tape."
-3. ⇒ **B (uniform QKV + hippo FFN) — the proposed config — is the clear winner.**
+The 1-seed run (B=1.00, A=0.32 at d=0) was a **single-seed outlier**. With 3
+seeds the clean point is A=0.70, B=0.44, C=0.69, D=0.45 — huge variance, and if
+anything *hippo*-QKV (A, C) sits *higher*. Per-seed d=0: A={0.46,0.68,0.95},
+C={0.48,0.61,1.00} each had a seed converge to ~1.0, while B and D never did.
 
-## Nuances
+**Confound:** the 3-seed run used a reduced training budget (30 epochs / 40
+batches vs the 1-seed's 40 / 50) to bound runtime, which undertrained the clean
+d=0 point (nobody reached 1.0) — muddying exactly the discriminating regime. A
+clean d=0 × 5-seed × full-budget run (`results/xform_mqar_d0/`) settles this.
 
-- **Discrimination is largest when clean.** Heavy distractor noise (d≥0.5)
-  collapses far-recall to ~chance for *every* config — so "task-irrelevant
-  symbols along the tape" mostly make the task uniformly harder rather than
-  fanning the curves. The interesting regime is low density; the finer sweep
-  [0,0.1,0.2,0.3,0.4] maps where each config breaks.
-- **Trade-off on near-recall under noise.** uniform-FFN stays robust
-  (D near=0.995 at d=1.0) while hippo-FFN degrades (B/C≈0.73): the tape's long
-  integration absorbs noise, hurting the *recent* readout. HiPPO-FFN is not a
-  free win — it trades near-under-noise for far reach.
+**What holds robustly across seeds:**
 
-## Decision
+1. **FFN=hippo helps far-recall under distractor noise.** B, C (hippo-FFN) beat
+   A, D (uniform-FFN) at every d≥0.1 (e.g. d=0.2: 0.29/0.29 vs 0.13/0.13). ✔ the
+   "tape" half.
+2. **FFN=hippo hurts near-recall under noise** (trade-off): at d=0.4 near-acc
+   D≈0.94 vs B,C≈0.79. The tape's long integration absorbs noise, hurting the
+   *recent* readout. Holds across all seeds.
+3. **QKV mode is inconclusive.** B vs C (both hippo-FFN) is a wash; A ≥ D. **No
+   support for "uniform QKV."** The originally-hypothesized "hippo-in-QKV is
+   harmful" is *not* borne out.
 
-Given both halves confirmed and B the clear winner, the package defaults were
-flipped to **config B**:
+## Decision (provisional)
 
-- `PhasorLSA` / `PhasorLCA` `init_mode` default `:hippo → :default` (uniform,
-  sharp read heads).
-- `PhasorTransformerBlock` `ffn_init_mode` default `:default → :hippo`
-  (multi-timescale memory tape in the residual stream).
+Defaults were flipped to **config B** on the strength of the 1-seed run:
+`PhasorLSA`/`PhasorLCA` `init_mode` `:hippo→:default`; `PhasorTransformerBlock`
+`ffn_init_mode` `:default→:hippo`. All 1045 tests pass.
 
-All 1045 tests still pass. The 3-seed × finer-density run confirms the ordering
-is not a single-seed artifact.
+- The **FFN→`:hippo`** half is supported (noise-robust far-recall + delayed-cue
+  tape-necessity).
+- The **QKV→`:default`** half is **not** supported by the 3-seed data and is
+  pending the clean d=0 × 5-seed confirmation (`results/xform_mqar_d0/`). If that
+  run does not favor uniform QKV, revert `PhasorLSA`/`PhasorLCA` to `:hippo`.
 
 ## Reproduce
 
