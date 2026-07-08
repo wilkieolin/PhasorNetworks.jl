@@ -43,15 +43,17 @@ tests pass.
 
 ## Caveat
 
-This is a **shallow** stack (2 blocks). Pre-norm's usual justification is
-stabilizing *deep* stacks against activation drift, which 2 blocks don't
-exercise. So `recenter=false` is the right default for typical/shallow use, but
-`recenter=true` may still help very deep phasor transformers — re-enable and
-verify there. If a deep use-case wants pre-norm without the blow-up, the fix is
-a `|mean|`-aware recenter: the `complex_to_angle` here acts on a *sum of C
-phasors* (|sum| ~ √C for random phase), so its gate threshold should scale with
-C rather than the unit-phasor default (1e-3), and it should pass through
-unchanged (skip recentering) when |mean| is below that.
+This was originally a **shallow** stack (2 blocks). Pre-norm's usual
+justification is stabilizing *deep* stacks — so the follow-up deep-stack test
+(`results/xform_depth/FINDINGS.md`) checked depths {2,4,8,16} with
+`recenter=false`. **Result: PASS** — accuracy holds ~0.99–1.00 and trained
+gradients stay bounded to depth 16; the ReZero gate carries depth without
+pre-norm. So `recenter=false` is validated for deep stacks too (≤16). Depths >16
+remain untested. If pre-norm is ever needed there, the fix is a `|mean|`-aware
+recenter: the `complex_to_angle` here acts on a *sum of C phasors* (|sum| ~ √C
+for random phase), so its gate threshold should scale with C rather than the
+unit-phasor default (1e-3), and it should pass through unchanged (skip
+recentering) when |mean| is below that.
 
 ## Reproduce
 

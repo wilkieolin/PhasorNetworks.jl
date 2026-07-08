@@ -657,6 +657,92 @@ function summarize_recenter(rows, configs)
     println("==================================================\n")
 end
 
+# ---------------------------------------------------------------------
+# Deep-stack test (does ReZero carry depth WITHOUT phase recentering?)
+# ---------------------------------------------------------------------
+
+"""
+    main_depth(; depths, recenter, ...) -> rows
+
+Sweep the number of `PhasorTransformerBlock`s on the MQAR clean task (d=0),
+config B, with `recenter=false` (default). Question: does the ReZero gate alone
+carry deep phasor-transformer stacks, or does removing pre-norm break depth?
+Reports far/near accuracy + grad-health (init & trained) vs depth. A "pass" is
+accuracy holding (not collapsing to chance) and grad-health staying bounded as
+depth grows.
+"""
+function main_depth(; D::Int = 64, L::Int = 48, n_heads::Int = 4,
+                    depths = [2, 4, 8, 16], config::Symbol = :B, recenter::Bool = false,
+                    n_keys::Int = 8, n_vals::Int = 8, near_gap::Int = 4, B::Int = 64,
+                    n_train_batches::Int = 40, n_eval_batches::Int = 15,
+                    epochs::Int = 40, lr::Real = 1f-3, seeds = 1:2,
+                    attn_kind::Symbol = :lsa, use_cuda::Bool = true,
+                    outdir::String = joinpath(@__DIR__, "..", "results", "xform_depth"),
+                    smoke::Bool = false)
+
+    if smoke
+        D = 32; L = 20; depths = [2, 4]; n_keys = 4; n_vals = 4; near_gap = 3; B = 16
+        n_train_batches = 6; n_eval_batches = 3; epochs = 2; seeds = 1:1
+    end
+
+    dev = (use_cuda && CUDA.functional()) ? gpu_device() : cpu_device()
+    cfg = getproperty(CONFIGS, config)
+    @info "device (depth)" dev config recenter depths
+    mkpath(outdir)
+
+    Kfloat, Vfloat = setup_mqar_task(Xoshiro(777); D, n_keys, n_vals)
+    Vc = angle_to_complex(Phase.(Vfloat)) |> dev
+    eval_b = gen_mqar_batches(Xoshiro(9999), Kfloat, Vfloat;
+                              D, L, n_keys, n_vals, B, near_gap, density = 0.0, n_batches = n_eval_batches)
+
+    rows = NamedTuple[]
+    for depth in depths
+        for seed in seeds
+            train_b = gen_mqar_batches(Xoshiro(seed), Kfloat, Vfloat;
+                                       D, L, n_keys, n_vals, B, near_gap, density = 0.0, n_batches = n_train_batches)
+            model = build_model(; D, n_heads, n_blocks = depth, attn_mode = cfg.attn,
+                                ffn_mode = cfg.ffn, attn_kind, recenter)
+            ps, st = Lux.setup(Xoshiro(seed + 1), model)
+            ps = ps |> dev; st = st |> dev
+
+            yof0 = onehot_dev(train_b[1].tgt_far, n_vals, dev)
+            yon0 = onehot_dev(train_b[1].tgt_near, n_vals, dev)
+            gh0 = grad_health(model, ps, st, train_b[1], Vc, yof0, yon0, dev)
+            ps, losses = train!(model, ps, st, train_b, Vc, n_vals, epochs, lr, dev)
+            gh1 = grad_health(model, ps, st, train_b[1], Vc, yof0, yon0, dev)
+            far_acc, near_acc = eval_accuracy(model, ps, st, eval_b, Vc, n_vals, dev)
+
+            @info(@sprintf("  depth %2d seed %d: far=%.3f near=%.3f  loss %.3f→%.3f  max|dz| init=%.1e trn=%.1e min|z|=%.1e",
+                           depth, seed, far_acc, near_acc, losses[1], losses[end],
+                           gh0.max_absdz, gh1.max_absdz, min(gh0.min_absz, gh1.min_absz)))
+            push!(rows, (depth = depth, config = String(config), recenter = recenter, seed = seed,
+                         far_acc = far_acc, near_acc = near_acc,
+                         init_loss = losses[1], final_loss = losses[end],
+                         max_absdz_init = gh0.max_absdz, max_absdz_trained = gh1.max_absdz,
+                         min_absz = min(gh0.min_absz, gh1.min_absz)))
+        end
+    end
+
+    write_csv(joinpath(outdir, "results.csv"), rows)
+    summarize_depth(rows, depths)
+    @info "done (depth)" outdir
+    return rows
+end
+
+function summarize_depth(rows, depths)
+    println("\n===== DEEP-STACK TEST (config B, recenter=false; mean±std) =====")
+    println("depth  far-acc         near-acc        loss    max|dz|(trn)  min|z|")
+    for d in depths
+        rs = filter(r -> r.depth == d, rows)
+        isempty(rs) && continue
+        m(f) = mean(getproperty.(rs, f)); s(f) = length(rs) > 1 ? std(getproperty.(rs, f)) : 0f0
+        println(@sprintf("%-6d far=%.3f±%.3f near=%.3f±%.3f  %.3f  %.1e     %.1e",
+                         d, m(:far_acc), s(:far_acc), m(:near_acc), s(:near_acc),
+                         m(:final_loss), m(:max_absdz_trained), m(:min_absz)))
+    end
+    println("================================================================\n")
+end
+
 if abspath(PROGRAM_FILE) == @__FILE__
     main()
 end
