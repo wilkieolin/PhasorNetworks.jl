@@ -19,3 +19,5 @@ ablation_results/
 test/scratch/*
 *.aux
 *.log
+# Generated figures from demos/wave_dispersion.jl
+demos/wave_out/

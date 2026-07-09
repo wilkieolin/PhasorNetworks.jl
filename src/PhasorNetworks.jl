@@ -114,6 +114,9 @@ PhasorAttention,
 SingleHeadAttention,
 AttractorPhasorSSM,
 attractor_pull,
+PhasorWaveSheet,
+wave_simulate,
+dispersion,
 train,
 soft_angle,
 default_bias,
@@ -179,6 +182,7 @@ include("kernels.jl")
 include("network.jl")
 include("ssm.jl")
 include("attractor_ssm.jl")
+include("wave.jl")
 include("metrics.jl")
 include("datasets.jl")
 include("hep.jl")
