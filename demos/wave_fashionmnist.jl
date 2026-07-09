@@ -29,15 +29,17 @@ using Plots
 const OUTDIR = joinpath(@__DIR__, "wave_out")
 isdir(OUTDIR) || mkpath(OUTDIR)
 
-# ---- config (bump these up for a serious run) ------------------------
-const N_TRAIN = 6000
-const N_TEST  = 2000
-const BATCH   = 128
-const EPOCHS  = 4
-const L_STEPS = 5          # wave propagation steps
-const HID     = 64         # readout head width
-const LR      = 3f-3
-const SHEET   = 28         # 28×28 sheet = one cell per pixel
+# ---- config (env-overridable, e.g. WAVE_N_TRAIN=60000 WAVE_EPOCHS=12) ----
+_envi(k, d) = parse(Int, get(ENV, k, string(d)))
+_envf(k, d) = parse(Float32, get(ENV, k, string(d)))
+const N_TRAIN = _envi("WAVE_N_TRAIN", 20000)
+const N_TEST  = _envi("WAVE_N_TEST",  5000)
+const BATCH   = _envi("WAVE_BATCH",   128)
+const EPOCHS  = _envi("WAVE_EPOCHS",  8)
+const L_STEPS = _envi("WAVE_L",       5)     # wave propagation steps
+const HID     = _envi("WAVE_HID",     64)    # readout head width
+const LR      = _envf("WAVE_LR",      3f-3)
+const SHEET   = 28                            # 28×28 sheet = one cell per pixel
 
 # ---- image → sheet drive ---------------------------------------------
 # Intensity v∈[0,1] → phase (v-0.5)∈[-0.5,0.5] (injective under exp(iπθ)),
@@ -64,6 +66,18 @@ function baseline_model()
     Chain(
         WrappedFunction(flatten_phase),
         PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
+        Codebook(HID => 10; init_mode = :orthogonal),
+    )
+end
+# PhasorConv stack (the repo's proven conv classifier structure) — a different
+# spatial inductive bias to compare the wave sheet against.
+function conv_model()
+    Chain(
+        WrappedFunction(x -> Phase.((2f0 .* reshape(x, SHEET, SHEET, 1, size(x, 3)) .- 1f0) .* 0.5f0)),
+        PhasorConv((16, 16), 1 => 3, soft_angle),   # (28,28,1,B) → (13,13,3,B) Phase
+        PhasorConv((8, 8), 3 => 1, soft_angle),     # → (6,6,1,B) Phase
+        FlattenLayer(),                             # → (36, B) Phase
+        PhasorDense(36 => HID, normalize_to_unit_circle),
         Codebook(HID => 10; init_mode = :orthogonal),
     )
 end
@@ -134,20 +148,26 @@ println("\n[1] Wave model (PhasorWaveSheet core):")
 mw = wave_model(); psw, stw = Lux.setup(Xoshiro(1), mw)
 psw, stw, lw, aw = train_model!(mw, psw, stw, Xtr, ytr, Xte, yte; label = "wave")
 
-println("\n[2] Baseline (same head, no wave sheet):")
+println("\n[2] Dense baseline (same head, no wave sheet):")
 mb = baseline_model(); psb, stb = Lux.setup(Xoshiro(1), mb)
-psb, stb, lb, ab = train_model!(mb, psb, stb, Xtr, ytr, Xte, yte; label = "base")
+psb, stb, lb, ab = train_model!(mb, psb, stb, Xtr, ytr, Xte, yte; label = "dense")
 
-@printf("\n[3] Result:  wave test acc = %.3f (%d params)   baseline = %.3f (%d params)   chance = 0.100\n",
-        aw[end], nparams(psw), ab[end], nparams(psb))
-Δp = nparams(psw) - nparams(psb)
-@printf("     the wave sheet adds %d trainable params (homogeneous coupling) + a %d-step propagation\n",
-        Δp, L_STEPS)
+println("\n[3] PhasorConv stack (different spatial bias):")
+mc = conv_model(); psc, stc = Lux.setup(Xoshiro(1), mc)
+psc, stc, lc, ac = train_model!(mc, psc, stc, Xtr, ytr, Xte, yte; label = "conv")
+
+println("\n[4] Results (test accuracy, chance = 0.100):")
+@printf("     %-16s %6.3f   (%d params)\n", "wave sheet",   aw[end], nparams(psw))
+@printf("     %-16s %6.3f   (%d params)\n", "dense baseline", ab[end], nparams(psb))
+@printf("     %-16s %6.3f   (%d params)\n", "PhasorConv stack", ac[end], nparams(psc))
+@printf("     wave vs dense: +%.3f acc for +%d params (homogeneous coupling)\n",
+        aw[end] - ab[end], nparams(psw) - nparams(psb))
 
 # ---- figures ---------------------------------------------------------
-cur = plot(1:EPOCHS, aw; lw = 2, marker = :o, label = "wave", legend = :bottomright,
+cur = plot(1:EPOCHS, aw; lw = 2, marker = :o, label = "wave sheet", legend = :bottomright,
            title = "FashionMNIST test accuracy", xlabel = "epoch", ylabel = "accuracy")
-plot!(cur, 1:EPOCHS, ab; lw = 2, marker = :o, label = "baseline")
+plot!(cur, 1:EPOCHS, ab; lw = 2, marker = :o, label = "dense baseline")
+plot!(cur, 1:EPOCHS, ac; lw = 2, marker = :o, label = "PhasorConv stack")
 hline!(cur, [0.1]; ls = :dash, c = :gray, label = "chance")
 savefig(cur, joinpath(OUTDIR, "fmnist_accuracy.png"))
 println("     saved fmnist_accuracy.png")

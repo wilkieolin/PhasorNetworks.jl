@@ -212,20 +212,43 @@ adaptation; scaling `g` detunes criticality.
    28×28 sheet, propagate `L` steps, collapse to the last-step phase field, and
    classify with a `PhasorDense` head + `Codebook` similarity readout. Trains
    end-to-end through the discrete phase-SSM path (Zygote AD through the
-   Buffer/FFT recurrence). On a quick CPU run (6k/2k subset, 4 epochs, L=5) the
-   wave model reaches **79.0%** test accuracy vs **75.8%** for a matched
-   baseline with the *same head but no wave sheet* — the wave layer adds only
-   **7 trainable parameters** (homogeneous coupling) yet improves accuracy and
-   generalization (the baseline begins overfitting while the wave model keeps
-   improving). Demonstrates (c) trainability and (d) wave-based computation on a
-   real task. *(Not tuned for a leaderboard — scale the consts for a serious
-   run; a `PhasorConv`-stack comparison is the natural next step.)*
-3. **Associative memory via settling waves** — bridges to `AttractorPhasorSSM`
-   and the EP/hEP equilibrium machinery (`ep.jl`, `hep.jl`): the sheet's fixed
-   point *is* an energy minimum.
+   Buffer/FFT recurrence). Config is env-overridable (`WAVE_N_TRAIN`,
+   `WAVE_EPOCHS`, …) for scaling. Three-way comparison on a scaled CPU run
+   (20k/5k subset, 8 epochs, L=5):
+
+   | model | test acc | params |
+   |---|---|---|
+   | **wave sheet** | **0.834** | 50,375 |
+   | dense baseline (same head, no wave) | 0.816 | 50,368 |
+   | `PhasorConv` stack (repo-canonical) | 0.654 | 3,468 |
+
+   The wave sheet tops the table: **+1.7 points over the matched dense baseline
+   for +7 trainable parameters** (homogeneous coupling), and trains more stably
+   (the dense baseline wobbles across epochs while the wave model holds ~0.83).
+   The `PhasorConv` stack is a much leaner, different inductive bias (its
+   16×16→8×8 kernels compress to 36 features). Demonstrates (c) trainability and
+   (d) wave-based computation on a real task. *(Not leaderboard-tuned; the
+   headline is the controlled wave-vs-dense delta at fixed head, not the absolute
+   number. Bookmarked follow-up (2) — a learnable coupling stencil — would let
+   the sheet carry more of the classification itself.)*
+3. **Associative memory via settling waves** *(bookmarked)* — bridges to
+   `AttractorPhasorSSM` and the EP/hEP equilibrium machinery (`ep.jl`, `hep.jl`):
+   the sheet's fixed point *is* an energy minimum.
 4. **Sparse critical regime** — tune `g` to marginal stability, add hard
    threshold, measure participation fraction / avalanche sizes (nonlinear
    demo-mode; plan §05 diagnostics).
+
+### Bookmarked next steps (deferred by request)
+
+- **(2) Learnable coupling stencil.** Today the coupling is a parametric DoG
+  (≈9 interpretable scalars). Replacing it with a free, translation-invariant
+  complex stencil (an `(2R+1)²` kernel, still FFT-friendly — just `fft` the
+  stencil) would give the wave sheet real trainable capacity so it can carry
+  more of the classification itself, rather than leaning on the `PhasorDense`
+  head. Keeps GPU/dispersion machinery intact; loses only the DoG
+  interpretability of the coupling parameters.
+- **(3) Associative memory via settling waves** — demo 3 above; the settling
+  fixed point as an energy minimum, tied into `AttractorPhasorSSM` + EP/hEP.
 
 ---
 
