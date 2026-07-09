@@ -40,6 +40,7 @@ const L_STEPS = _envi("WAVE_L",       5)     # wave propagation steps
 const HID     = _envi("WAVE_HID",     64)    # readout head width
 const LR      = _envf("WAVE_LR",      3f-3)
 const SHEET   = 28                            # 28×28 sheet = one cell per pixel
+const STENCIL_R = _envi("WAVE_STENCIL_R", 3)  # learnable-stencil radius
 
 # ---- image → sheet drive ---------------------------------------------
 # Intensity v∈[0,1] → phase (v-0.5)∈[-0.5,0.5] (injective under exp(iπθ)),
@@ -58,6 +59,19 @@ function wave_model()
         WrappedFunction(x -> drive_encode(x, L_STEPS)),
         PhasorWaveSheet(SHEET, SHEET; saturating = true, init_log_g = log(0.02)),
         WrappedFunction(x -> x[:, end, :]),                    # last-step phase field (784,B)
+        PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
+        Codebook(HID => 10; init_mode = :orthogonal),
+    )
+end
+# Same architecture as wave_model, but the wave sheet's coupling is a free
+# learnable stencil (bookmark 2) instead of the 9-scalar DoG — i.e. real
+# trainable capacity inside the wave layer itself.
+function wave_stencil_model()
+    Chain(
+        WrappedFunction(x -> drive_encode(x, L_STEPS)),
+        PhasorWaveSheet(SHEET, SHEET; coupling = :stencil, stencil_radius = STENCIL_R,
+                        saturating = true, init_log_g = log(0.02)),
+        WrappedFunction(x -> x[:, end, :]),
         PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
         Codebook(HID => 10; init_mode = :orthogonal),
     )
@@ -144,28 +158,34 @@ rng = Xoshiro(42)
 Xtr, ytr = load_subset(:train, N_TRAIN, rng)
 Xte, yte = load_subset(:test,  N_TEST,  rng)
 
-println("\n[1] Wave model (PhasorWaveSheet core):")
+println("\n[1] Wave model — DoG coupling (9 scalars):")
 mw = wave_model(); psw, stw = Lux.setup(Xoshiro(1), mw)
-psw, stw, lw, aw = train_model!(mw, psw, stw, Xtr, ytr, Xte, yte; label = "wave")
+psw, stw, lw, aw = train_model!(mw, psw, stw, Xtr, ytr, Xte, yte; label = "wave-dog")
 
-println("\n[2] Dense baseline (same head, no wave sheet):")
+println("\n[2] Wave model — learnable stencil coupling (R=$(STENCIL_R)):")
+ms = wave_stencil_model(); pss, sts = Lux.setup(Xoshiro(1), ms)
+pss, sts, ls, as = train_model!(ms, pss, sts, Xtr, ytr, Xte, yte; label = "wave-sten")
+
+println("\n[3] Dense baseline (same head, no wave sheet):")
 mb = baseline_model(); psb, stb = Lux.setup(Xoshiro(1), mb)
 psb, stb, lb, ab = train_model!(mb, psb, stb, Xtr, ytr, Xte, yte; label = "dense")
 
-println("\n[3] PhasorConv stack (different spatial bias):")
+println("\n[4] PhasorConv stack (different spatial bias):")
 mc = conv_model(); psc, stc = Lux.setup(Xoshiro(1), mc)
 psc, stc, lc, ac = train_model!(mc, psc, stc, Xtr, ytr, Xte, yte; label = "conv")
 
-println("\n[4] Results (test accuracy, chance = 0.100):")
-@printf("     %-16s %6.3f   (%d params)\n", "wave sheet",   aw[end], nparams(psw))
-@printf("     %-16s %6.3f   (%d params)\n", "dense baseline", ab[end], nparams(psb))
-@printf("     %-16s %6.3f   (%d params)\n", "PhasorConv stack", ac[end], nparams(psc))
-@printf("     wave vs dense: +%.3f acc for +%d params (homogeneous coupling)\n",
-        aw[end] - ab[end], nparams(psw) - nparams(psb))
+println("\n[5] Results (test accuracy, chance = 0.100):")
+@printf("     %-22s %6.3f   (%d params)\n", "wave — DoG coupling",     aw[end], nparams(psw))
+@printf("     %-22s %6.3f   (%d params)\n", "wave — stencil (R=$(STENCIL_R))", as[end], nparams(pss))
+@printf("     %-22s %6.3f   (%d params)\n", "dense baseline",          ab[end], nparams(psb))
+@printf("     %-22s %6.3f   (%d params)\n", "PhasorConv stack",        ac[end], nparams(psc))
+@printf("     learnable stencil vs DoG coupling: %+.3f acc for +%d coupling params\n",
+        as[end] - aw[end], nparams(pss) - nparams(psw))
 
 # ---- figures ---------------------------------------------------------
-cur = plot(1:EPOCHS, aw; lw = 2, marker = :o, label = "wave sheet", legend = :bottomright,
+cur = plot(1:EPOCHS, aw; lw = 2, marker = :o, label = "wave — DoG", legend = :bottomright,
            title = "FashionMNIST test accuracy", xlabel = "epoch", ylabel = "accuracy")
+plot!(cur, 1:EPOCHS, as; lw = 2, marker = :o, label = "wave — stencil")
 plot!(cur, 1:EPOCHS, ab; lw = 2, marker = :o, label = "dense baseline")
 plot!(cur, 1:EPOCHS, ac; lw = 2, marker = :o, label = "PhasorConv stack")
 hline!(cur, [0.1]; ls = :dash, c = :gray, label = "chance")

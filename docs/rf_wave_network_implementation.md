@@ -188,9 +188,10 @@ layer = PhasorWaveSheet(H, W;
   k_eff, W_hat, growth_rate)` per spatial mode (§2.2). `mode=:continuous` returns
   the exact ODE operator eigenvalue.
 
-Coupling is parameterized by a handful of interpretable trainable scalars, so
-ablations are one-liners: `B_inh = 0` removes inhibition; `δ_a = 0` removes
-adaptation; scaling `g` detunes criticality.
+Coupling defaults to a parametric difference-of-Gaussians (`coupling = :dog`, a
+handful of interpretable trainable scalars), so ablations are one-liners:
+`B_inh = 0` removes inhibition; `δ_a = 0` removes adaptation; scaling `g` detunes
+criticality. `coupling = :stencil` swaps in a free learnable kernel (§5-bis).
 
 ---
 
@@ -213,24 +214,24 @@ adaptation; scaling `g` detunes criticality.
    classify with a `PhasorDense` head + `Codebook` similarity readout. Trains
    end-to-end through the discrete phase-SSM path (Zygote AD through the
    Buffer/FFT recurrence). Config is env-overridable (`WAVE_N_TRAIN`,
-   `WAVE_EPOCHS`, …) for scaling. Three-way comparison on a scaled CPU run
-   (20k/5k subset, 8 epochs, L=5):
+   `WAVE_EPOCHS`, `WAVE_STENCIL_R`, …) for scaling. Four-way comparison on a
+   scaled CPU run (20k/5k subset, 8 epochs, L=5):
 
    | model | test acc | params |
    |---|---|---|
-   | **wave sheet** | **0.834** | 50,375 |
+   | **wave — DoG coupling** | **0.834** | 50,375 |
+   | wave — learnable stencil (R=3) | 0.824 | 50,468 |
    | dense baseline (same head, no wave) | 0.816 | 50,368 |
    | `PhasorConv` stack (repo-canonical) | 0.654 | 3,468 |
 
-   The wave sheet tops the table: **+1.7 points over the matched dense baseline
-   for +7 trainable parameters** (homogeneous coupling), and trains more stably
-   (the dense baseline wobbles across epochs while the wave model holds ~0.83).
+   Both wave variants top the matched dense baseline: **+1.7 points for +7
+   trainable parameters** (DoG coupling), and the wave models train more stably
+   (the dense baseline wobbles across epochs while the wave models hold ~0.83).
    The `PhasorConv` stack is a much leaner, different inductive bias (its
    16×16→8×8 kernels compress to 36 features). Demonstrates (c) trainability and
    (d) wave-based computation on a real task. *(Not leaderboard-tuned; the
-   headline is the controlled wave-vs-dense delta at fixed head, not the absolute
-   number. Bookmarked follow-up (2) — a learnable coupling stencil — would let
-   the sheet carry more of the classification itself.)*
+   headline is the controlled wave-vs-dense delta at fixed head.)* On the
+   learnable stencil (bookmark 2), see §5-bis below.
 3. **Associative memory via settling waves** *(bookmarked)* — bridges to
    `AttractorPhasorSSM` and the EP/hEP equilibrium machinery (`ep.jl`, `hep.jl`):
    the sheet's fixed point *is* an energy minimum.
@@ -238,15 +239,36 @@ adaptation; scaling `g` detunes criticality.
    threshold, measure participation fraction / avalanche sizes (nonlinear
    demo-mode; plan §05 diagnostics).
 
-### Bookmarked next steps (deferred by request)
+### 5-bis. Learnable coupling stencil — *shipped* (was bookmark 2)
 
-- **(2) Learnable coupling stencil.** Today the coupling is a parametric DoG
-  (≈9 interpretable scalars). Replacing it with a free, translation-invariant
-  complex stencil (an `(2R+1)²` kernel, still FFT-friendly — just `fft` the
-  stencil) would give the wave sheet real trainable capacity so it can carry
-  more of the classification itself, rather than leaning on the `PhasorDense`
-  head. Keeps GPU/dispersion machinery intact; loses only the DoG
-  interpretability of the coupling parameters.
+`PhasorWaveSheet(...; coupling = :stencil, stencil_radius = R)` replaces the
+9-scalar parametric DoG with a free, translation-invariant complex kernel of
+radius `R` (`(2R+1)²` complex entries), built by a differentiable linear
+scatter onto the sheet (`place · stencil_vec`, no mutation) then `fft`ed —
+keeping the GPU/dispersion machinery intact. Seeded from the DoG so it starts
+in the same regime, then trains freely; gradients reach the full stencil.
+
+**Finding (honest):** on isotropic FashionMNIST the learnable stencil is *on
+par with, not better than*, the structured DoG:
+
+| coupling | test acc | coupling params | run |
+|---|---|---|---|
+| DoG | 0.834 | 7 | 20k/8ep |
+| stencil R=3 | 0.824 | 100 | 20k/8ep |
+| DoG | 0.812 | 7 | 8k/5ep |
+| stencil R=6 | 0.810 | 338 | 8k/5ep |
+
+The R=3 stencil slightly *trails* the DoG because its reach (r ≤ 4.2) truncates
+the DoG's longer inhibitory tail (σ_I = 3 → reach ~6–9 px); giving it adequate
+reach (R=6) closes the gap to a tie. So the extra capacity neither helps nor
+hurts here — the DoG's structured bias already fits this isotropic task, and the
+50k-param head dominates either way. The stencil's value is **flexibility for
+couplings the DoG can't express** — anisotropic / patchy / feature-selective
+connectivity (Davis 2024) — which this task doesn't exercise. That's the regime
+to test it in next.
+
+### Still bookmarked
+
 - **(3) Associative memory via settling waves** — demo 3 above; the settling
   fixed point as an energy minimum, tied into `AttractorPhasorSSM` + EP/hEP.
 
