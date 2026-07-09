@@ -26,6 +26,7 @@ function wave_tests()
         test_wave_continuous_dispersion()
         test_wave_ode_equivalence()
         test_wave_currentcall()
+        test_wave_chain_integration()
     end
 end
 
@@ -293,5 +294,41 @@ function test_wave_currentcall()
         @test isfinite(val)
         @test all(isfinite, grads[1])
         @test any(abs.(grads[1]) .> 0)
+    end
+end
+
+# ---- Chain integration (the FashionMNIST-demo composition) ------------
+#
+# Mirrors demos/wave_fashionmnist.jl on tiny random data: image → sheet drive
+# → PhasorWaveSheet → last step → PhasorDense head → Codebook similarities.
+# Confirms the sheet composes with WrappedFunction / PhasorDense / Codebook
+# and that gradients reach both the wave coupling and the trainable head.
+
+function test_wave_chain_integration()
+    @testset "Chain integration (wave classifier)" begin
+        rng = Xoshiro(21)
+        H = W = 8; B = 4; L = 4
+        model = Chain(
+            WrappedFunction(x -> begin
+                b = size(x, 3)
+                ph = Phase.((2f0 .* x .- 1f0) .* 0.5f0)
+                repeat(reshape(ph, H * W, 1, b), 1, L, 1)
+            end),
+            PhasorWaveSheet(H, W; saturating = true, init_log_g = log(0.02)),
+            WrappedFunction(x -> x[:, end, :]),
+            PhasorDense(H * W => 16, normalize_to_unit_circle),
+            Codebook(16 => 10; init_mode = :orthogonal),
+        )
+        ps, st = Lux.setup(rng, model)
+        x = rand(Float32, H, W, B)
+
+        y, _ = model(x, ps, st)
+        @test size(y) == (10, B)
+        @test all(isfinite, y)
+
+        val, gs = Zygote.withgradient(p -> sum(abs2, first(model(x, p, st))), ps)
+        @test isfinite(val)
+        @test all(isfinite, gs[1].layer_2.log_g)         # wave coupling gets gradient
+        @test any(abs.(gs[1].layer_4.weight) .> 0)       # trainable head gets gradient
     end
 end

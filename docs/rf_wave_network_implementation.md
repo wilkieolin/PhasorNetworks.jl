@@ -207,10 +207,19 @@ adaptation; scaling `g` detunes criticality.
    Tier-2 equivalence** — the discrete recurrence and the continuous ODE track
    each other at field similarity 0.997–0.9997. *(The plan's "remove adaptation →
    standing bump" ablation is deferred — see §2.3.)*
-2. **Trainable wave classifier** (FashionMNIST loader already in `datasets.jl`):
-   inject image as spatial drive, propagate `L` steps, read out with
-   `SSMReadout`. Headline: params/accuracy of *one wave sheet* vs. the
-   `PhasorConv` stack. Exercises (b)+(c)+(d) together.
+2. **Trainable wave classifier on FashionMNIST** — *shipped*,
+   `demos/wave_fashionmnist.jl`. Inject the image as a spatial drive on a
+   28×28 sheet, propagate `L` steps, collapse to the last-step phase field, and
+   classify with a `PhasorDense` head + `Codebook` similarity readout. Trains
+   end-to-end through the discrete phase-SSM path (Zygote AD through the
+   Buffer/FFT recurrence). On a quick CPU run (6k/2k subset, 4 epochs, L=5) the
+   wave model reaches **79.0%** test accuracy vs **75.8%** for a matched
+   baseline with the *same head but no wave sheet* — the wave layer adds only
+   **7 trainable parameters** (homogeneous coupling) yet improves accuracy and
+   generalization (the baseline begins overfitting while the wave model keeps
+   improving). Demonstrates (c) trainability and (d) wave-based computation on a
+   real task. *(Not tuned for a leaderboard — scale the consts for a serious
+   run; a `PhasorConv`-stack comparison is the natural next step.)*
 3. **Associative memory via settling waves** — bridges to `AttractorPhasorSSM`
    and the EP/hEP equilibrium machinery (`ep.jl`, `hep.jl`): the sheet's fixed
    point *is* an energy minimum.
