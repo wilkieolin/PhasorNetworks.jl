@@ -50,6 +50,15 @@ speed) for analysis and demos.
 
 # Keyword arguments
 
+- `coupling::Symbol = :dog` — how the recurrent coupling kernel is
+  parameterized. `:dog` is the parametric delayed difference-of-Gaussians
+  (≈9 interpretable scalars). `:stencil` is a **free, learnable** local
+  complex kernel of radius `stencil_radius` (`(2R+1)²` complex entries),
+  giving the sheet real trainable capacity while staying translation-
+  invariant and FFT-diagonal; it is seeded from the DoG so it starts in the
+  same regime, then trains freely.
+- `stencil_radius::Integer = 2` — radius `R` of the learnable stencil (used
+  only when `coupling = :stencil`); the kernel is `(2R+1)×(2R+1)`.
 - `saturating::Bool = true` — project state onto the unit circle each step
   (phase-only self-limiting). Set `false` for the *linear* medium, whose
   dispersion matches [`dispersion`](@ref) exactly.
@@ -82,15 +91,19 @@ speed) for analysis and demos.
 | name | shape | location |
 |------|-------|----------|
 | `log_neg_lambda`, `log_g` | `(1,)` Float32 | params |
-| `A_exc`, `log_sigma_exc`, `B_inh`, `log_sigma_inh`, `log_speed` | `(1,)` Float32 | params |
+| `A_exc`, `log_sigma_exc`, `B_inh`, `log_sigma_inh`, `log_speed` | `(1,)` Float32 | params (`coupling = :dog`) |
+| `stencil_re`, `stencil_im` | `(2R+1, 2R+1)` Float32 | params (`coupling = :stencil`) |
 | `log_rho_a`, `log_delta_a` | `(1,)` Float32 | params (if `use_adaptation`) |
 | `rgrid` | `(H, W)` Float32 | state (constant wrapped-distance grid) |
+| `place` | `(H*W, (2R+1)²)` Float32 | state (`coupling = :stencil`; constant scatter matrix) |
 
 `ω` and `T` derive from `spk_args.t_period`.
 """
 struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     grid_h::Int
     grid_w::Int
+    coupling::Symbol          # :dog (parametric difference-of-Gaussians) | :stencil (free learnable)
+    stencil_radius::Int       # R: the learnable stencil is (2R+1)×(2R+1); used when coupling=:stencil
     saturating::Bool
     use_adaptation::Bool
     init_log_neg_lambda::Float32
@@ -106,6 +119,8 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
 end
 
 function PhasorWaveSheet(H::Integer, W::Integer;
+                         coupling::Symbol = :dog,
+                         stencil_radius::Integer = 2,
                          saturating::Bool = true,
                          use_adaptation::Bool = false,
                          init_log_neg_lambda::Real = log(0.15),
@@ -118,7 +133,12 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          init_log_rho_a::Real = log(0.9),
                          init_log_delta_a::Real = log(0.2),
                          spk_args::SpikingArgs = SpikingArgs())
-    return PhasorWaveSheet(Int(H), Int(W), saturating, use_adaptation,
+    coupling in (:dog, :stencil) ||
+        throw(ArgumentError("coupling must be :dog or :stencil, got :$coupling"))
+    coupling === :stencil && (2 * stencil_radius + 1 > min(H, W)) &&
+        throw(ArgumentError("stencil_radius=$stencil_radius too large for $(H)×$(W) sheet"))
+    return PhasorWaveSheet(Int(H), Int(W), coupling, Int(stencil_radius),
+                           saturating, use_adaptation,
                            Float32(init_log_neg_lambda), Float32(init_log_g),
                            Float32(init_A_exc), Float32(init_log_sigma_exc),
                            Float32(init_B_inh), Float32(init_log_sigma_inh),
@@ -128,8 +148,9 @@ function PhasorWaveSheet(H::Integer, W::Integer;
 end
 
 function Base.show(io::IO, l::PhasorWaveSheet)
-    print(io, "PhasorWaveSheet($(l.grid_h)×$(l.grid_w); ")
-    print(io, "saturating=$(l.saturating), use_adaptation=$(l.use_adaptation), ")
+    print(io, "PhasorWaveSheet($(l.grid_h)×$(l.grid_w); coupling=:$(l.coupling)")
+    l.coupling === :stencil && print(io, "(R=$(l.stencil_radius))")
+    print(io, ", saturating=$(l.saturating), use_adaptation=$(l.use_adaptation), ")
     print(io, "t_period=$(l.spk_args.t_period))")
 end
 
@@ -153,14 +174,41 @@ function _wrapped_distance_grid(H::Int, W::Int)
     return rg
 end
 
+# Initial values for a free (2R+1)² complex stencil, seeded from the parametric
+# DoG (+ conduction-delay phase) so :stencil starts in the same sensible,
+# wavelength-selecting regime the :dog default lives in, then trains freely.
+# Center (self, offset (0,0)) is zeroed — self-dynamics live in A_step.
+function _dog_stencil_init(l::PhasorWaveSheet)
+    R = l.stencil_radius
+    ω = period_to_angfreq(l.spk_args.t_period)
+    σe = exp(l.init_log_sigma_exc); σi = exp(l.init_log_sigma_inh)
+    c  = exp(l.init_log_speed)
+    n = 2R + 1
+    sre = zeros(Float32, n, n); sim = zeros(Float32, n, n)
+    for j in 1:n, i in 1:n
+        di = i - 1 - R; dj = j - 1 - R
+        (di == 0 && dj == 0) && continue
+        r = sqrt(Float32(di)^2 + Float32(dj)^2)
+        mag = l.init_A_exc * exp(-r^2 / (2f0 * σe^2)) - l.init_B_inh * exp(-r^2 / (2f0 * σi^2))
+        val = ComplexF32(mag) * exp(-1im * ω * r / c)
+        sre[i, j] = real(val); sim[i, j] = imag(val)
+    end
+    return sre, sim
+end
+
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorWaveSheet)
     base = (log_neg_lambda = Float32[l.init_log_neg_lambda],
-            log_g          = Float32[l.init_log_g],
-            A_exc          = Float32[l.init_A_exc],
-            log_sigma_exc  = Float32[l.init_log_sigma_exc],
-            B_inh          = Float32[l.init_B_inh],
-            log_sigma_inh  = Float32[l.init_log_sigma_inh],
-            log_speed      = Float32[l.init_log_speed])
+            log_g          = Float32[l.init_log_g])
+    if l.coupling === :stencil
+        sre, sim = _dog_stencil_init(l)
+        base = merge(base, (stencil_re = sre, stencil_im = sim))
+    else  # :dog — parametric difference-of-Gaussians
+        base = merge(base, (A_exc         = Float32[l.init_A_exc],
+                            log_sigma_exc = Float32[l.init_log_sigma_exc],
+                            B_inh         = Float32[l.init_B_inh],
+                            log_sigma_inh = Float32[l.init_log_sigma_inh],
+                            log_speed     = Float32[l.init_log_speed]))
+    end
     if l.use_adaptation
         base = merge(base, (log_rho_a   = Float32[l.init_log_rho_a],
                             log_delta_a = Float32[l.init_log_delta_a]))
@@ -168,49 +216,83 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorWaveSheet)
     return base
 end
 
-Lux.initialstates(::AbstractRNG, l::PhasorWaveSheet) =
-    (rgrid = _wrapped_distance_grid(l.grid_h, l.grid_w),)
+# Constant (H*W, K) placement matrix mapping each of the K=(2R+1)² stencil
+# entries to its (wrap-around) position on the sheet, so the full coupling
+# kernel is `reshape(place * stencil_vec, H, W)` — a differentiable, linear
+# scatter with no mutation. The self column (offset (0,0)) is left all-zero.
+function _stencil_placement(H::Int, W::Int, R::Int)
+    n = 2R + 1; K = n * n
+    place = zeros(Float32, H * W, K)
+    o = 0
+    for j in 1:n, i in 1:n           # column-major, matches reshape(stencil, K)
+        o += 1
+        di = i - 1 - R; dj = j - 1 - R
+        (di == 0 && dj == 0) && continue          # zero self-coupling
+        gi = mod(di, H) + 1; gj = mod(dj, W) + 1
+        place[gi + (gj - 1) * H, o] = 1f0
+    end
+    return place
+end
+
+function Lux.initialstates(::AbstractRNG, l::PhasorWaveSheet)
+    st = (rgrid = _wrapped_distance_grid(l.grid_h, l.grid_w),)
+    if l.coupling === :stencil
+        st = merge(st, (place = _stencil_placement(l.grid_h, l.grid_w, l.stencil_radius),))
+    end
+    return st
+end
 
 # ---- Coupling kernel ---------------------------------------------------
 
 """
-    _build_coupling(l, ps, rgrid, ω) -> (A_step, g, W_hat)
+    _build_coupling(l, ps, st, ω) -> (A_step, g, W_hat)
 
-Resolve the trainable scalars into the objects the per-step recurrence
+Resolve the trainable parameters into the objects the per-step recurrence
 needs, all on the parameter device and fully differentiable:
 
 - `A_step :: (1,)` complex — per-channel full-step decay `exp(k·T)`,
   `k = -exp(log_neg_lambda) + iω`.
 - `g :: (1,)` real — recurrent gain.
-- `W_hat :: (H,W)` complex — the spatial FFT of the delayed difference-of-
-  Gaussians coupling kernel, so a circular convolution is `ifft2(W_hat ⊙
-  fft2(z))`. The DoG magnitude is
-  `A_exc·G(r;σ_E) − B_inh·G(r;σ_I)`, the delay factor `e^{-iω·r/c}`, and
-  the self term (`r = 0`) is zeroed (self-dynamics live in `A_step`).
+- `W_hat :: (H,W)` complex — the spatial FFT of the coupling kernel, so a
+  circular convolution is `ifft2(W_hat ⊙ fft2(z))`.
+
+Two coupling parameterizations (`l.coupling`):
+- `:dog` — the delayed difference-of-Gaussians `A_exc·G(r;σ_E) −
+  B_inh·G(r;σ_I)` × `e^{-iω·r/c}` (≈9 interpretable scalars); self term
+  (`r=0`) zeroed.
+- `:stencil` — a free, learnable local complex kernel of radius `R`
+  (`(2R+1)²` complex entries). Built as `reshape(place · stencil_vec, H, W)`
+  — a differentiable linear scatter of the small stencil onto the sheet
+  (the `place` matrix in state); self column zeroed. Gives the sheet real
+  trainable capacity while staying translation-invariant and FFT-diagonal.
 """
-function _build_coupling(l::PhasorWaveSheet, ps, rgrid, ω)
+function _build_coupling(l::PhasorWaveSheet, ps, st, ω)
     T = Float32(l.spk_args.t_period)
     λ      = -exp.(ps.log_neg_lambda)                 # (1,)
     k      = ComplexF32.(λ .+ 1im .* ω)               # (1,)
     A_step = exp.(k .* T)                             # (1,)
     g      = exp.(ps.log_g)                           # (1,)
 
-    σe = exp.(ps.log_sigma_exc)                       # (1,)
-    σi = exp.(ps.log_sigma_inh)                       # (1,)
-    c  = exp.(ps.log_speed)                           # (1,)
-    r2 = rgrid .^ 2                                    # (H,W)
-
-    # Difference-of-Gaussians magnitude (Mexican hat when σ_I > σ_E).
-    mag = ps.A_exc .* exp.(-r2 ./ (2f0 .* σe .^ 2)) .-
-          ps.B_inh .* exp.(-r2 ./ (2f0 .* σi .^ 2))  # (H,W)
-
-    # Conduction delay as a phase factor on the shared carrier ω.
-    delay_phase = exp.(-1im .* (ω .* rgrid ./ c))     # (H,W) complex
-
-    self_mask = rgrid .> 0f0                          # constant; zero self-coupling
-    W_full = ComplexF32.(mag .* self_mask) .* delay_phase   # (H,W)
-    W_hat  = fft(W_full)                              # (H,W)
-    return A_step, g, W_hat
+    if l.coupling === :stencil
+        H, W = l.grid_h, l.grid_w
+        sv = reshape(ComplexF32.(ps.stencil_re) .+ 1im .* ComplexF32.(ps.stencil_im), :)  # (K,)
+        W_full = reshape(st.place * sv, H, W)         # (H,W) differentiable linear scatter
+        return A_step, g, fft(W_full)
+    else  # :dog
+        rgrid = st.rgrid
+        σe = exp.(ps.log_sigma_exc)                   # (1,)
+        σi = exp.(ps.log_sigma_inh)                   # (1,)
+        c  = exp.(ps.log_speed)                       # (1,)
+        r2 = rgrid .^ 2                                # (H,W)
+        # Difference-of-Gaussians magnitude (Mexican hat when σ_I > σ_E).
+        mag = ps.A_exc .* exp.(-r2 ./ (2f0 .* σe .^ 2)) .-
+              ps.B_inh .* exp.(-r2 ./ (2f0 .* σi .^ 2))
+        # Conduction delay as a phase factor on the shared carrier ω.
+        delay_phase = exp.(-1im .* (ω .* rgrid ./ c))
+        self_mask = rgrid .> 0f0                       # constant; zero self-coupling
+        W_full = ComplexF32.(mag .* self_mask) .* delay_phase
+        return A_step, g, fft(W_full)
+    end
 end
 
 # ---- Core recurrence ---------------------------------------------------
@@ -237,15 +319,15 @@ end
 # the complex trajectory (H,W,L,B). `drive` is nothing (autonomous) or a
 # (H,W,L,B) complex drive. Uses Zygote.Buffer (the AttractorPhasorSSM
 # pattern) so it is AD-safe.
-function _wave_rollout(l::PhasorWaveSheet, ps, rgrid, z0, drive, L::Int)
+function _wave_rollout(l::PhasorWaveSheet, ps, st, z0, drive, L::Int)
     ω = period_to_angfreq(l.spk_args.t_period)
-    A_step, g, W_hat = _build_coupling(l, ps, rgrid, ω)
+    A_step, g, W_hat = _build_coupling(l, ps, st, ω)
     ρ_a = l.use_adaptation ? _sigmoid.(ps.log_rho_a) : nothing
     δ_a = l.use_adaptation ? exp.(ps.log_delta_a)    : nothing
 
     H, W, B = size(z0)
     a0 = ignore_derivatives() do
-        a = similar(rgrid, Float32, H, W, B); a .= 0f0; return a
+        a = similar(st.rgrid, Float32, H, W, B); a .= 0f0; return a
     end
 
     Y = Buffer(similar(z0, ComplexF32, H, W, L, B))
@@ -279,7 +361,7 @@ function (l::PhasorWaveSheet)(x::AbstractArray{<:Phase, 3},
     z0 = ignore_derivatives() do
         z = similar(st.rgrid, ComplexF32, H, W, B); z .= 0f0; return z
     end
-    Y = _wave_rollout(l, ps, st.rgrid, z0, drive, L)   # (H,W,L,B)
+    Y = _wave_rollout(l, ps, st, z0, drive, L)         # (H,W,L,B)
     return complex_to_angle(reshape(Y, H * W, L, B)), st
 end
 
@@ -314,12 +396,12 @@ function wave_simulate(l::PhasorWaveSheet, ps, st;
     @assert size(z0_3, 1) == H && size(z0_3, 2) == W "z0 must be $(H)×$(W)[×B]"
     if mode === :ode
         drive === nothing || throw(ArgumentError("wave_simulate mode=:ode is autonomous; drive must be nothing"))
-        Y = _wave_rollout_ode(l, ps, st.rgrid, z0_3, Int(L))     # (H,W,L,B)
+        Y = _wave_rollout_ode(l, ps, st, z0_3, Int(L))           # (H,W,L,B)
     elseif mode === :discrete
         drive_4 = drive === nothing ? nothing :
             (ndims(drive) == 4 ? ComplexF32.(drive) :
              reshape(ComplexF32.(drive), H, W, Int(L), 1))
-        Y = _wave_rollout(l, ps, st.rgrid, z0_3, drive_4, Int(L)) # (H,W,L,B)
+        Y = _wave_rollout(l, ps, st, z0_3, drive_4, Int(L))      # (H,W,L,B)
     else
         throw(ArgumentError("wave_simulate mode must be :discrete or :ode, got :$mode"))
     end
@@ -330,10 +412,10 @@ end
 # layer's ODE solver (Tsit5 + BacksolveAdjoint by default) and sample at each
 # period. Closes over the coupling built from `ps` — used for pure-forward
 # simulation/validation (the trainable AD path is the CurrentCall dispatch).
-function _wave_rollout_ode(l::PhasorWaveSheet, ps, rgrid, z0, L::Int)
+function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
     ω = period_to_angfreq(l.spk_args.t_period)
     T = Float32(l.spk_args.t_period)
-    _, g, W_hat = _build_coupling(l, ps, rgrid, ω)
+    _, g, W_hat = _build_coupling(l, ps, st, ω)
     λ = -exp.(ps.log_neg_lambda)
     k = ComplexF32.(λ .+ 1im .* ω)
     H, W, B = size(z0)
@@ -383,7 +465,7 @@ a leading-order guide otherwise.
 function dispersion(l::PhasorWaveSheet, ps, st; mode::Symbol = :discrete)
     ω = period_to_angfreq(l.spk_args.t_period)
     T = Float32(l.spk_args.t_period)
-    A_step, g, W_hat = _build_coupling(l, ps, st.rgrid, ω)
+    A_step, g, W_hat = _build_coupling(l, ps, st, ω)
     if mode === :continuous
         λ = -exp.(ps.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω)
@@ -421,7 +503,6 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
     tspan    = x.t_span
     H, W     = l.grid_h, l.grid_w
     ω_val    = period_to_angfreq(l.spk_args.t_period)
-    rgrid    = st.rgrid
     T        = Float32(spk_args.t_period)
 
     sample_I = x.current.current_fn(Float32(tspan[1]))
@@ -433,7 +514,7 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
     end
 
     function dzdt(u, p, t)
-        _, g, W_hat = _build_coupling(l, p, rgrid, ω_val)         # rebuilt for AD
+        _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD
         λ = -exp.(p.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω_val)
         coupled = ifft(reshape(W_hat, H, W, 1) .* fft(u, (1, 2)), (1, 2))

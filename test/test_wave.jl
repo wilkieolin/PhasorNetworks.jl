@@ -27,6 +27,7 @@ function wave_tests()
         test_wave_ode_equivalence()
         test_wave_currentcall()
         test_wave_chain_integration()
+        test_wave_stencil_coupling()
     end
 end
 
@@ -330,5 +331,41 @@ function test_wave_chain_integration()
         @test isfinite(val)
         @test all(isfinite, gs[1].layer_2.log_g)         # wave coupling gets gradient
         @test any(abs.(gs[1].layer_4.weight) .> 0)       # trainable head gets gradient
+    end
+end
+
+# ---- Learnable coupling stencil (bookmark 2) --------------------------
+
+function test_wave_stencil_coupling()
+    @testset "learnable stencil coupling" begin
+        rng = Xoshiro(31)
+        H = W = 12; L = 5; B = 3; R = 2
+        layer = PhasorWaveSheet(H, W; coupling = :stencil, stencil_radius = R,
+                                saturating = true, init_log_g = log(0.05))
+        ps, st = Lux.setup(rng, layer)
+
+        # Param/state layout: free complex stencil + constant placement matrix.
+        @test haskey(ps, :stencil_re) && haskey(ps, :stencil_im)
+        @test size(ps.stencil_re) == (2R + 1, 2R + 1)
+        @test !haskey(ps, :A_exc)                        # DoG scalars absent in :stencil
+        @test haskey(st, :place) && size(st.place) == (H * W, (2R + 1)^2)
+
+        # Forward + dispersion behave like the DoG mode.
+        x = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
+        y, _ = layer(x, ps, st)
+        @test size(y) == (H * W, L, B)
+        @test all(isfinite, Float32.(y))
+        d = dispersion(layer, ps, st)
+        @test d.spectral_radius > 0 && all(isfinite, abs.(d.M))
+
+        # Gradient reaches the full stencil (real capacity, not just 9 scalars).
+        val, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(layer(x, p, st)))), ps)
+        g = gs[1]
+        @test isfinite(val)
+        @test all(isfinite, g.stencil_re) && all(isfinite, g.stencil_im)
+        @test any(abs.(g.stencil_re) .> 0) && any(abs.(g.stencil_im) .> 0)
+
+        # Guard: stencil too large for the sheet.
+        @test_throws ArgumentError PhasorWaveSheet(4, 4; coupling = :stencil, stencil_radius = 3)
     end
 end
