@@ -205,4 +205,35 @@ plot!(sl, 1:L, amp_sat; label = "saturating (phase-only, ≡ 1)", lw = 2)
 savefig(sl, joinpath(OUTDIR, "self_limiting.png"))
 println("     saved self_limiting.png")
 
+# ---------------------------------------------------------------------
+# 4. Tier-2 equivalence: discrete recurrence ≈ continuous ODE
+# ---------------------------------------------------------------------
+#
+# The discrete phase-SSM recurrence (Tier 1) and the continuous ODE (Tier 2,
+# integrated by DifferentialEquations.jl) integrate the *same* defining
+# equation dz/dt = k·z + g·(coupling). Seeded from the same pulse at a
+# subcritical gain, their fields stay strongly aligned — the two modes are
+# one dynamics, exactly the SSM/ODE duality (K[n]=Aⁿ·B) the codebase is
+# built on.
+
+println("\n[4] Tier-2 equivalence (discrete recurrence vs continuous ODE):")
+g_sub = 0.85f0 * g_crit
+psg = set_param(ps, :log_g, log(g_sub))
+traj_d = wave_simulate(layer, psg, st; z0 = seed, L = L, mode = :discrete)
+traj_o = wave_simulate(layer, psg, st; z0 = seed, L = L, mode = :ode)
+fieldsim(a, b) = abs(sum(vec(a) .* conj.(vec(b)))) /
+                 (sqrt(sum(abs2, vec(a))) * sqrt(sum(abs2, vec(b))) + 1f-20)
+for t in (5, 20, 40, L)
+    @printf("     step %2d  discrete↔ODE field similarity = %.4f\n", t,
+            fieldsim(traj_d[:, :, t], traj_o[:, :, t]))
+end
+cmp = plot(layout = (1, 2), size = (720, 340))
+for (i, (lab, tr)) in enumerate(("discrete (Tier 1)" => traj_d, "ODE (Tier 2)" => traj_o))
+    fr = fftshift(tr[:, :, L]); m = abs.(fr); m ./= (maximum(m) + 1f-12)
+    heatmap!(cmp[i], angle.(fr) .* m; c = :twilight, clims = (-π, π),
+             title = lab, aspect_ratio = 1, colorbar = false, axis = false)
+end
+savefig(cmp, joinpath(OUTDIR, "tier_equivalence.png"))
+println("     saved tier_equivalence.png")
+
 println("\nDone. Figures in $(OUTDIR)")

@@ -22,6 +22,10 @@ function wave_tests()
         test_wave_inhibition_ablation()
         test_wave_gradient_flow()
         test_wave_simulate_shapes()
+        # ---- Tier 2: continuous ODE mode (needs the ODE stack from runtests.jl)
+        test_wave_continuous_dispersion()
+        test_wave_ode_equivalence()
+        test_wave_currentcall()
     end
 end
 
@@ -201,5 +205,93 @@ function test_wave_simulate_shapes()
         t3 = wave_simulate(layer, ps, st; z0 = zeros(ComplexF32, H, W), L = L, drive = drive)
         @test size(t3) == (H, W, L)
         @test all(isfinite, t3)
+    end
+end
+
+# ---- Tier 2: continuous ODE mode --------------------------------------
+
+function test_wave_continuous_dispersion()
+    @testset "continuous dispersion" begin
+        rng = Xoshiro(2)
+        H = W = 16
+        layer = PhasorWaveSheet(H, W; saturating = false)
+        ps, st = Lux.setup(rng, layer)
+
+        dc = dispersion(layer, ps, st; mode = :continuous)
+        dd = dispersion(layer, ps, st; mode = :discrete)
+        @test size(dc.M) == (H, W)
+        @test size(dc.k_eff) == (H, W)
+        @test dc.spectral_radius > 0
+        @test all(isfinite, abs.(dc.M))
+        @test all(isfinite, real.(dc.k_eff))
+        # Continuous eigenvalue is the exact operator k + g·Ŵ; discrete is the
+        # operator-split log(A + g·Ŵ)/T. Different discretizations, both valid.
+        @test dc.spectral_radius != dd.spectral_radius
+        @test_throws ArgumentError dispersion(layer, ps, st; mode = :bogus)
+    end
+end
+
+function test_wave_ode_equivalence()
+    @testset "discrete ≈ ODE (same dynamics)" begin
+        rng = Xoshiro(4)
+        H = W = 16; L = 10
+        layer = PhasorWaveSheet(H, W; saturating = false,
+                                init_A_exc = 1.0, init_B_inh = 0.25,
+                                init_log_sigma_exc = log(1.5),
+                                init_log_sigma_inh = log(3.0), init_log_speed = log(40.0))
+        ps, st = Lux.setup(rng, layer)
+
+        # Subcritical (continuous) so neither path diverges over the window.
+        setg(g) = merge(ps, (log_g = Float32[log(g)],))
+        srC(g) = dispersion(layer, setg(g), st; mode = :continuous).spectral_radius
+        lo, hi = 1f-3, 1f2
+        for _ in 1:40
+            m = sqrt(lo * hi); srC(m) < 1f0 ? (lo = m) : (hi = m)
+        end
+        g_crit = sqrt(lo * hi)
+        psg = setg(0.85f0 * g_crit)
+
+        seed = zeros(ComplexF32, H, W); seed[1, 1] = 1f0
+        td = wave_simulate(layer, psg, st; z0 = seed, L = L, mode = :discrete)
+        to = wave_simulate(layer, psg, st; z0 = seed, L = L, mode = :ode)
+        @test size(to) == (H, W, L)
+        @test all(isfinite, to)
+
+        # The operator-split discrete recurrence and the ODE integrate the same
+        # dz/dt = k·z + g·(coupling); their fields stay strongly aligned.
+        a = vec(td[:, :, 5]); b = vec(to[:, :, 5])
+        corr = abs(sum(a .* conj.(b))) / (sqrt(sum(abs2, a)) * sqrt(sum(abs2, b)) + 1f-20)
+        @test corr > 0.9
+    end
+end
+
+function test_wave_currentcall()
+    @testset "CurrentCall ODE dispatch + gradient" begin
+        rng = Xoshiro(6)
+        H = W = 8; B = 2
+        layer = PhasorWaveSheet(H, W; saturating = false)
+        ps, st = Lux.setup(rng, layer)
+
+        drive = zeros(Float32, H * W, B); drive[H * W ÷ 2, :] .= 1f0
+        cc = CurrentCall(LocalCurrent(t -> drive, (H * W, B), 0f0),
+                         layer.spk_args, (0f0, 3f0))
+
+        y, st_out = layer(cc, ps, st)
+        @test size(y) == (H * W, 3, B)          # (H*W, L, B), L = 3 periods
+        @test eltype(y) === Phase
+        @test all(isfinite, Float32.(y))
+        @test st_out === st
+
+        # SpikingCall trampolines through CurrentCall.
+        # Gradient through the ODE adjoint requires ComponentArray params.
+        psc = ComponentArray(ps)
+        loss(p) = begin
+            yy, _ = layer(cc, p, st)
+            sum(abs2, Float32.(yy))
+        end
+        val, grads = Zygote.withgradient(loss, psc)
+        @test isfinite(val)
+        @test all(isfinite, grads[1])
+        @test any(abs.(grads[1]) .> 0)
     end
 end

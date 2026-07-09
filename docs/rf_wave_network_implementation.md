@@ -122,11 +122,34 @@ z[t]  = A · z[t-1] + g · ifft2(Ŵ ⊙ fft2(z[t-1]))      # per-channel decay +
 z[t]  = normalize_to_unit_circle(z[t])                 # (if saturating) phase-only self-limit
 ```
 
-**Tier 2 — `WaveODE` (continuous; validation; future).** Extend the
-`oscillator_bank` `dzdt` closure with the recurrent term and a smooth adaptation
-state, solved by the existing `Tsit5 + BacksolveAdjoint/ZygoteVJP`. The linear
-`W_rec` version is Tier 1's continuous twin, so `K[n]=Aⁿ·B` equivalence holds.
-Not yet implemented.
+**Tier 2 — continuous ODE (*shipped* as the `CurrentCall`/`SpikingCall`
+dispatch on `PhasorWaveSheet`).** Faithful to the codebase's "one defining
+equation, multiple modes via dispatch" architecture (as `PhasorSSM` was unified
+into `PhasorDense`), the ODE mode is *the same struct*, not a separate `WaveODE`
+type. It extends the `oscillator_bank` `dzdt` closure with the recurrent
+FFT-coupling term,
+
+```
+dz/dt = k·z + g·ifft2(Ŵ ⊙ fft2(z)) + I(t)
+```
+
+solved by the existing `Tsit5 + BacksolveAdjoint/ZygoteVJP`. The coupling kernel
+`Ŵ` is rebuilt from `p` inside `dzdt` so gradients flow to the coupling
+parameters through the ODE adjoint; outputs are sampled at each period via
+`saveat` (interpolation is disabled under the adjoint), making the path
+differentiable end-to-end (verified: finite, nonzero grads for `log_g`,
+`log_speed`, `B_inh`, … with `ComponentArray` params, as all ODE-mode layers
+require). `wave_simulate(...; mode=:ode)` gives the pure-forward autonomous
+integrator and `dispersion(...; mode=:continuous)` the exact operator eigenvalue
+`k_eff(q)=k+g·Ŵ(q)`.
+
+Because both tiers integrate the same equation, they agree: seeded from one
+pulse at a subcritical gain, the discrete recurrence and the ODE keep a
+**field similarity of 0.997–0.9997** across the run (`demos/wave_dispersion.jl`
+§4) — the `K[n]=Aⁿ·B` SSM/ODE duality in action. They differ only by the
+operator-splitting term `O(g·T)`, which is why the two `dispersion` modes
+(`:discrete` `A+g·Ŵ` vs `:continuous` `exp((k+g·Ŵ)T)`) diverge as coupling
+strengthens.
 
 ### What is *not* the linear SSM (honesty)
 
@@ -150,16 +173,20 @@ layer = PhasorWaveSheet(H, W;
     spk_args         = SpikingArgs())   # supplies shared ω, T
 ```
 
-- **Lux forward** `(x::Phase{3}, ps, st)` with `x :: (H*W, L, B)` — each timestep
-  injects a spatial drive; returns the sheet state `(H*W, L, B)` Phase. This is
-  the trainable interface (drop into an existing Lux chain; feed its output to
-  `SSMReadout`/`Codebook`).
-- **`wave_simulate(layer, ps, st; z0, L, drive=nothing)`** — the pure-forward
-  interface for demos/analysis: set initial complex state `z0 :: (H,W[,B])`,
-  evolve `L` steps (autonomous when `drive===nothing`), return the full complex
-  trajectory `(H,W,L[,B])`.
-- **`dispersion(layer, ps, st)`** — `(; M, spectral_radius, k_eff, W_hat)` per
-  spatial mode (§2.2).
+- **Lux forward** `(x::Phase{3}, ps, st)` with `x :: (H*W, L, B)` — Tier-1
+  discrete mode; each timestep injects a spatial drive; returns the sheet state
+  `(H*W, L, B)` Phase. This is the primary trainable interface (drop into a Lux
+  chain; feed its output to `SSMReadout`/`Codebook`).
+- **`CurrentCall` / `SpikingCall` dispatch** — Tier-2 continuous ODE mode of the
+  same struct; returns `(H*W, L, B)` Phase sampled at each period. Differentiable
+  through `BacksolveAdjoint` (use `ComponentArray` params).
+- **`wave_simulate(layer, ps, st; z0, L, drive=nothing, mode=:discrete)`** — the
+  pure-forward interface for demos/analysis: set initial complex state
+  `z0 :: (H,W[,B])`, evolve `L` steps, return the full complex trajectory
+  `(H,W,L[,B])`. `mode=:ode` integrates the continuous ODE (autonomous).
+- **`dispersion(layer, ps, st; mode=:discrete)`** — `(; M, spectral_radius,
+  k_eff, W_hat, growth_rate)` per spatial mode (§2.2). `mode=:continuous` returns
+  the exact ODE operator eigenvalue.
 
 Coupling is parameterized by a handful of interpretable trainable scalars, so
 ablations are one-liners: `B_inh = 0` removes inhibition; `δ_a = 0` removes
@@ -176,8 +203,10 @@ adaptation; scaling `g` detunes criticality.
    speed; and the plan's decisive ablations — (iii) remove inhibition → the
    wavelength-selecting ring collapses to a uniform front (fastest mode → DC);
    (iv) detune `g` → extinguish / sustain / saturate; (v) phase-only saturation
-   self-limits amplitude where the linear medium diverges. *(The plan's "remove
-   adaptation → standing bump" ablation is deferred to Tier-2 — see §2.3.)*
+   self-limits amplitude where the linear medium diverges; and (vi) **Tier-1 ↔
+   Tier-2 equivalence** — the discrete recurrence and the continuous ODE track
+   each other at field similarity 0.997–0.9997. *(The plan's "remove adaptation →
+   standing bump" ablation is deferred — see §2.3.)*
 2. **Trainable wave classifier** (FashionMNIST loader already in `datasets.jl`):
    inject image as spatial drive, propagate `L` steps, read out with
    `SSMReadout`. Headline: params/accuracy of *one wave sheet* vs. the

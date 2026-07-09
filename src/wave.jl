@@ -286,7 +286,7 @@ end
 # ---- Pure-forward analysis interface ----------------------------------
 
 """
-    wave_simulate(l::PhasorWaveSheet, ps, st; z0, L, drive=nothing) -> Array{ComplexF32}
+    wave_simulate(l::PhasorWaveSheet, ps, st; z0, L, drive=nothing, mode=:discrete) -> Array{ComplexF32}
 
 Evolve the sheet for `L` steps from initial complex state `z0` and return
 the full complex trajectory. Autonomous when `drive === nothing`; otherwise
@@ -296,28 +296,76 @@ the full complex trajectory. Autonomous when `drive === nothing`; otherwise
 correspondingly. `drive`, if given, must be `(H,W,L)` / `(H,W,L,B)` to
 match. This is the interface for the dispersion / ablation demos (seed a
 localized pulse and watch it travel).
+
+`mode`:
+- `:discrete` (default) — the Tier-1 operator-split recurrence (fast, and
+  the mode the discrete Lux forward uses).
+- `:ode` — the Tier-2 continuous ODE `dz/dt = k·z + g·(coupling)` integrated
+  by `spk_args.solver` and sampled at each period. Autonomous only (`drive`
+  must be `nothing`); the ground-truth continuous dynamics the discrete
+  recurrence approximates. See [`dispersion`](@ref)`(...; mode=:continuous)`.
 """
 function wave_simulate(l::PhasorWaveSheet, ps, st;
-                       z0::AbstractArray, L::Integer, drive=nothing)
+                       z0::AbstractArray, L::Integer, drive=nothing,
+                       mode::Symbol = :discrete)
     H, W = l.grid_h, l.grid_w
     had_batch = ndims(z0) == 3
     z0_3 = had_batch ? ComplexF32.(z0) : reshape(ComplexF32.(z0), H, W, 1)
     @assert size(z0_3, 1) == H && size(z0_3, 2) == W "z0 must be $(H)×$(W)[×B]"
-    drive_4 = drive === nothing ? nothing :
-        (ndims(drive) == 4 ? ComplexF32.(drive) :
-         reshape(ComplexF32.(drive), H, W, Int(L), 1))
-    Y = _wave_rollout(l, ps, st.rgrid, z0_3, drive_4, Int(L))    # (H,W,L,B)
+    if mode === :ode
+        drive === nothing || throw(ArgumentError("wave_simulate mode=:ode is autonomous; drive must be nothing"))
+        Y = _wave_rollout_ode(l, ps, st.rgrid, z0_3, Int(L))     # (H,W,L,B)
+    elseif mode === :discrete
+        drive_4 = drive === nothing ? nothing :
+            (ndims(drive) == 4 ? ComplexF32.(drive) :
+             reshape(ComplexF32.(drive), H, W, Int(L), 1))
+        Y = _wave_rollout(l, ps, st.rgrid, z0_3, drive_4, Int(L)) # (H,W,L,B)
+    else
+        throw(ArgumentError("wave_simulate mode must be :discrete or :ode, got :$mode"))
+    end
     return had_batch ? Y : dropdims(Y; dims=4)
 end
 
+# Tier-2 continuous rollout: integrate dz/dt = k·z + g·(FFT-coupling) with the
+# layer's ODE solver (Tsit5 + BacksolveAdjoint by default) and sample at each
+# period. Closes over the coupling built from `ps` — used for pure-forward
+# simulation/validation (the trainable AD path is the CurrentCall dispatch).
+function _wave_rollout_ode(l::PhasorWaveSheet, ps, rgrid, z0, L::Int)
+    ω = period_to_angfreq(l.spk_args.t_period)
+    T = Float32(l.spk_args.t_period)
+    _, g, W_hat = _build_coupling(l, ps, rgrid, ω)
+    λ = -exp.(ps.log_neg_lambda)
+    k = ComplexF32.(λ .+ 1im .* ω)
+    H, W, B = size(z0)
+    kr  = reshape(k, 1, 1, 1)
+    gr  = reshape(g, 1, 1, 1)
+    Whr = reshape(W_hat, H, W, 1)
+
+    dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(u, (1, 2)), (1, 2))
+    tspan = (0.0f0, Float32(L) * T)
+    sol = oscillator_bank(ComplexF32.(z0), dzdt; tspan = tspan, spk_args = l.spk_args)
+
+    samples = [ComplexF32.(sol(Float32(j) * T)) for j in 1:L]     # each (H,W,B)
+    return cat([reshape(s, H, W, 1, B) for s in samples]...; dims = 3)  # (H,W,L,B)
+end
+
 """
-    dispersion(l::PhasorWaveSheet, ps, st) -> NamedTuple
+    dispersion(l::PhasorWaveSheet, ps, st; mode = :discrete) -> NamedTuple
 
 Closed-form linear dispersion of the sheet (§2.2 of the companion doc).
 Because a translation-invariant coupling diagonalizes under the spatial
-FFT, each wavevector `q` evolves independently with per-step multiplier
+FFT, each wavevector `q` evolves independently with a per-step multiplier
+`M(q)`. Two conventions, selected by `mode`:
 
-    M(q) = A + g · Ŵ(q),     A = exp(k·T)
+- `:discrete` (default) — the Tier-1 operator-split recurrence's per-step
+  multiplier `M(q) = A + g·Ŵ(q)`, `A = exp(k·T)`. Matches
+  [`wave_simulate`](@ref)`(...; mode = :discrete)` exactly.
+- `:continuous` — the Tier-2 ODE's exact linear propagator over one period,
+  `M(q) = exp(k_eff(q)·T)` with the true operator eigenvalue
+  `k_eff(q) = k + g·Ŵ(q)`. Matches [`wave_simulate`](@ref)`(...; mode = :ode)`.
+
+The two agree to first order in `g·T` (operator-splitting error), so they
+converge as the coupling weakens or the step shrinks.
 
 Returns `(; M, W_hat, spectral_radius, k_eff, growth_rate)`:
 
@@ -326,18 +374,89 @@ Returns `(; M, W_hat, spectral_radius, k_eff, growth_rate)`:
 - `spectral_radius :: Float32` — `max_q |M(q)|`. `< 1` extinguishes,
   `≈ 1` self-sustaining (critical), `> 1` saturating. This is the
   phase-SSM analogue of the plan's branching ratio σ.
-- `k_eff :: (H,W)` complex — continuous effective eigenvalue `log(M)/T`.
-- `growth_rate :: (H,W)` Float32 — `real(k_eff) = log|M|/T` per mode.
+- `k_eff :: (H,W)` complex — continuous effective eigenvalue.
+- `growth_rate :: (H,W)` Float32 — `real(k_eff)` per mode.
 
 Exact for the linear medium (`saturating=false`, `use_adaptation=false`);
 a leading-order guide otherwise.
 """
-function dispersion(l::PhasorWaveSheet, ps, st)
+function dispersion(l::PhasorWaveSheet, ps, st; mode::Symbol = :discrete)
     ω = period_to_angfreq(l.spk_args.t_period)
     T = Float32(l.spk_args.t_period)
     A_step, g, W_hat = _build_coupling(l, ps, st.rgrid, ω)
-    M = reshape(A_step, 1, 1) .+ reshape(g, 1, 1) .* W_hat          # (H,W)
-    spectral_radius = maximum(abs.(M))
-    k_eff = log.(M) ./ T
-    return (; M, W_hat, spectral_radius, k_eff, growth_rate = real.(k_eff))
+    if mode === :continuous
+        λ = -exp.(ps.log_neg_lambda)
+        k = ComplexF32.(λ .+ 1im .* ω)
+        k_eff = reshape(k, 1, 1) .+ reshape(g, 1, 1) .* W_hat      # (H,W) exact operator eigenvalue
+        M = exp.(k_eff .* T)
+        return (; M, W_hat, spectral_radius = maximum(abs.(M)), k_eff,
+                  growth_rate = real.(k_eff))
+    elseif mode === :discrete
+        M = reshape(A_step, 1, 1) .+ reshape(g, 1, 1) .* W_hat     # (H,W)
+        k_eff = log.(M) ./ T
+        return (; M, W_hat, spectral_radius = maximum(abs.(M)), k_eff,
+                  growth_rate = real.(k_eff))
+    else
+        throw(ArgumentError("dispersion mode must be :discrete or :continuous, got :$mode"))
+    end
+end
+
+# ---- Tier-2 continuous dispatch: CurrentCall --------------------------
+#
+# The ODE mode of the same defining equation, mirroring PhasorDense /
+# AttractorPhasorSSM's CurrentCall path: build the dzdt closure with the
+# recurrent FFT-coupling term and hand it to DifferentialEquations.jl via
+# the shared oscillator_bank machinery (Tsit5 + BacksolveAdjoint/ZygoteVJP).
+#
+#     dz/dt = k·z + g·ifft2(Ŵ ⊙ fft2(z)) + I(t)
+#
+# The coupling kernel Ŵ is rebuilt from `p` inside dzdt so gradients flow to
+# the coupling parameters through the ODE adjoint. Input current `I(t)` is
+# reshaped from the CurrentCall's `(H*W, …)` current to the `(H,W,B)` sheet.
+# Output is sampled at each period and returned as `(H*W, L, B)` Phase,
+# matching the discrete Lux forward's interface.
+
+function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    spk_args = x.spk_args
+    tspan    = x.t_span
+    H, W     = l.grid_h, l.grid_w
+    ω_val    = period_to_angfreq(l.spk_args.t_period)
+    rgrid    = st.rgrid
+    T        = Float32(spk_args.t_period)
+
+    sample_I = x.current.current_fn(Float32(tspan[1]))
+    B = ndims(sample_I) >= 2 ? size(sample_I, 2) : 1
+    @assert size(sample_I, 1) == H * W "CurrentCall channels $(size(sample_I,1)) ≠ grid $(H*W)"
+
+    u0 = ignore_derivatives() do
+        u = similar(sample_I, ComplexF32, H, W, B); u .= zero(ComplexF32); return u
+    end
+
+    function dzdt(u, p, t)
+        _, g, W_hat = _build_coupling(l, p, rgrid, ω_val)         # rebuilt for AD
+        λ = -exp.(p.log_neg_lambda)
+        k = ComplexF32.(λ .+ 1im .* ω_val)
+        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(u, (1, 2)), (1, 2))
+        drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B)
+        return reshape(k, 1, 1, 1) .* u .+ reshape(g, 1, 1, 1) .* coupled .+ drive
+    end
+
+    # Sample at each period via `saveat` (NOT sol(t) interpolation, which is
+    # disabled under the adjoint) so the CurrentCall path is differentiable
+    # end-to-end with BacksolveAdjoint. offset t=0 is dropped via save_start=false.
+    L = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
+    save_args = ignore_derivatives() do          # solver bookkeeping — not differentiable
+        merge(spk_args.solver_args,
+              Dict{Symbol,Any}(:saveat => Float32.(collect(T:T:(L * T))),
+                               :save_start => false))
+    end
+    prob = ODEProblem(dzdt, u0, tspan, ps)
+    sol  = solve(prob, spk_args.solver, p = ps; save_args...)
+
+    Z = cat([reshape(ComplexF32.(u), H * W, 1, B) for u in sol.u]...; dims = 2)  # (H*W, L, B)
+    return complex_to_angle(Z), st
+end
+
+function (l::PhasorWaveSheet)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    return l(CurrentCall(x), ps, st)
 end
