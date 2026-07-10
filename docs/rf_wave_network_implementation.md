@@ -231,7 +231,8 @@ criticality. `coupling = :stencil` swaps in a free learnable kernel (§5-bis).
    16×16→8×8 kernels compress to 36 features). Demonstrates (c) trainability and
    (d) wave-based computation on a real task. *(Not leaderboard-tuned; the
    headline is the controlled wave-vs-dense delta at fixed head.)* On the
-   learnable stencil (bookmark 2), see §5-bis below.
+   learnable stencil (bookmark 2), see §5-bis; on **where the learning actually
+   happens** (spoiler: mostly the head), see §5-ter.
 3. **Associative memory via settling waves** *(bookmarked)* — bridges to
    `AttractorPhasorSSM` and the EP/hEP equilibrium machinery (`ep.jl`, `hep.jl`):
    the sheet's fixed point *is* an energy minimum.
@@ -266,6 +267,40 @@ hurts here — the DoG's structured bias already fits this isotropic task, and t
 couplings the DoG can't express** — anisotropic / patchy / feature-selective
 connectivity (Davis 2024) — which this task doesn't exercise. That's the regime
 to test it in next.
+
+### 5-ter. Where does the learning happen? — mostly the head
+
+The classifier's head (`PhasorDense` 784→64 → `Codebook`) has ~50k params; the
+wave coupling has 7 (DoG). So how much does the wave sheet actually contribute?
+`demos/wave_attribution.jl` decomposes it with three identical-head/data/seed
+conditions (8k/2k, 6 epochs):
+
+| condition | test acc | Δ |
+|---|---|---|
+| head only (dense, no wave) | 0.802 | — |
+| head + wave coupling **frozen** at init | 0.793 | −0.009 vs head |
+| head + wave coupling **trained** | 0.809 | +0.016 vs frozen |
+
+Two honest conclusions:
+
+1. **The head does ~99% of the work.** Head-alone is 0.802 of the full 0.809
+   (and 0.816 of 0.834 in the 20k/8ep run) — a consistent ~99% across scales.
+   The wave sheet is a small additive contribution, not the primary learner.
+   (Unsurprising: 7 coupling params vs 50k head params.)
+2. **The wave sheet's benefit comes from *training* the coupling, not from a
+   fixed structural prior.** The frozen (init) coupling mildly *hurts* (−0.009);
+   only when the ~7 coupling params are trained does it help (+0.016 over frozen,
+   +0.007 over head-alone). So those few parameters do genuine work — they're
+   just a small effect on top of a head that already does almost everything.
+
+*Caveat:* these are ~1-point deltas at a single seed on a subset — within
+run-to-run noise. The "head dominates" headline is solid; the finer
+"frozen hurts / trained helps" split is directional and wants multiple seeds to
+confirm. The takeaway for honest framing: **the wave sheet is a near-free,
+learnable spatial-mixing adjunct to a conventional trainable head — not a
+stand-alone learner.** Making the sheet carry more would mean shrinking the head
+and giving the coupling real reach/capacity (cf. §5-bis), or a trainable-code
+readout so the sheet's phase field is what gets classified.
 
 ### Still bookmarked
 
