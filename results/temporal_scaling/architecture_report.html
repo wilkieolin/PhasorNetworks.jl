@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhasorNetworks — Architecture modifications per experiment</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171d26; --panel2:#1e2733; --ink:#e6edf3; --dim:#9aa7b4;
+    --line:#2b3542; --io:#3b4a5a; --attn:#2d6cdf; --ffn:#2fa36b; --ssm:#c9822b;
+    --mod:#ff7a45; --mod-bg:#3a2418; --good:#3fb950; --mid:#d29922; --bad:#f85149; --na:#6e7681;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1120px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:26px;margin:0 0 4px;}
+  h2{font-size:20px;margin:38px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px;}
+  .sub{color:var(--dim);margin:0 0 22px;}
+  code{background:#0b0f14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  a{color:#58a6ff;text-decoration:none} a:hover{text-decoration:underline}
+
+  /* pipeline diagram */
+  .pipe{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0;}
+  .box{border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;color:#fff;
+       border:1.5px solid rgba(255,255,255,.14);white-space:nowrap;position:relative;}
+  .box small{display:block;font-weight:400;opacity:.85;font-size:11px;margin-top:2px}
+  .io{background:var(--io)} .attn{background:var(--attn)} .ffn{background:var(--ffn)}
+  .readout{background:#6b3fa0}
+  .arrow{color:var(--dim);font-size:18px}
+  .plus{width:26px;height:26px;border-radius:50%;background:#0b0f14;border:1.5px solid var(--line);
+        display:inline-flex;align-items:center;justify-content:center;font-weight:700;color:var(--dim)}
+  .skip{font-size:11px;color:var(--dim);font-style:italic}
+  .stackbadge{background:#0b0f14;border:1.5px dashed var(--line);border-radius:8px;padding:6px 10px;
+              font-size:12px;color:var(--dim);font-weight:600}
+  .modes{display:flex;flex-direction:column;gap:3px}
+  .lane{height:6px;border-radius:3px;background:linear-gradient(90deg,var(--ssm),#f0c674)}
+  .spectrum{height:10px;width:120px;border-radius:5px;
+            background:linear-gradient(90deg,#3b6,#cd0,#f80,#f40)}
+
+  /* modified highlight */
+  .mod{outline:2px solid var(--mod);outline-offset:2px;box-shadow:0 0 0 4px var(--mod-bg);}
+  .modtag{position:absolute;top:-10px;right:-8px;background:var(--mod);color:#111;font-size:9.5px;
+          font-weight:800;border-radius:4px;padding:1px 4px;letter-spacing:.03em}
+
+  /* cards */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0;}
+  .card h3{margin:0 0 2px;font-size:17px}
+  .knobtag{font-size:11px;font-weight:700;color:#111;border-radius:5px;padding:2px 7px;margin-left:8px;vertical-align:middle}
+  .k-arch{background:#79c0ff} .k-task{background:#d2a8ff}
+  .what{color:var(--dim);margin:4px 0 6px;font-size:13.5px}
+  .what b{color:var(--mod)}
+
+  table{border-collapse:collapse;margin:10px 0 4px;font-size:13px}
+  th,td{border:1px solid var(--line);padding:4px 10px;text-align:center}
+  th{background:var(--panel2);color:var(--dim);font-weight:600}
+  td.best{color:#fff;font-weight:700;background:#12331f}
+  td.bad{color:#f8a}
+  .verdict{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:3px 9px;margin-top:8px}
+  .v2{background:#12331f;color:var(--good);border:1px solid #24603a}
+  .v1{background:#2a2410;color:var(--mid);border:1px solid #5a4d12}
+  .vx{background:#341717;color:var(--bad);border:1px solid #63242a}
+  .vn{background:#22272e;color:var(--na);border:1px solid #333b44}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font-size:12.5px;margin:8px 0 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:14px;height:14px;border-radius:4px;display:inline-block}
+  .note{color:var(--dim);font-size:12.5px;margin-top:6px}
+  .foot{color:var(--na);font-size:12px;margin-top:36px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>PhasorNetworks — architecture modifications per experiment</h1>
+<p class="sub">How each test alters the base phasor SSM-MLP stack, with the result. Task = headless <b>TIR</b>
+(temporal integration recall), chance = 0.0625. Shrunk scale (D=48 / L=32 / 2 seeds) unless noted.
+Detail: <a href="FINDINGS.md">FINDINGS.md</a>, <a href="FINDINGS_knobs.md">FINDINGS_knobs.md</a>,
+<a href="RESULTS_TABLE.md">RESULTS_TABLE.md</a>.</p>
+
+<div class="legend">
+  <span><span class="sw io"></span>input / readout</span>
+  <span><span class="sw attn"></span>attention (pointwise in L)</span>
+  <span><span class="sw ffn"></span>FFN (λ-conv SSM memory)</span>
+  <span><span class="sw" style="background:var(--mod)"></span>modified for this test</span>
+</div>
+
+<h2>Base architecture</h2>
+<p class="what">An LRU/S5-style <b>SSM-MLP</b> — not a Transformer. Each block = a residual attention sublayer
+(pointwise across heads/anchors, <i>no cross-position routing</i>) then a residual FFN whose
+<code>PhasorDense</code> layers carry the causal <b>λ-conv SSM memory</b> — the only cross-timestep transport.
+Both sublayers are ReZero-gated (<code>α₀=0.1</code>) with phase-addition skips.</p>
+<div class="pipe">
+  <div class="box io">x : (D,L,B)<small>phasors</small></div>
+  <span class="arrow">→</span>
+  <div class="stackbadge">Block × depth</div>
+  <span class="arrow">→</span>
+  <div class="box readout">Readout<small>similarity @ query → class</small></div>
+</div>
+<div class="pipe" style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px">
+  <div class="box io">x</div>
+  <span class="arrow">→</span><span class="plus">+</span>
+  <div class="box attn">Attn residual<small>PhasorLSA / PhasorLCA · pointwise&nbsp;L</small></div>
+  <span class="arrow">→</span><span class="plus">+</span>
+  <div class="box ffn">FFN residual<small>PhasorDense→PhasorDense · λ-conv, :hippo</small></div>
+  <span class="arrow">→</span>
+  <div class="box io">y</div>
+  <span class="skip">&nbsp;&nbsp;(each + = ReZero·α skip)</span>
+</div>
+
+<h2>Architecture knobs</h2>
+
+<!-- DEPTH -->
+<div class="card">
+  <h3>Depth<span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification: <b>stack the block ×N</b> (N = 1, 2, 3, 4). Everything else fixed.</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span>
+    <div class="box attn">Blk 1</div><span class="arrow">→</span>
+    <div class="box attn mod">Blk 2<span class="modtag">+N</span></div><span class="arrow">→</span>
+    <div class="box attn mod">Blk 3</div><span class="arrow">→</span>
+    <div class="box attn mod">Blk 4</div><span class="arrow">→</span>
+    <div class="box readout">Readout</div>
+  </div>
+  <table>
+    <tr><th>depth</th><th>1</th><th>2</th><th>3</th><th>4</th></tr>
+    <tr><td>LSA</td><td>0.421</td><td>0.445</td><td class="best">0.474</td><td>0.428</td></tr>
+    <tr><td>LCA</td><td>0.428</td><td>0.418</td><td class="best">0.465</td><td>0.408</td></tr>
+  </table>
+  <span class="verdict vx">✗ weak & unreliable — peaks ~depth 3, regresses at 4</span>
+</div>
+
+<!-- FFN PRESENCE -->
+<div class="card">
+  <h3>FFN present?<span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification: <b>remove the FFN residual</b> (attention-only block) vs keep it, and vary its width.</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box attn">Attn residual</div><span class="arrow">→</span>
+    <div class="box ffn mod" style="opacity:.35;text-decoration:line-through">FFN residual<span class="modtag">REMOVED</span></div>
+    <span class="arrow">→</span><div class="box io">y</div>
+  </div>
+  <table>
+    <tr><th>FFN</th><th>off</th><th>d_ff=D/2</th><th>d_ff=D</th><th>d_ff=2D</th></tr>
+    <tr><td>depth 2</td><td class="bad">0.176</td><td>0.370</td><td>0.445</td><td class="best">0.486</td></tr>
+    <tr><td>depth 4</td><td class="bad">0.164</td><td>0.401</td><td>0.428</td><td class="best">0.474</td></tr>
+  </table>
+  <span class="verdict v2">✓✓ load-bearing — removing it drops to ≈chance; wider is better</span>
+</div>
+
+<!-- WIDTH / CAPACITY -->
+<div class="card">
+  <h3>Width <code>D</code> × FFN <code>d_ff</code><span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification: <b>grow channel width D and FFN hidden width d_ff</b> (box sizes scale).</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box attn mod" style="padding:12px 22px">Attn (wider D)<span class="modtag">D↑</span></div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box ffn mod" style="padding:16px 28px">FFN (wider d_ff)<span class="modtag">d_ff↑</span></div><span class="arrow">→</span>
+    <div class="box io">y</div>
+  </div>
+  <table>
+    <tr><th>D \ d_ff</th><th>1×</th><th>2×</th><th>4×</th></tr>
+    <tr><td>48</td><td>0.445</td><td>0.486</td><td>0.520</td></tr>
+    <tr><td>64</td><td>0.529</td><td>0.587</td><td>0.585</td></tr>
+    <tr><td>96</td><td>0.622</td><td class="best">0.641</td><td>0.648</td></tr>
+    <tr><td>128</td><td>0.625</td><td>0.620</td><td>0.637</td></tr>
+  </table>
+  <span class="verdict v2">✓✓ strongest general knob — D scales, plateaus ~96; d_ff saturates ~2×</span>
+</div>
+
+<!-- DEPTH VS WIDTH -->
+<div class="card">
+  <h3>Depth vs width @ matched params<span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification: spend the <b>same parameter budget</b> on more blocks (tall) vs more width (wide).</p>
+  <div class="pipe">
+    <div class="stackbadge">tall: depth 4, D=48</div>
+    <span class="arrow" style="font-size:22px">vs</span>
+    <div class="box ffn mod" style="padding:18px 30px">wide: depth 2, D=68<span class="modtag">WIN</span></div>
+  </div>
+  <table>
+    <tr><th>~params</th><th>deepen (D=48)</th><th>widen (depth 2)</th></tr>
+    <tr><td>24k</td><td>0.445</td><td>0.445</td></tr>
+    <tr><td>36k</td><td>0.474</td><td class="best">0.509</td></tr>
+    <tr><td>48k</td><td>0.428</td><td class="best">0.561</td></tr>
+  </table>
+  <span class="verdict v2">✓ width wins — +13 pts at ~48k params</span>
+</div>
+
+<!-- LAMBDA RANGE -->
+<div class="card">
+  <h3>λ-timescale range <code>tau_max</code><span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification: widen the FFN <code>PhasorDense</code> <b>HiPPO timescale spectrum</b> τ ∈ [0.5, tau_max]
+  (the SSM memory horizon).</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box attn">Attn residual</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box ffn mod">FFN residual<span class="modtag">τ range</span>
+      <small style="margin-top:5px">λ spectrum:</small>
+      <span class="spectrum" style="margin-top:3px"></span>
+      <small>fast τ=0.5 &nbsp;····→····&nbsp; slow τ=tau_max</small></div>
+    <span class="arrow">→</span><div class="box io">y</div>
+  </div>
+  <table>
+    <tr><th>tau_max</th><th>16</th><th>64</th><th>256</th><th>1024</th></tr>
+    <tr><td>long-range (frac 0.34)</td><td>0.370</td><td>0.583</td><td>0.725</td><td class="best">0.768</td></tr>
+    <tr><td>spread (frac 1.0)</td><td>0.344</td><td class="best">0.474</td><td>0.430</td><td>0.418</td></tr>
+  </table>
+  <span class="verdict v1">✓ match to evidence timescale — long-range loves big τ; short-range over-smooths</span>
+</div>
+
+<!-- MODES -->
+<div class="card">
+  <h3>SSM state expansion — modes/channel <code>ffn_n_modes</code><span class="knobtag k-arch">architecture · NEW LAYER</span></h3>
+  <p class="what">Modification: replace each FFN <code>PhasorDense</code> with <b><code>MultiModePhasorDense</code></b> —
+  <b>M complex modes per channel</b> (distinct timescales, shared carrier ω) combined by a block-diagonal complex
+  mix-down. <code>M=1</code> ≡ <code>PhasorDense</code>.</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box attn">Attn residual</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box ffn mod">MultiMode FFN<span class="modtag">M modes</span>
+      <div class="modes" style="margin-top:6px">
+        <span class="lane" style="width:120px"></span>
+        <span class="lane" style="width:90px"></span>
+        <span class="lane" style="width:60px"></span>
+        <span class="lane" style="width:40px"></span>
+      </div>
+      <small>M timescales/ch → complex mix-down</small></div>
+    <span class="arrow">→</span><div class="box io">y</div>
+  </div>
+  <table>
+    <tr><th>n_modes</th><th>1</th><th>2</th><th>4</th><th>8</th></tr>
+    <tr><td>long-range (0.34)</td><td>0.725</td><td class="best">0.938</td><td>0.845</td><td>0.819</td></tr>
+    <tr><td>spread (1.0)</td><td>0.430</td><td>0.488</td><td class="bad">0.383</td><td class="bad">0.188</td></tr>
+    <tr><td>params</td><td>36k</td><td>51k</td><td>81k</td><td>139k</td></tr>
+  </table>
+  <span class="verdict v2">✓✓ biggest long-range win — M=2 → 0.94, beats the widest single-timescale tape; M&gt;2 destabilizes</span>
+</div>
+
+<!-- ANCHORS -->
+<div class="card">
+  <h3>LCA associative memory — <code>n_anchors</code><span class="knobtag k-arch">architecture</span></h3>
+  <p class="what">Modification (LCA only): grow the <b>Hopfield anchor bank</b> inside <code>PhasorLCA</code>
+  — the Perceiver-latent / associative-memory capacity.</p>
+  <div class="pipe">
+    <div class="box io">x</div><span class="arrow">→</span><span class="plus">+</span>
+    <div class="box attn mod">PhasorLCA<span class="modtag">anchors↑</span><small>anchor bank A = 4…64</small></div>
+    <span class="arrow">→</span><span class="plus">+</span>
+    <div class="box ffn">FFN residual</div><span class="arrow">→</span><div class="box io">y</div>
+  </div>
+  <table>
+    <tr><th>n_anchors</th><th>4</th><th>8</th><th>16</th><th>32</th><th>64</th></tr>
+    <tr><td>acc</td><td>0.414</td><td>0.418</td><td>0.431</td><td>0.448</td><td class="best">0.486</td></tr>
+  </table>
+  <span class="verdict v1">✓ cheap & monotonic, but modest (+7 pts, ~+6k params)</span>
+</div>
+
+<h2>Task / probe variants (same architecture, different input structure)</h2>
+
+<!-- INTEGRATION -->
+<div class="card">
+  <h3>Integration — evidence frames <code>m_signal</code><span class="knobtag k-task">task probe</span></h3>
+  <p class="what">Modification: plant the target value at <b>m noisy timesteps</b> (m = 1,2,4,8); distractors elsewhere.
+  Architecture unchanged — probes whether the λ-memory actually accumulates across time.</p>
+  <table>
+    <tr><th>m frames</th><th>1</th><th>2</th><th>4</th><th>8</th></tr>
+    <tr><td>acc</td><td class="bad">0.083</td><td>0.246</td><td>0.690</td><td class="best">0.997</td></tr>
+  </table>
+  <span class="verdict v2">✓ integration is real — chance at m=1 → ≈1.0 at m=8</span>
+</div>
+
+<!-- LONG RANGE -->
+<div class="card">
+  <h3>Long-range placement × FFN λ-init<span class="knobtag k-task">task probe</span></h3>
+  <p class="what">Modification: push evidence <b>far from the query</b> (<code>sig_max_frac</code> 1.0 → 0.34) and compare
+  <code>:hippo</code> (multi-timescale) vs <code>:default</code> (single-timescale) FFN memory.</p>
+  <table>
+    <tr><th>evidence</th><th>FFN=hippo</th><th>FFN=default</th></tr>
+    <tr><td>spread (1.0)</td><td class="best">0.474</td><td>0.331</td></tr>
+    <tr><td>far (0.34)</td><td class="best">0.583</td><td class="bad">0.167</td></tr>
+  </table>
+  <span class="verdict v2">✓ multi-timescale memory essential for long range — default collapses to ≈chance</span>
+</div>
+
+<!-- MQAR -->
+<div class="card">
+  <h3>MQAR routing (contrast)<span class="knobtag k-task">task probe</span></h3>
+  <p class="what">Modification: swap TIR for a <b>content-addressed recall</b> task (key→value routing).
+  Architecture identical; probes whether pointwise-L attention can route across positions.</p>
+  <table>
+    <tr><th>depth</th><th>1</th><th>2</th><th>4</th></tr>
+    <tr><td>far-acc</td><td class="bad">0.094</td><td class="bad">0.112</td><td class="bad">0.073</td></tr>
+  </table>
+  <span class="verdict vn">— inconclusive at this shrunk scale (all ≈ chance); no cross-position routing exists</span>
+</div>
+
+<h2>Bottom line for the audio scale-up</h2>
+<div class="card">
+  <p style="margin:0">Configuration these results point to:
+  <b>shallow (2–3 blocks), moderately wide (D≈96), FFN with <code>ffn_n_modes=2</code>,
+  and <code>tau_max</code> matched to the evidence/utterance timescale.</b>
+  Width + a small SSM state-expansion bank are the high-leverage levers; <b>depth is not</b>.
+  Natural next experiment: knob 2 — Mamba-style input-dependent selection over the mode-bank.</p>
+</div>
+
+<p class="foot">Generated for branch <code>ssm-knobs</code>. Verdict key:
+<span class="verdict v2" style="margin:0">✓✓ high leverage</span>
+<span class="verdict v1" style="margin:0 0 0 6px">✓ conditional / modest</span>
+<span class="verdict vx" style="margin:0 0 0 6px">✗ weak</span>
+<span class="verdict vn" style="margin:0 0 0 6px">— inconclusive</span>.
+Numbers are 2-seed means; see RESULTS_TABLE.md for variance & caveats.</p>
+
+</div>
+</body>
+</html>

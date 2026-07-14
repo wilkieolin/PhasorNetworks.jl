@@ -1,0 +1,17 @@
+probe,m_signal,sig_max_frac,ffn_mode,seed,acc,final_loss
+accumulate,1,1.0,hippo,1,0.078125,0.62276566
+accumulate,1,1.0,hippo,2,0.088541664,0.6190439
+accumulate,2,1.0,hippo,1,0.23177083,0.5200341
+accumulate,2,1.0,hippo,2,0.26041666,0.52402776
+accumulate,4,1.0,hippo,1,0.7057292,0.25522152
+accumulate,4,1.0,hippo,2,0.6744792,0.23721364
+accumulate,8,1.0,hippo,1,1.0,0.039663393
+accumulate,8,1.0,hippo,2,0.9947917,0.065827996
+longrange,3,1.0,hippo,1,0.4765625,0.39733893
+longrange,3,1.0,hippo,2,0.47135416,0.40869746
+longrange,3,1.0,default,1,0.31510416,0.46177307
+longrange,3,1.0,default,2,0.34635416,0.4660877
+longrange,3,0.34,hippo,1,0.5546875,0.3767872
+longrange,3,0.34,hippo,2,0.6119792,0.36499676
+longrange,3,0.34,default,1,0.16666667,0.5050988
+longrange,3,0.34,default,2,0.16666667,0.5351943
