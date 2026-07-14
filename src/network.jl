@@ -299,6 +299,8 @@ struct PhasorDense <: Lux.AbstractLuxLayer
     init_mode::Symbol
     return_type::SolutionType
     init_log_neg_lambda::Union{Vector{Float32}, Nothing}  # nothing → use init_mode default; otherwise per-channel override
+    hippo_tau_max::Union{Float32, Nothing}   # :hippo λ-range knob; nothing → HIPPO_TAU_MAX
+    hippo_tau_min::Union{Float32, Nothing}   # :hippo λ-range knob; nothing → HIPPO_TAU_MIN
     spk_args::SpikingArgs
 end
 
@@ -311,6 +313,8 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     init = nothing,
                     init_mode::Symbol = :default,
                     init_log_neg_lambda::Union{Real, AbstractVector{<:Real}, Nothing} = nothing,
+                    hippo_tau_max::Union{Real, Nothing} = nothing,
+                    hippo_tau_min::Union{Real, Nothing} = nothing,
                     spk_args::SpikingArgs = SpikingArgs(),
                     kwargs...)
     # Handle backward compatibility: 'init' kwarg maps to init_weight
@@ -341,6 +345,8 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                         init_mode,
                         return_type,
                         lnl_vec,
+                        hippo_tau_max === nothing ? nothing : Float32(hippo_tau_max),
+                        hippo_tau_min === nothing ? nothing : Float32(hippo_tau_min),
                         spk_args)
 end
 
@@ -353,7 +359,8 @@ function _init_dynamics(l::PhasorDense)
     if l.init_log_neg_lambda !== nothing
         return copy(l.init_log_neg_lambda)
     elseif l.init_mode == :hippo
-        λ_init, _ = hippo_legs_diagonal(l.out_dims)
+        λ_init, _ = hippo_legs_diagonal(l.out_dims;
+                                        tau_max = l.hippo_tau_max, tau_min = l.hippo_tau_min)
         return log.(-λ_init)
     else  # :default
         return fill(Float32(log(0.2)), l.out_dims)
@@ -559,6 +566,152 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return next_call, state
     end
 end
+
+###
+### MultiModePhasorDense — SSM state expansion: M timescale-modes per channel
+###
+
+"""
+    MultiModePhasorDense(in_dims => out_dims, n_modes, activation = normalize_to_unit_circle;
+                         init_mode = :hippo, hippo_tau_max = nothing, hippo_tau_min = nothing,
+                         use_bias = true, init_weight = glorot_uniform,
+                         init_bias = default_bias, spk_args = SpikingArgs())
+
+A [`PhasorDense`](@ref)-style diagonal-SSM layer with **`n_modes` complex modes
+per output channel** — the S5/S4D "state expansion" knob. Each output channel `c`
+carries `M = n_modes` internal modes with **distinct log-spaced time-constants**
+`τ ∈ [hippo_tau_min, hippo_tau_max]` (all sharing the single carrier `ω = 2π`, per
+the per-channel-ω rule), whose trajectories are combined by a **block-diagonal
+complex mix-down** `C[c, m]` into one output per channel:
+
+    state (out·M, L, B)  =  causal_conv_dirac(x, weight, λ(out·M), ω, T)
+    y[c]                 =  Σ_m C[c, m] · state[c, m]              (block-diagonal C)
+
+This decouples the SSM's temporal expressivity (number of timescales per channel)
+from the output width — the linear-SSM analogue of increasing state size `N` while
+keeping `D` fixed. `n_modes = 1` (with `C = 1`) reduces to the `PhasorDense` 3D
+discrete path.
+
+Only the **3D Phase discrete path** is implemented (the SSM path where modes
+matter); the ODE / spiking dispatches are intentionally not provided.
+
+# Arguments
+- `in_dims => out_dims` — input / output channel widths.
+- `n_modes::Int` — modes (distinct timescales) per output channel, `M`.
+
+# Trainable parameters
+- `weight` — `(out·M, in)` Float32, input → state (the SSM `B`).
+- `log_neg_lambda` — `(out·M,)` Float32, per-mode decay `λ = -exp(·)` (the `A`).
+- `C_real`, `C_imag` — `(out, M)` Float32, block-diagonal complex mix-down (`C`).
+- `bias_real`, `bias_imag` — `(out,)` Float32 (when `use_bias`), post-mix-down
+  complex offset (discrete-mode bias).
+"""
+struct MultiModePhasorDense <: Lux.AbstractLuxLayer
+    in_dims::Int
+    out_dims::Int
+    n_modes::Int
+    activation::Function
+    use_bias::Bool
+    init_weight::Function
+    init_bias::Function
+    init_mode::Symbol
+    hippo_tau_max::Union{Float32, Nothing}
+    hippo_tau_min::Union{Float32, Nothing}
+    spk_args::SpikingArgs
+end
+
+function MultiModePhasorDense(shape::Pair{<:Integer,<:Integer}, n_modes::Integer,
+                             activation = normalize_to_unit_circle;
+                             init_mode::Symbol = :hippo,
+                             hippo_tau_max::Union{Real, Nothing} = nothing,
+                             hippo_tau_min::Union{Real, Nothing} = nothing,
+                             use_bias::Bool = true,
+                             init_weight = glorot_uniform,
+                             init_bias = default_bias,
+                             spk_args::SpikingArgs = SpikingArgs())
+    n_modes >= 1 || throw(ArgumentError("n_modes must be ≥ 1, got $n_modes"))
+    init_mode in (:default, :hippo) ||
+        throw(ArgumentError("init_mode must be :default or :hippo (got :$init_mode)"))
+    return MultiModePhasorDense(shape[1], shape[2], Int(n_modes), activation, use_bias,
+                                init_weight, init_bias, init_mode,
+                                hippo_tau_max === nothing ? nothing : Float32(hippo_tau_max),
+                                hippo_tau_min === nothing ? nothing : Float32(hippo_tau_min),
+                                spk_args)
+end
+
+# Per-mode λ init: M distinct log-spaced timescales, tiled across the `out`
+# groups so the state channel ordering is [ (c=1: m=1..M), (c=2: m=1..M), … ]
+# — matching `reshape(Z, M, out, …)` in the forward pass. For M=1 this reduces
+# to the PhasorDense `_init_dynamics` spectrum so n_modes=1 matches PhasorDense.
+function _init_dynamics(l::MultiModePhasorDense)
+    M, out = l.n_modes, l.out_dims
+    if M == 1
+        base = l.init_mode == :hippo ?
+            log.(-hippo_legs_diagonal(out; tau_max = l.hippo_tau_max, tau_min = l.hippo_tau_min)[1]) :
+            fill(Float32(log(0.2)), out)
+        return base
+    end
+    λ_modes, _ = hippo_legs_diagonal(M; tau_max = l.hippo_tau_max, tau_min = l.hippo_tau_min)
+    lnl_mode = log.(-λ_modes)                       # (M,)
+    return repeat(lnl_mode, outer = out)            # (out·M,), fastest index = mode
+end
+
+function Lux.initialparameters(rng::AbstractRNG, l::MultiModePhasorDense)
+    M, out = l.n_modes, l.out_dims
+    W = l.init_weight(rng, out * M, l.in_dims)
+    log_neg_lambda = _init_dynamics(l)
+    # Mix-down init = 1/M (average the modes); for M=1 this is 1 ⇒ PhasorDense.
+    C_real = fill(1f0 / M, out, M)
+    C_imag = zeros(Float32, out, M)
+    params = (weight = W, log_neg_lambda = log_neg_lambda, C_real = C_real, C_imag = C_imag)
+    if l.use_bias
+        bias = l.init_bias(rng, (out,))
+        params = merge(params, (bias_real = Float32.(real.(bias)),
+                                bias_imag = Float32.(imag.(bias))))
+    end
+    return params
+end
+
+Lux.initialstates(::AbstractRNG, ::MultiModePhasorDense) = NamedTuple()
+
+# ---- 3D Phase discrete path (the SSM path) ----
+function (a::MultiModePhasorDense)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
+    M, out = a.n_modes, a.out_dims
+    λ = -exp.(params.log_neg_lambda)                 # (out·M,)
+    ω = zero(λ) .+ period_to_angfreq(a.spk_args.t_period)
+    T = a.spk_args.t_period
+    L, B = size(x, 2), size(x, 3)
+
+    Z = causal_conv_dirac(x, params.weight, λ, ω, T) # (out·M, L, B) complex
+    Z = -conj.(Z)                                    # frame correction (see PhasorDense)
+
+    Zr = reshape(Z, M, out, L, B)                    # mode index fastest
+    C  = params.C_real .+ 1f0im .* params.C_imag     # (out, M)
+    Cw = reshape(permutedims(C, (2, 1)), M, out, 1, 1)
+    Y  = dropdims(sum(Cw .* Zr; dims = 1); dims = 1) # (out, L, B) complex
+
+    if a.use_bias
+        bias_val = params.bias_real .+ 1f0im .* params.bias_imag   # (out,)
+        Y = Y .+ reshape(bias_val, out, 1, 1)
+    end
+
+    if a.activation === normalize_to_unit_circle
+        return complex_to_angle(Y), state
+    else
+        return complex_to_angle(a.activation(Y)), state
+    end
+end
+
+# ---- 2D Phase: wrap to 3D with L=1 ----
+function (a::MultiModePhasorDense)(x::AbstractArray{<:Phase, 2}, params::LuxParams, state::NamedTuple)
+    y3, st = a(reshape(x, size(x, 1), 1, size(x, 2)), params, state)
+    return dropdims(y3, dims = 2), st
+end
+
+# ODE / spiking paths are out of scope for this layer (discrete SSM only).
+(a::MultiModePhasorDense)(::Union{SpikingCall, CurrentCall}, ::LuxParams, ::NamedTuple) =
+    error("MultiModePhasorDense implements only the 3D Phase discrete path; " *
+          "the ODE/spiking dispatch is not defined.")
 
 ###
 ### PhasorResonant — Complex → Phase encoder (fixed ω, ZOH SSM)

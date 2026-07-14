@@ -454,17 +454,20 @@ log-parameterization (`log_neg_lambda = log.(-λ)`).
     by those layers' `:hippo` init mode.
 """
 function hippo_legs_diagonal(N::Int; tau_max::Union{Nothing, Real}=nothing,
+                             tau_min::Union{Nothing, Real}=nothing,
                              clip_decay::Union{Nothing, Real}=nothing)
     if clip_decay !== nothing
         # Legacy linear HiPPO with hard clip.
         ns = Float32.(0:N-1)
         λ_mag = min.(ns .+ 0.5f0, Float32(clip_decay))
     else
-        # Log-spaced time-constants τ ∈ [HIPPO_TAU_MIN, tau_max]: the slow end
-        # is a long-memory integrator, the fast end a near-instant read tap.
+        # Log-spaced time-constants τ ∈ [tau_min, tau_max]: the slow end is a
+        # long-memory integrator, the fast end a near-instant read tap. Widening
+        # this range (esp. tau_max) is the SSM's "timescale-range" knob.
         τmax   = tau_max === nothing ? HIPPO_TAU_MAX : Float32(tau_max)
+        τmin   = tau_min === nothing ? HIPPO_TAU_MIN : Float32(tau_min)
         λ_slow = 1f0 / τmax            # small |λ| → long memory
-        λ_fast = 1f0 / HIPPO_TAU_MIN   # large |λ| → short memory
+        λ_fast = 1f0 / τmin            # large |λ| → short memory
         λ_mag  = Float32.(exp.(range(log(λ_slow), log(λ_fast); length=N)))
     end
     λ = -λ_mag

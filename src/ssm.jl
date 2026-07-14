@@ -1127,10 +1127,22 @@ function PhasorTransformerBlock(d_model::Int, attn;
                                alpha0::Real = 0.1f0,
                                branch_init_scale::Real = 0.1f0,
                                ffn_init_mode::Symbol = :hippo,
+                               ffn_n_modes::Int = 1,
+                               ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
+                               ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
                                recenter::Bool = false)
     iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
-    ffn = Chain(PhasorDense(d_model => d_ff, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode),
-                PhasorDense(d_ff => d_model, activation; use_bias = true, init_weight = iw, init_mode = ffn_init_mode))
+    # FFN sublayers: plain PhasorDense (ffn_n_modes=1) or MultiModePhasorDense
+    # (ffn_n_modes>1 — the SSM state-expansion knob). Both consume the λ-range
+    # knobs (ffn_hippo_tau_max/min).
+    mk_ffn(a, b) = ffn_n_modes > 1 ?
+        MultiModePhasorDense(a => b, ffn_n_modes, activation; use_bias = true,
+                             init_weight = iw, init_mode = ffn_init_mode,
+                             hippo_tau_max = ffn_hippo_tau_max, hippo_tau_min = ffn_hippo_tau_min) :
+        PhasorDense(a => b, activation; use_bias = true, init_weight = iw,
+                    init_mode = ffn_init_mode,
+                    hippo_tau_max = ffn_hippo_tau_max, hippo_tau_min = ffn_hippo_tau_min)
+    ffn = Chain(mk_ffn(d_model, d_ff), mk_ffn(d_ff, d_model))
     attn_branch = recenter ? Chain(PhaseRecenter(), attn) : attn
     ffn_branch  = recenter ? Chain(PhaseRecenter(), ffn) : ffn
     attn_res = PhasorResidual(attn_branch; gate = gate, alpha0 = alpha0)
