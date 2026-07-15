@@ -59,6 +59,15 @@ speed) for analysis and demos.
   same regime, then trains freely.
 - `stencil_radius::Integer = 2` — radius `R` of the learnable stencil (used
   only when `coupling = :stencil`); the kernel is `(2R+1)×(2R+1)`.
+- `transmit::Symbol = :potential` — what a neuron sends to its neighbours.
+  `:potential` transmits the full complex state `z` (linear diffusive coupling;
+  can run away, needing the state-level `saturating` snap). `:spike` transmits a
+  **unit-magnitude** event `z/|z|` — a fixed-size spike whose phase carries the
+  info. The coupling drive is then hard-bounded (`|Σ W·s| ≤ Σ|W|`), so the leaky
+  integrator is BIBO-stable with **no state snap** (`saturating=false`), and the
+  state magnitude `|z|` survives to encode local phase coherence / interference
+  intensity. Sub-threshold neurons emit ≈0 (a natural firing threshold via the
+  ε-safe normalize). Intended with `saturating=false`.
 - `saturating::Bool = true` — project state onto the unit circle each step
   (phase-only self-limiting). Set `false` for the *linear* medium, whose
   dispersion matches [`dispersion`](@ref) exactly.
@@ -104,6 +113,7 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     grid_w::Int
     coupling::Symbol          # :dog (parametric difference-of-Gaussians) | :stencil (free learnable)
     stencil_radius::Int       # R: the learnable stencil is (2R+1)×(2R+1); used when coupling=:stencil
+    transmit::Symbol          # :potential (send full z) | :spike (send unit-magnitude z/|z|)
     saturating::Bool
     use_adaptation::Bool
     init_log_neg_lambda::Float32
@@ -121,6 +131,7 @@ end
 function PhasorWaveSheet(H::Integer, W::Integer;
                          coupling::Symbol = :dog,
                          stencil_radius::Integer = 2,
+                         transmit::Symbol = :potential,
                          saturating::Bool = true,
                          use_adaptation::Bool = false,
                          init_log_neg_lambda::Real = log(0.15),
@@ -135,9 +146,11 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          spk_args::SpikingArgs = SpikingArgs())
     coupling in (:dog, :stencil) ||
         throw(ArgumentError("coupling must be :dog or :stencil, got :$coupling"))
+    transmit in (:potential, :spike) ||
+        throw(ArgumentError("transmit must be :potential or :spike, got :$transmit"))
     coupling === :stencil && (2 * stencil_radius + 1 > min(H, W)) &&
         throw(ArgumentError("stencil_radius=$stencil_radius too large for $(H)×$(W) sheet"))
-    return PhasorWaveSheet(Int(H), Int(W), coupling, Int(stencil_radius),
+    return PhasorWaveSheet(Int(H), Int(W), coupling, Int(stencil_radius), transmit,
                            saturating, use_adaptation,
                            Float32(init_log_neg_lambda), Float32(init_log_g),
                            Float32(init_A_exc), Float32(init_log_sigma_exc),
@@ -150,7 +163,7 @@ end
 function Base.show(io::IO, l::PhasorWaveSheet)
     print(io, "PhasorWaveSheet($(l.grid_h)×$(l.grid_w); coupling=:$(l.coupling)")
     l.coupling === :stencil && print(io, "(R=$(l.stencil_radius))")
-    print(io, ", saturating=$(l.saturating), use_adaptation=$(l.use_adaptation), ")
+    print(io, ", transmit=:$(l.transmit), saturating=$(l.saturating), use_adaptation=$(l.use_adaptation), ")
     print(io, "t_period=$(l.spk_args.t_period))")
 end
 
@@ -297,13 +310,26 @@ end
 
 # ---- Core recurrence ---------------------------------------------------
 
+# What a neuron transmits to its neighbors:
+#   :potential — its full complex state z (linear diffusive coupling; can run
+#                away, hence the state-level `saturating` snap).
+#   :spike     — a unit-magnitude event z/|z| (fixed-size "spike" whose phase
+#                carries the info). The coupling drive is then hard-bounded
+#                (|Σ W·s| ≤ Σ|W|), so the leaky-integrator state is BIBO-stable
+#                with NO state snap — and |z| survives to encode local phase
+#                coherence / interference intensity. Sub-threshold neurons
+#                (|z|≈0) emit ≈0 via the ε-safe normalize (a natural threshold).
+_transmit(l::PhasorWaveSheet, z) =
+    l.transmit === :spike ? normalize_to_unit_circle(z) : z
+
 # One evolution step in the spatial-Fourier-coupled complex plane.
 # `z, drive_t, a` are (H,W,B); scalars A_step, g, ρ_a, δ_a are (1,).
 # Returns (z_next, a_next).
-function _wave_step(z, drive_t, a, A_step, g, W_hat, ρ_a, δ_a,
+function _wave_step(l::PhasorWaveSheet, z, drive_t, a, A_step, g, W_hat, ρ_a, δ_a,
                     saturating::Bool, use_adaptation::Bool)
     H, W, B = size(z)
-    coupled = ifft(reshape(W_hat, H, W, 1) .* fft(z, (1, 2)), (1, 2))    # (H,W,B)
+    src = _transmit(l, z)                                                # spike or potential
+    coupled = ifft(reshape(W_hat, H, W, 1) .* fft(src, (1, 2)), (1, 2))  # (H,W,B)
     z_lin = reshape(A_step, 1, 1, 1) .* z .+
             reshape(g, 1, 1, 1) .* coupled .+ drive_t
     a_next = a
@@ -338,7 +364,7 @@ function _wave_rollout(l::PhasorWaveSheet, ps, st, z0, drive, L::Int)
             ignore_derivatives() do
                 d = similar(z, ComplexF32, H, W, B); d .= 0f0; return d
             end : drive[:, :, t, :]
-        z, a = _wave_step(z, drive_t, a, A_step, g, W_hat, ρ_a, δ_a,
+        z, a = _wave_step(l, z, drive_t, a, A_step, g, W_hat, ρ_a, δ_a,
                           l.saturating, l.use_adaptation)
         Y[:, :, t, :] = z
     end
@@ -423,7 +449,7 @@ function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
     gr  = reshape(g, 1, 1, 1)
     Whr = reshape(W_hat, H, W, 1)
 
-    dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(u, (1, 2)), (1, 2))
+    dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(_transmit(l, u), (1, 2)), (1, 2))
     tspan = (0.0f0, Float32(L) * T)
     sol = oscillator_bank(ComplexF32.(z0), dzdt; tspan = tspan, spk_args = l.spk_args)
 
@@ -517,7 +543,7 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
         _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD
         λ = -exp.(p.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω_val)
-        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(u, (1, 2)), (1, 2))
+        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(_transmit(l, u), (1, 2)), (1, 2))
         drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B)
         return reshape(k, 1, 1, 1) .* u .+ reshape(g, 1, 1, 1) .* coupled .+ drive
     end

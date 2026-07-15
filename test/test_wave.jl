@@ -28,6 +28,7 @@ function wave_tests()
         test_wave_currentcall()
         test_wave_chain_integration()
         test_wave_stencil_coupling()
+        test_wave_spike_transmission()
     end
 end
 
@@ -367,5 +368,54 @@ function test_wave_stencil_coupling()
 
         # Guard: stencil too large for the sheet.
         @test_throws ArgumentError PhasorWaveSheet(4, 4; coupling = :stencil, stencil_radius = 3)
+    end
+end
+
+# ---- Spike transmission (BIBO stability without the snap) --------------
+#
+# transmit=:spike sends unit-magnitude z/|z| instead of the full potential, so
+# the coupling drive is hard-bounded and the leaky-integrator state is
+# BIBO-stable with NO state snap — while |z| survives (not phase-only). This is
+# the physically-motivated alternative to saturating=true.
+
+function test_wave_spike_transmission()
+    @testset "spike transmission (BIBO, magnitude-preserving)" begin
+        rng = Xoshiro(41)
+        S = 16; L = 24; B = 2
+
+        # Forward sanity, Phase 3D.
+        layer = PhasorWaveSheet(S, S; transmit = :spike, saturating = false,
+                                init_log_g = log(0.3))
+        ps, st = Lux.setup(rng, layer)
+        x = Phase.(2f0 .* rand(rng, Float32, S*S, L, B) .- 1f0)
+        y, _ = layer(x, ps, st)
+        @test size(y) == (S*S, L, B)
+        @test eltype(y) === Phase
+        @test all(isfinite, Float32.(y))
+
+        # BIBO: at a gain that makes the *linear* (potential) sheet blow up, the
+        # spike sheet stays bounded — and its magnitude varies cell-to-cell
+        # (it is NOT phase-only).
+        z0 = zeros(ComplexF32, S, S); z0[S÷2, S÷2] = 1f0
+        ghi = log(1.0)                                  # way supercritical for the linear sheet
+        spike = PhasorWaveSheet(S, S; transmit = :spike, saturating = false, init_log_g = ghi)
+        pot   = PhasorWaveSheet(S, S; transmit = :potential, saturating = false, init_log_g = ghi)
+        psp, ssp = Lux.setup(rng, spike); ppo, spo = Lux.setup(rng, pot)
+        tsp = wave_simulate(spike, psp, ssp; z0 = z0, L = L)
+        tpo = wave_simulate(pot,   ppo, spo; z0 = z0, L = L)
+        @test all(isfinite, tsp)
+        max_spike = maximum(abs.(tsp))
+        max_pot   = maximum(abs.(tpo))
+        @test max_spike < 1f3                           # bounded (no runaway)
+        @test max_spike < max_pot                       # linear sheet explodes past it
+        @test std(abs.(tsp[:, :, end])) > 1f-2          # magnitude varies (not phase-only)
+
+        # Gradient flows to the coupling under spike transmission.
+        val, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(layer(x, p, st)))), ps)
+        @test isfinite(val)
+        @test all(isfinite, gs[1].log_g) && any(abs.(gs[1].A_exc) .> 0)
+
+        # Guard: invalid transmit mode.
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :bogus)
     end
 end
