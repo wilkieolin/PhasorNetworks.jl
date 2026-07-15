@@ -183,10 +183,11 @@ function build_stack(; D::Int, n_heads::Int, n_blocks::Int,
                      ffn_n_modes::Int = 1,
                      ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
                      ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
+                     full_d_heads::Bool = false,
                      gate::Symbol = :rezero, alpha0::Float32 = 0.1f0)
     mkattn() = attn_kind === :lca ?
         PhasorLCA(D => D, n_heads, n_anchors; init_mode = attn_mode) :
-        PhasorLSA(D => D, n_heads; init_mode = attn_mode)
+        PhasorLSA(D => D, n_heads; init_mode = attn_mode, full_d_heads = full_d_heads)
     blocks = ntuple(n_blocks) do _
         if ffn === :off
             PhasorResidual(mkattn(); gate = gate, alpha0 = alpha0)
@@ -251,7 +252,8 @@ function tir_trial(; D, L, n_vals, n_heads, n_blocks, attn_kind, attn_mode, ffn,
                    B, n_train_batches, n_eval_batches, epochs, lr, seed, dev,
                    n_anchors::Int = 8, ffn_n_modes::Int = 1,
                    ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
-                   ffn_hippo_tau_min::Union{Real, Nothing} = nothing)
+                   ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
+                   full_d_heads::Bool = false)
     Vfloat, cue = setup_tir_task(Xoshiro(777); D, n_vals)
     Vc = angle_to_complex(Phase.(Vfloat)) |> dev
     train_b = gen_tir_batches(Xoshiro(seed),   Vfloat, cue; D, L, n_vals, B, m_signal,
@@ -260,7 +262,7 @@ function tir_trial(; D, L, n_vals, n_heads, n_blocks, attn_kind, attn_mode, ffn,
                               n_distract, noise, sig_max_frac, n_batches = n_eval_batches)
 
     model = build_stack(; D, n_heads, n_blocks, attn_kind, attn_mode, ffn, d_ff, ffn_mode,
-                        n_anchors, ffn_n_modes, ffn_hippo_tau_max, ffn_hippo_tau_min)
+                        n_anchors, ffn_n_modes, ffn_hippo_tau_max, ffn_hippo_tau_min, full_d_heads)
     ps, st = Lux.setup(Xoshiro(seed + 1), model)
     ps = ps |> dev; st = st |> dev
     np = nparams(model)
@@ -634,6 +636,77 @@ function exp_modes_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
         @info "modes" n_modes=M frac seed acc=round(r.acc, digits=3) n_params=r.n_params
     end
     @info "modes.csv complete" file
+    return file
+end
+
+# =====================================================================
+# Head-count probe — does slicing the D-symbol into H heads of Dh=D/H
+# degrade the VSA similarity (holographic-distribution hypothesis)?
+# Prediction under "slicing limits fidelity": acc FALLS as H grows / Dh shrinks.
+# =====================================================================
+
+function exp_heads_tir(; D::Int = 48, n_blocks::Int = 3,
+                       heads = (1, 2, 4, 8, 16), fracs = (0.34, 1.0),
+                       kinds = (:lsa, :lca), seeds = 1:2, B::Int = 48,
+                       n_train_batches::Int = 16, n_eval_batches::Int = 8,
+                       epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                       hard = HARD, outdir::String = _OUT)
+    dev = _dev(use_cuda); mkpath(outdir)
+    file = joinpath(outdir, "heads.csv")
+    done = done_keys(file, (:attn_kind, :n_heads, :sig_max_frac, :seed))
+    @info "TIR head-count sweep (Dh=D/H)" device=string(dev) D heads fracs kinds done=length(done)
+    for kind in kinds, H in heads, frac in fracs, seed in seeds
+        D % H == 0 || (@warn "skip: D not divisible by H" D H; continue)
+        _key(kind, H, frac, seed) in done && continue
+        r = tir_trial(; D, L = hard.L, n_vals = hard.n_vals, n_heads = H, n_blocks,
+                      attn_kind = kind, attn_mode = :default, ffn = :on, d_ff = D, ffn_mode = :hippo,
+                      m_signal = hard.m_signal, n_distract = hard.n_distract,
+                      noise = hard.noise, sig_max_frac = frac, B,
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+        append_row(file, (; attn_kind = kind, n_heads = H, Dh = D ÷ H, sig_max_frac = frac,
+                          seed, acc = r.acc, n_params = r.n_params, final_loss = r.final_loss))
+        @info "heads" kind n_heads=H Dh=D÷H frac seed acc=round(r.acc, digits=3)
+    end
+    @info "heads.csv complete" file
+    return file
+end
+
+# =====================================================================
+# Direct test — full-D heads (each head sees the whole symbol, D→D·H, bundled)
+# vs Dh-slice heads, both DIRECTLY (same D) and at MATCHED params (sliced widened).
+# Tests the "don't slice the holographic symbol" hypothesis controlling for params.
+# =====================================================================
+
+function exp_fulldhead_tir(; base_D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
+                           fracs = (0.34, 1.0), seeds = 1:2, B::Int = 48,
+                           n_train_batches::Int = 16, n_eval_batches::Int = 8,
+                           epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                           hard = HARD, outdir::String = _OUT)
+    dev = _dev(use_cuda); mkpath(outdir)
+    file = joinpath(outdir, "fulldhead.csv")
+    done = done_keys(file, (:variant, :D, :sig_max_frac, :seed))
+
+    # params of the full-D-head model at base_D → matched sliced width.
+    p_full = nparams(build_stack(; D = base_D, n_heads, n_blocks, attn_kind = :lsa,
+                                 ffn = :on, d_ff = base_D, ffn_mode = :hippo, full_d_heads = true))
+    cand = filter(d -> d % n_heads == 0, base_D:4:4*base_D)
+    D_match = argmin(d -> abs(nparams(build_stack(; D = d, n_heads, n_blocks, attn_kind = :lsa,
+                              ffn = :on, d_ff = d, ffn_mode = :hippo)) - p_full), cand)
+    configs = [(:sliced, base_D, false), (:full_d, base_D, true), (:sliced_matched, D_match, false)]
+    @info "TIR full-D-head test" device=string(dev) base_D n_heads p_full D_match done=length(done)
+
+    for (variant, Dw, fdh) in configs, frac in fracs, seed in seeds
+        _key(variant, Dw, frac, seed) in done && continue
+        r = tir_trial(; D = Dw, L = hard.L, n_vals = hard.n_vals, n_heads, n_blocks,
+                      attn_kind = :lsa, attn_mode = :default, ffn = :on, d_ff = Dw, ffn_mode = :hippo,
+                      full_d_heads = fdh, m_signal = hard.m_signal, n_distract = hard.n_distract,
+                      noise = hard.noise, sig_max_frac = frac, B,
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+        append_row(file, (; variant = String(variant), D = Dw, sig_max_frac = frac, seed,
+                          acc = r.acc, n_params = r.n_params, final_loss = r.final_loss))
+        @info "fulldhead" variant D=Dw frac seed acc=round(r.acc, digits=3) n_params=r.n_params
+    end
+    @info "fulldhead.csv complete" file
     return file
 end
 

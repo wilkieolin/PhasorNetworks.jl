@@ -426,19 +426,24 @@ struct PhasorLSA <: Lux.AbstractLuxLayer
     k_proj::PhasorDense
     v_proj::PhasorDense
     init_scale::Float32
+    full_d_heads::Bool   # false: heads are Dh=d_model/H slices (default). true: each
+                         # head is a full d_model projection (proj d_model*H), heads
+                         # combined by VSA bundling — the "don't slice the symbol" variant.
 end
 
 function PhasorLSA(dims::Pair{Int,Int}, n_heads::Int,
                    act = normalize_to_unit_circle;
                    init_scale::Real = 3f0,
                    init_mode::Symbol = :default,
+                   full_d_heads::Bool = false,
                    spk_args::SpikingArgs = SpikingArgs())
     in_dims, d_model = dims.first, dims.second
     @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
-    q = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
-    k = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
-    v = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
-    return PhasorLSA(in_dims, d_model, n_heads, act, q, k, v, Float32(init_scale))
+    proj_out = full_d_heads ? d_model * n_heads : d_model
+    q = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    k = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    v = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
+    return PhasorLSA(in_dims, d_model, n_heads, act, q, k, v, Float32(init_scale), full_d_heads)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorLSA)
@@ -478,13 +483,15 @@ end
 
 # (i) 3D Phase — the workhorse path.
 function (l::PhasorLSA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
-    Q, _ = l.q_proj(x, ps.q_proj, st.q_proj)             # (D, L, B) Phase
+    Q, _ = l.q_proj(x, ps.q_proj, st.q_proj)             # (P, L, B) Phase, P=D or D*H
     K, _ = l.k_proj(x, ps.k_proj, st.k_proj)
     V, _ = l.v_proj(x, ps.v_proj, st.v_proj)
 
-    D, L, B = size(Q)
+    _, L, B = size(Q)
     H  = l.n_heads
-    Dh = l.d_model ÷ H
+    D  = l.d_model
+    # Per-head width: full-D (each head sees the whole symbol) or Dh=D/H slice.
+    Dh = l.full_d_heads ? D : D ÷ H
     Qh = reshape(Q, Dh, H, L, B)
     Kh = reshape(K, Dh, H, L, B)
     Vh = reshape(V, Dh, H, L, B)
@@ -494,7 +501,9 @@ function (l::PhasorLSA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTu
 
     Vc = angle_to_complex(Vh)                             # (Dh, H, L, B) Complex
     Y  = _lsa_head_mix(Vc, weights)                       # (Dh, H, L, B) Complex
-    Y  = reshape(Y, D, L, B)
+    # Combine heads: full-D → VSA bundle (sum) over heads → (D,L,B);
+    #                sliced → concat heads (reshape) → (D,L,B).
+    Y  = l.full_d_heads ? dropdims(sum(Y, dims = 2); dims = 2) : reshape(Y, D, L, B)
     Y_phase = complex_to_angle(Y)                         # (D, L, B) Phase
 
     return _apply_phase_activation(l.activation, Y_phase), st
