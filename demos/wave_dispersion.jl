@@ -66,6 +66,7 @@ L = 60
 # so ∫W ≈ 0) — this selects a nonzero wavelength (a ring); the moderate
 # conduction speed makes that pattern propagate.
 layer = PhasorWaveSheet(H, W;
+                        transmit            = :potential,  # linear-wave dispersion demo (spike is the library default)
                         saturating          = false,
                         init_log_neg_lambda = log(0.15),   # light subthreshold damping
                         init_A_exc          = 1.0,
@@ -180,11 +181,13 @@ center = (H ÷ 2 + 1, W ÷ 2 + 1)
 #     (saturating=true, phase-only) bounds |z| ≡ 1 by construction — the
 #     wave regulates its own amplitude while keeping all its phase content.
 g_super = 1.6f0 * g_crit
-layer_lin = PhasorWaveSheet(H, W; saturating = false,
+# This section contrasts the two legacy potential-coupling regimes (linear vs
+# the phase-only snap); spike transmission is shown as the default elsewhere.
+layer_lin = PhasorWaveSheet(H, W; transmit = :potential, saturating = false,
                             init_log_neg_lambda = log(0.15), init_A_exc = 1.0,
                             init_log_sigma_exc = log(1.5), init_B_inh = 0.25,
                             init_log_sigma_inh = log(3.0), init_log_speed = log(40.0))
-layer_sat = PhasorWaveSheet(H, W; saturating = true,
+layer_sat = PhasorWaveSheet(H, W; transmit = :potential, saturating = true,
                             init_log_neg_lambda = log(0.15), init_A_exc = 1.0,
                             init_log_sigma_exc = log(1.5), init_B_inh = 0.25,
                             init_log_sigma_inh = log(3.0), init_log_speed = log(40.0))

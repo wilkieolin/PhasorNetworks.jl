@@ -59,18 +59,22 @@ speed) for analysis and demos.
   same regime, then trains freely.
 - `stencil_radius::Integer = 2` — radius `R` of the learnable stencil (used
   only when `coupling = :stencil`); the kernel is `(2R+1)×(2R+1)`.
-- `transmit::Symbol = :potential` — what a neuron sends to its neighbours.
+- `transmit::Symbol = :spike` (**default**) — what a neuron sends to its
+  neighbours. `:spike` transmits a **unit-magnitude** event `z/|z|` — a
+  fixed-size spike whose phase carries the info. The coupling drive is then
+  hard-bounded (`|Σ W·s| ≤ Σ|W|`), so the leaky integrator is BIBO-stable with
+  **no state snap** — and the state magnitude `|z|` survives to encode local
+  phase coherence / interference intensity. Sub-threshold neurons emit ≈0 (a
+  natural firing threshold via the ε-safe normalize). This is the principled,
+  physically-faithful self-limiting mechanism and the library default.
   `:potential` transmits the full complex state `z` (linear diffusive coupling;
-  can run away, needing the state-level `saturating` snap). `:spike` transmits a
-  **unit-magnitude** event `z/|z|` — a fixed-size spike whose phase carries the
-  info. The coupling drive is then hard-bounded (`|Σ W·s| ≤ Σ|W|`), so the leaky
-  integrator is BIBO-stable with **no state snap** (`saturating=false`), and the
-  state magnitude `|z|` survives to encode local phase coherence / interference
-  intensity. Sub-threshold neurons emit ≈0 (a natural firing threshold via the
-  ε-safe normalize). Intended with `saturating=false`.
-- `saturating::Bool = true` — project state onto the unit circle each step
-  (phase-only self-limiting). Set `false` for the *linear* medium, whose
-  dispersion matches [`dispersion`](@ref) exactly.
+  can run away, so it needs the legacy state-level `saturating` snap). Use
+  `:potential` for the *linear* medium whose dispersion matches
+  [`dispersion`](@ref) exactly.
+- `saturating::Bool = false` (**default**) — the *legacy* self-limiting snap:
+  project state onto the unit circle each step (phase-only). Off by default
+  because spike transmission already self-limits **and** preserves magnitude,
+  whereas the snap discards it. Only meaningful with `transmit = :potential`.
 - `use_adaptation::Bool = false` — enable the slow negative-feedback state
   `a` (spike-triggered adaptation surrogate) that destabilizes standing
   bumps into traveling waves.
@@ -131,8 +135,8 @@ end
 function PhasorWaveSheet(H::Integer, W::Integer;
                          coupling::Symbol = :dog,
                          stencil_radius::Integer = 2,
-                         transmit::Symbol = :potential,
-                         saturating::Bool = true,
+                         transmit::Symbol = :spike,
+                         saturating::Bool = false,
                          use_adaptation::Bool = false,
                          init_log_neg_lambda::Real = log(0.15),
                          init_log_g::Real = log(1.0),

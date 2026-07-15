@@ -38,7 +38,8 @@ flatten_phase(x) = Phase.((2f0 .* reshape(x, SHEET^2, size(x, 3)) .- 1f0) .* 0.5
 
 wave_model() = Chain(
     WrappedFunction(x -> drive_encode(x, L_STEPS)),
-    PhasorWaveSheet(SHEET, SHEET; saturating = true, init_log_g = log(0.02)),
+    # pinned to potential coupling to reproduce the documented attribution result
+    PhasorWaveSheet(SHEET, SHEET; transmit = :potential, saturating = true, init_log_g = log(0.02)),
     WrappedFunction(x -> x[:, end, :]),
     PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
     Codebook(HID => 10; init_mode = :orthogonal),

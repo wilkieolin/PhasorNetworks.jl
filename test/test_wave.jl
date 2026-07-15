@@ -38,7 +38,7 @@ function test_wave_forward_sanity()
     @testset "Phase 3D forward shape + range" begin
         rng = Xoshiro(0)
         H, W, L, B = 8, 8, 6, 3
-        layer = PhasorWaveSheet(H, W; saturating = true)
+        layer = PhasorWaveSheet(H, W)         # library defaults: transmit=:spike, no snap
         ps, st = Lux.setup(rng, layer)
 
         x = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
@@ -93,7 +93,8 @@ function test_wave_propagation()
         rng = Xoshiro(5)
         H = W = 24
         L = 30
-        layer = PhasorWaveSheet(H, W; saturating = false,
+        # linear-wave propagation physics → use potential coupling explicitly
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false,
                                 init_A_exc = 1.0, init_B_inh = 0.25,
                                 init_log_sigma_exc = log(1.5),
                                 init_log_sigma_inh = log(3.0), init_log_speed = log(40.0))
@@ -164,7 +165,7 @@ function test_wave_gradient_flow()
     @testset "gradient flow through all params" begin
         rng = Xoshiro(11)
         H, W, L, B = 8, 8, 5, 2
-        layer = PhasorWaveSheet(H, W; saturating = true, use_adaptation = true)
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = true, use_adaptation = true)
         ps, st = Lux.setup(rng, layer)
         x = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
 
@@ -238,7 +239,8 @@ function test_wave_ode_equivalence()
     @testset "discrete ≈ ODE (same dynamics)" begin
         rng = Xoshiro(4)
         H = W = 16; L = 10
-        layer = PhasorWaveSheet(H, W; saturating = false,
+        # linear operator equivalence → potential coupling explicitly
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false,
                                 init_A_exc = 1.0, init_B_inh = 0.25,
                                 init_log_sigma_exc = log(1.5),
                                 init_log_sigma_inh = log(3.0), init_log_speed = log(40.0))
@@ -272,7 +274,7 @@ function test_wave_currentcall()
     @testset "CurrentCall ODE dispatch + gradient" begin
         rng = Xoshiro(6)
         H = W = 8; B = 2
-        layer = PhasorWaveSheet(H, W; saturating = false)
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false)
         ps, st = Lux.setup(rng, layer)
 
         drive = zeros(Float32, H * W, B); drive[H * W ÷ 2, :] .= 1f0
@@ -316,7 +318,7 @@ function test_wave_chain_integration()
                 ph = Phase.((2f0 .* x .- 1f0) .* 0.5f0)
                 repeat(reshape(ph, H * W, 1, b), 1, L, 1)
             end),
-            PhasorWaveSheet(H, W; saturating = true, init_log_g = log(0.02)),
+            PhasorWaveSheet(H, W; init_log_g = log(0.02)),   # default spike mode
             WrappedFunction(x -> x[:, end, :]),
             PhasorDense(H * W => 16, normalize_to_unit_circle),
             Codebook(16 => 10; init_mode = :orthogonal),
@@ -342,7 +344,7 @@ function test_wave_stencil_coupling()
         rng = Xoshiro(31)
         H = W = 12; L = 5; B = 3; R = 2
         layer = PhasorWaveSheet(H, W; coupling = :stencil, stencil_radius = R,
-                                saturating = true, init_log_g = log(0.05))
+                                init_log_g = log(0.05))   # default spike mode
         ps, st = Lux.setup(rng, layer)
 
         # Param/state layout: free complex stencil + constant placement matrix.

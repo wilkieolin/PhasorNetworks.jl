@@ -54,10 +54,13 @@ end
 flatten_phase(x) = Phase.((2f0 .* reshape(x, size(x,1)*size(x,2), size(x,3)) .- 1f0) .* 0.5f0)
 
 # ---- models ----------------------------------------------------------
+# NOTE: these reproduce the documented potential-coupling results; `transmit`
+# is pinned to :potential (spike is the library default). Swap to the default
+# spike mode to explore the physically-faithful formulation.
 function wave_model()
     Chain(
         WrappedFunction(x -> drive_encode(x, L_STEPS)),
-        PhasorWaveSheet(SHEET, SHEET; saturating = true, init_log_g = log(0.02)),
+        PhasorWaveSheet(SHEET, SHEET; transmit = :potential, saturating = true, init_log_g = log(0.02)),
         WrappedFunction(x -> x[:, end, :]),                    # last-step phase field (784,B)
         PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
         Codebook(HID => 10; init_mode = :orthogonal),
@@ -70,7 +73,7 @@ function wave_stencil_model()
     Chain(
         WrappedFunction(x -> drive_encode(x, L_STEPS)),
         PhasorWaveSheet(SHEET, SHEET; coupling = :stencil, stencil_radius = STENCIL_R,
-                        saturating = true, init_log_g = log(0.02)),
+                        transmit = :potential, saturating = true, init_log_g = log(0.02)),
         WrappedFunction(x -> x[:, end, :]),
         PhasorDense(SHEET^2 => HID, normalize_to_unit_circle),
         Codebook(HID => 10; init_mode = :orthogonal),
