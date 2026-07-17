@@ -183,7 +183,7 @@ function build_stack(; D::Int, n_heads::Int, n_blocks::Int,
                      ffn_n_modes::Int = 1,
                      ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
                      ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
-                     full_d_heads::Bool = false,
+                     full_d_heads::Bool = false, input_embed::Bool = false,
                      gate::Symbol = :rezero, alpha0::Float32 = 0.1f0)
     mkattn() = attn_kind === :lca ?
         PhasorLCA(D => D, n_heads, n_anchors; init_mode = attn_mode) :
@@ -199,6 +199,12 @@ function build_stack(; D::Int, n_heads::Int, n_blocks::Int,
                                    gate = gate, alpha0 = alpha0)
         end
     end
+    # Optional leading input-embedding PhasorDense (uniform λ + bias), mirroring
+    # the phasor_torch / audio pipeline which TIR normally lacks.
+    if input_embed
+        emb = PhasorDense(D => D, normalize_to_unit_circle; use_bias = true, init_mode = :default)
+        return Chain(emb, blocks...)
+    end
     return Chain(blocks...)
 end
 
@@ -208,27 +214,40 @@ nparams(model) = Lux.parameterlength(model)
 # TIR readout / loss / eval / train
 # =====================================================================
 
-function tir_readout(x, model, ps, st, qpos, Vc)
+# Readout. pool_frac == 0 → single-position (read at qpos, the original TIR
+# readout). pool_frac > 0 → average the per-position similarity over the last
+# `round(pool_frac·L)` positions, mirroring the audio SSMReadout pooling — the
+# temporal integration the linchpin showed makes the FFN redundant.
+function tir_readout(x, model, ps, st, qpos, Vc; pool_frac::Float64 = 0.0)
     y, _ = model(x, ps, st)                        # (D, L, B) Phase
-    yq = angle_to_complex(y[:, qpos, :])           # (D, B) complex
-    return similarity_outer(yq, Vc)                # (n_vals, B)
+    if pool_frac <= 0
+        return similarity_outer(angle_to_complex(y[:, qpos, :]), Vc)   # (n_vals, B)
+    end
+    L = size(y, 2)
+    W = max(1, round(Int, pool_frac * L))
+    t0 = L - W + 1
+    sims = map(t0:L) do t
+        similarity_outer(angle_to_complex(y[:, t, :]), Vc)
+    end
+    return sum(sims) ./ Float32(length(sims))       # (n_vals, B)
 end
 
-tir_loss(x, model, ps, st, qpos, Vc, yoh) =
-    mean(evaluate_loss(tir_readout(x, model, ps, st, qpos, Vc), yoh, :similarity))
+tir_loss(x, model, ps, st, qpos, Vc, yoh; pool_frac::Float64 = 0.0) =
+    mean(evaluate_loss(tir_readout(x, model, ps, st, qpos, Vc; pool_frac), yoh, :similarity))
 
-function tir_eval(model, ps, st, batches, Vc, n_vals, dev)
+function tir_eval(model, ps, st, batches, Vc, n_vals, dev; pool_frac::Float64 = 0.0)
     c = 0; tot = 0
     for bt in batches
-        s = tir_readout(bt.x |> dev, model, ps, st, bt.qpos, Vc)
+        s = tir_readout(bt.x |> dev, model, ps, st, bt.qpos, Vc; pool_frac)
         p = predict(cdev(s), :similarity)
         c += sum(p .== bt.tgt); tot += length(bt.tgt)
     end
     return c / tot
 end
 
-function tir_train!(model, ps, st, batches, Vc, n_vals, epochs, lr, dev; alpha_lr_mult = 5f0)
-    opt = Optimisers.setup(Optimisers.RMSProp(Float32(lr)), ps)
+function tir_train!(model, ps, st, batches, Vc, n_vals, epochs, lr, dev; alpha_lr_mult = 5f0,
+                    pool_frac::Float64 = 0.0, rho::Float64 = 0.9)
+    opt = Optimisers.setup(Optimisers.RMSProp(Float32(lr), Float32(rho)), ps)
     alpha_lr_mult != 1 && boost_alpha_lr!(opt, ps, Float32(lr) * Float32(alpha_lr_mult))
     losses = Float32[]
     for _ in 1:epochs
@@ -236,7 +255,7 @@ function tir_train!(model, ps, st, batches, Vc, n_vals, epochs, lr, dev; alpha_l
         for bt in batches
             xd  = bt.x |> dev
             yoh = onehot_dev(bt.tgt, n_vals, dev)
-            l, back = Zygote.pullback(p -> tir_loss(xd, model, p, st, bt.qpos, Vc, yoh), ps)
+            l, back = Zygote.pullback(p -> tir_loss(xd, model, p, st, bt.qpos, Vc, yoh; pool_frac), ps)
             g = back(one(l))[1]
             opt, ps = Optimisers.update(opt, ps, g)
             el += Float32(l); nb += 1
@@ -253,7 +272,8 @@ function tir_trial(; D, L, n_vals, n_heads, n_blocks, attn_kind, attn_mode, ffn,
                    n_anchors::Int = 8, ffn_n_modes::Int = 1,
                    ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
                    ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
-                   full_d_heads::Bool = false)
+                   full_d_heads::Bool = false, input_embed::Bool = false,
+                   pool_frac::Float64 = 0.0, rho::Float64 = 0.9)
     Vfloat, cue = setup_tir_task(Xoshiro(777); D, n_vals)
     Vc = angle_to_complex(Phase.(Vfloat)) |> dev
     train_b = gen_tir_batches(Xoshiro(seed),   Vfloat, cue; D, L, n_vals, B, m_signal,
@@ -262,13 +282,14 @@ function tir_trial(; D, L, n_vals, n_heads, n_blocks, attn_kind, attn_mode, ffn,
                               n_distract, noise, sig_max_frac, n_batches = n_eval_batches)
 
     model = build_stack(; D, n_heads, n_blocks, attn_kind, attn_mode, ffn, d_ff, ffn_mode,
-                        n_anchors, ffn_n_modes, ffn_hippo_tau_max, ffn_hippo_tau_min, full_d_heads)
+                        n_anchors, ffn_n_modes, ffn_hippo_tau_max, ffn_hippo_tau_min, full_d_heads,
+                        input_embed)
     ps, st = Lux.setup(Xoshiro(seed + 1), model)
     ps = ps |> dev; st = st |> dev
     np = nparams(model)
 
-    ps, losses = tir_train!(model, ps, st, train_b, Vc, n_vals, epochs, lr, dev)
-    acc = tir_eval(model, ps, st, eval_b, Vc, n_vals, dev)
+    ps, losses = tir_train!(model, ps, st, train_b, Vc, n_vals, epochs, lr, dev; pool_frac, rho)
+    acc = tir_eval(model, ps, st, eval_b, Vc, n_vals, dev; pool_frac)
     GC.gc(); dev !== cdev && CUDA.reclaim()
     return (; acc = Float32(acc), n_params = np,
             init_loss = losses[1], final_loss = losses[end])
@@ -529,6 +550,7 @@ function exp_capacity_tir(; Ds = (48, 64, 96, 128), ff_mults = (1, 2, 4),
                           attn_kind::Symbol = :lsa, B::Int = 48,
                           n_train_batches::Int = 16, n_eval_batches::Int = 8,
                           epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                          input_embed::Bool = false, pool_frac::Float64 = 0.0,
                           hard = HARD, outdir::String = _OUT)
     dev = _dev(use_cuda); mkpath(outdir)
     file = joinpath(outdir, "capacity.csv")
@@ -541,7 +563,7 @@ function exp_capacity_tir(; Ds = (48, 64, 96, 128), ff_mults = (1, 2, 4),
                       attn_kind, attn_mode = :default, ffn = :on, d_ff = dff, ffn_mode = :hippo,
                       m_signal = hard.m_signal, n_distract = hard.n_distract,
                       noise = hard.noise, sig_max_frac = hard.sig_max_frac, B,
-                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev, input_embed, pool_frac)
         append_row(file, (; D = Dw, d_ff = dff, ff_mult = mult, seed,
                           acc = r.acc, n_params = r.n_params, final_loss = r.final_loss))
         @info "capacity" D=Dw d_ff=dff seed acc=round(r.acc, digits=3) n_params=r.n_params
@@ -558,6 +580,7 @@ function exp_anchors_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 2,
                          anchors = (4, 8, 16, 32, 64), seeds = 1:2, B::Int = 48,
                          n_train_batches::Int = 16, n_eval_batches::Int = 8,
                          epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                         input_embed::Bool = false, pool_frac::Float64 = 0.0,
                          hard = HARD, outdir::String = _OUT)
     dev = _dev(use_cuda); mkpath(outdir)
     file = joinpath(outdir, "anchors.csv")
@@ -570,7 +593,7 @@ function exp_anchors_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 2,
                       ffn = :on, d_ff = D, ffn_mode = :hippo,
                       m_signal = hard.m_signal, n_distract = hard.n_distract,
                       noise = hard.noise, sig_max_frac = hard.sig_max_frac, B,
-                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev, input_embed, pool_frac)
         append_row(file, (; n_anchors = na, seed, acc = r.acc, n_params = r.n_params,
                           final_loss = r.final_loss))
         @info "anchors" n_anchors=na seed acc=round(r.acc, digits=3) n_params=r.n_params
@@ -588,6 +611,7 @@ function exp_tau_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
                      seeds = 1:2, attn_kind::Symbol = :lsa, B::Int = 48,
                      n_train_batches::Int = 16, n_eval_batches::Int = 8,
                      epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                     input_embed::Bool = false, pool_frac::Float64 = 0.0,
                      hard = HARD, outdir::String = _OUT)
     dev = _dev(use_cuda); mkpath(outdir)
     file = joinpath(outdir, "tau.csv")
@@ -600,7 +624,7 @@ function exp_tau_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
                       ffn_hippo_tau_max = tmax,
                       m_signal = hard.m_signal, n_distract = hard.n_distract,
                       noise = hard.noise, sig_max_frac = frac, B,
-                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev, input_embed, pool_frac)
         append_row(file, (; tau_max = tmax, sig_max_frac = frac, seed,
                           acc = r.acc, n_params = r.n_params, final_loss = r.final_loss))
         @info "tau" tau_max=tmax frac seed acc=round(r.acc, digits=3)
@@ -618,6 +642,7 @@ function exp_modes_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
                        attn_kind::Symbol = :lsa, ffn_hippo_tau_max = 256f0, B::Int = 48,
                        n_train_batches::Int = 16, n_eval_batches::Int = 8,
                        epochs::Int = 40, lr::Real = 1f-3, use_cuda::Bool = true,
+                       input_embed::Bool = false, pool_frac::Float64 = 0.0,
                        hard = HARD, outdir::String = _OUT)
     dev = _dev(use_cuda); mkpath(outdir)
     file = joinpath(outdir, "modes.csv")
@@ -630,7 +655,7 @@ function exp_modes_tir(; D::Int = 48, n_heads::Int = 4, n_blocks::Int = 3,
                       ffn_n_modes = M, ffn_hippo_tau_max = ffn_hippo_tau_max,
                       m_signal = hard.m_signal, n_distract = hard.n_distract,
                       noise = hard.noise, sig_max_frac = frac, B,
-                      n_train_batches, n_eval_batches, epochs, lr, seed, dev)
+                      n_train_batches, n_eval_batches, epochs, lr, seed, dev, input_embed, pool_frac)
         append_row(file, (; n_modes = M, sig_max_frac = frac, seed,
                           acc = r.acc, n_params = r.n_params, final_loss = r.final_loss))
         @info "modes" n_modes=M frac seed acc=round(r.acc, digits=3) n_params=r.n_params
@@ -707,6 +732,145 @@ function exp_fulldhead_tir(; base_D::Int = 48, n_heads::Int = 4, n_blocks::Int =
         @info "fulldhead" variant D=Dw frac seed acc=round(r.acc, digits=3) n_params=r.n_params
     end
     @info "fulldhead.csv complete" file
+    return file
+end
+
+# =====================================================================
+# Tier-1 readout ablation — contrastive softmax-CE + learnable codes +
+# logsumexp-over-time pooling (+ learnable temperature). Understands which
+# readout upgrade shifts the needle / the knob disparities most.
+# Uses the smooth complex-similarity path (no complex_to_angle at readout).
+# =====================================================================
+
+const _PI32 = Float32(pi)
+
+# sims (n_vals, B) from model output y (D,L,B) Phase and codes (D,n_vals) Float32-phase.
+function _ablation_sims(y, codes; readout_pool::Symbol, pool_frac::Float64, lse_kappa::Float32 = 10f0)
+    Vc = cis.(_PI32 .* codes)                                  # (D, n_vals) ComplexF32 (differentiable)
+    L = size(y, 2)
+    if readout_pool === :single
+        return similarity_outer(angle_to_complex(y[:, L, :]), Vc)          # (n_vals, B)
+    elseif readout_pool === :mean
+        W = max(1, round(Int, pool_frac * L)); t0 = L - W + 1
+        s = map(t -> similarity_outer(angle_to_complex(y[:, t, :]), Vc), t0:L)
+        return sum(s) ./ Float32(length(s))
+    elseif readout_pool === :logsumexp
+        s = map(t -> similarity_outer(angle_to_complex(y[:, t, :]), Vc), 1:L)
+        sumexp = sum(map(st -> exp.(lse_kappa .* st), s))                   # (n_vals, B)
+        return log.(sumexp ./ Float32(L)) ./ lse_kappa                     # smooth max over time
+    else
+        error("unknown readout_pool :$readout_pool")
+    end
+end
+
+function _ablation_loss(sims, yoh; loss_type::Symbol, beta)
+    if loss_type === :similarity
+        return mean(evaluate_loss(sims, yoh, :similarity))
+    else  # :softmax_ce — contrastive, temperature β
+        logits = beta .* sims
+        m = maximum(logits, dims = 1)
+        logZ = m .+ log.(sum(exp.(logits .- m), dims = 1))
+        return -mean(sum(yoh .* (logits .- logZ), dims = 1))
+    end
+end
+
+"""
+    ablation_trial(...) -> acc
+
+One TIR train+eval with a configurable Tier-1 readout: `readout_pool`
+(:single/:mean/:logsumexp), `loss_type` (:similarity/:softmax_ce), and optional
+learnable `codes` / temperature `beta` (jointly optimized with the model).
+"""
+function ablation_trial(; D = 48, L = 32, n_vals = 16, n_heads = 4, n_blocks = 2,
+                        attn_kind = :lca, n_anchors = 8, ffn = :on, d_ff = 48, ffn_mode = :hippo,
+                        ffn_n_modes = 1, ffn_hippo_tau_max = nothing,
+                        m_signal = 3, n_distract = 16, noise = 0.35f0, sig_max_frac = 1.0,
+                        B = 48, n_train_batches = 16, n_eval_batches = 8, epochs = 40,
+                        lr = 1f-3, rho = 0.9, seed = 1, dev = cdev, input_embed = true,
+                        readout_pool = :mean, pool_frac = 0.25, loss_type = :softmax_ce,
+                        beta0 = 8f0, learn_codes = false, learn_beta = false)
+    Vfloat, cue = setup_tir_task(Xoshiro(777); D, n_vals)
+    train_b = gen_tir_batches(Xoshiro(seed),  Vfloat, cue; D, L, n_vals, B, m_signal, n_distract, noise, sig_max_frac, n_batches = n_train_batches)
+    eval_b  = gen_tir_batches(Xoshiro(9_999), Vfloat, cue; D, L, n_vals, B, m_signal, n_distract, noise, sig_max_frac, n_batches = n_eval_batches)
+    model = build_stack(; D, n_heads, n_blocks, attn_kind, attn_mode = :default, ffn, d_ff, ffn_mode,
+                        n_anchors, ffn_n_modes, ffn_hippo_tau_max, input_embed)
+    ps, st = Lux.setup(Xoshiro(seed + 1), model); ps = ps |> dev; st = st |> dev
+    codes0 = (Float32.(Vfloat)) |> dev                        # (D, n_vals)
+
+    P = (; model = ps)
+    learn_codes && (P = merge(P, (codes = codes0,)))
+    (learn_beta && loss_type === :softmax_ce) && (P = merge(P, (logbeta = [log(Float32(beta0))] |> dev,)))
+
+    opt = Optimisers.setup(Optimisers.RMSProp(Float32(lr), Float32(rho)), P)
+    boost_alpha_lr!(opt, P, Float32(lr) * 5f0)
+
+    lossfn(p, xd, yoh) = begin
+        cds = haskey(p, :codes) ? p.codes : codes0
+        # exp.(logbeta) (broadcast, not [1] scalar-index) — scalar-indexing a GPU
+        # array is disallowed; a length-1 array broadcasts cleanly against sims.
+        bta = haskey(p, :logbeta) ? exp.(p.logbeta) : Float32(beta0)
+        y, _ = model(xd, p.model, st)
+        _ablation_loss(_ablation_sims(y, cds; readout_pool, pool_frac), yoh; loss_type, beta = bta)
+    end
+    for _ in 1:epochs, bt in train_b
+        xd = bt.x |> dev; yoh = onehot_dev(bt.tgt, n_vals, dev)
+        l, back = Zygote.pullback(p -> lossfn(p, xd, yoh), P)
+        g = back(one(l))[1]
+        opt, P = Optimisers.update(opt, P, g)
+    end
+
+    cds = haskey(P, :codes) ? P.codes : codes0
+    c = 0; tot = 0
+    for bt in eval_b
+        y, _ = model(bt.x |> dev, P.model, st)
+        sims = _ablation_sims(y, cds; readout_pool, pool_frac)
+        p = predict(cdev(sims), :similarity)
+        c += sum(p .== bt.tgt); tot += length(bt.tgt)
+    end
+    GC.gc(); dev !== cdev && CUDA.reclaim()
+    return c / tot
+end
+
+"""
+    exp_readout_ladder(; ...) -> file
+
+Cumulative Tier-1 readout ladder × the two biggest knob disparities (FFN on/off
+at spread; modes m1→m2 at long-range), on LCA + input_embed. Shows which readout
+upgrade most improves accuracy and how it shifts each disparity.
+"""
+function exp_readout_ladder(; use_cuda::Bool = true, seeds = 1:2,
+                            outdir::String = joinpath(_OUT, "readout_ladder"))
+    dev = _dev(use_cuda); mkpath(outdir)
+    file = joinpath(outdir, "ladder.csv")
+    done = done_keys(file, (:rung, :probe, :arm, :seed))
+    h = HARD
+    rungs = [  # (name, readout_pool, loss_type, learn_codes, learn_beta)
+        ("R0_meanpool_simloss", :mean,      :similarity, false, false),
+        ("R1_softmaxCE",        :mean,      :softmax_ce, false, false),
+        ("R2_learncodes",       :mean,      :softmax_ce, true,  false),
+        ("R3_learnbeta",        :mean,      :softmax_ce, true,  true),
+        ("R4_logsumexp",        :logsumexp, :softmax_ce, true,  true),
+    ]
+    probes = [  # (probe, arm, per-arm overrides)
+        ("ffn",   "on",  (; ffn = :on,  n_blocks = 2, sig_max_frac = 1.0,  ffn_n_modes = 1)),
+        ("ffn",   "off", (; ffn = :off, n_blocks = 2, sig_max_frac = 1.0,  ffn_n_modes = 1)),
+        ("modes", "m1",  (; ffn = :on,  n_blocks = 3, sig_max_frac = 0.34, ffn_n_modes = 1, ffn_hippo_tau_max = 256f0)),
+        ("modes", "m2",  (; ffn = :on,  n_blocks = 3, sig_max_frac = 0.34, ffn_n_modes = 2, ffn_hippo_tau_max = 256f0)),
+    ]
+    @info "readout ladder" device=string(dev) rungs=[r[1] for r in rungs] done=length(done)
+    for (rname, pool, loss, lc, lb) in rungs, (probe, arm, kw) in probes, seed in seeds
+        _key(rname, probe, arm, seed) in done && continue
+        acc = ablation_trial(; D = 48, L = h.L, n_vals = h.n_vals, n_heads = 4, attn_kind = :lca,
+                             n_anchors = 8, d_ff = 48, ffn_mode = :hippo, m_signal = h.m_signal,
+                             n_distract = h.n_distract, noise = h.noise, B = 48,
+                             n_train_batches = 16, n_eval_batches = 8, epochs = 40, lr = 1f-3,
+                             rho = 0.9, seed = seed, dev = dev, input_embed = true,
+                             readout_pool = pool, pool_frac = 0.25, loss_type = loss,
+                             beta0 = 8f0, learn_codes = lc, learn_beta = lb, kw...)
+        append_row(file, (; rung = rname, probe, arm, seed, acc = Float32(acc)))
+        @info "ladder" rung=rname probe arm seed acc=round(acc, digits=3)
+    end
+    @info "ladder complete" file
     return file
 end
 
@@ -892,13 +1056,14 @@ Run the four performance-knob studies (4 width/FFN, 5 anchors, 3 λ-range,
 1 modes/channel) sequentially, then print the summary. Cheap→expensive order;
 all drivers append-per-trial and resume.
 """
-function run_knobs(; use_cuda::Bool = true)
-    exp_capacity_tir(; use_cuda)   # knob 4
-    exp_anchors_tir(; use_cuda)    # knob 5
-    exp_tau_tir(; use_cuda)        # knob 3
-    exp_modes_tir(; use_cuda)      # knob 1
-    summarize_all()
-    @info "knob study done" outdir=_OUT
+function run_knobs(; use_cuda::Bool = true, input_embed::Bool = false,
+                   pool_frac::Float64 = 0.0, outdir::String = _OUT)
+    exp_capacity_tir(; use_cuda, input_embed, pool_frac, outdir)   # knob 4
+    exp_anchors_tir(; use_cuda, input_embed, pool_frac, outdir)    # knob 5
+    exp_tau_tir(; use_cuda, input_embed, pool_frac, outdir)        # knob 3
+    exp_modes_tir(; use_cuda, input_embed, pool_frac, outdir)      # knob 1
+    summarize_all(; outdir)
+    @info "knob study done" outdir input_embed pool_frac
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

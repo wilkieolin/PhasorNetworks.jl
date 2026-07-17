@@ -1,5 +1,12 @@
 # Temporal-scaling & SSM-knob experiments — results summary
 
+> **⚠ Read with the reconciliation.** These tables use the single-position headless
+> TIR readout, which the phasor_torch/audio reconciliation showed **over-states
+> temporal-integration knobs** (FFN, modes, λ, anchors). Under the audio-representative
+> pooling readout (`fixed_regime/`), width holds, modes/λ shrink ~3–4×, and anchors
+> vanishes. See `FINDINGS_knobs.md` §Corrected regime, `findings_report.html`
+> §Reconciliation, and `phasor_torch/results/LINCHPIN_FINDINGS.md`.
+
 All on the headless **TIR** task (temporal integration recall, chance = 0.0625),
 shrunk scale (D=48 base / L=32 / 2 seeds / 40 epochs) unless noted. Full detail:
 [`FINDINGS.md`](FINDINGS.md) (scaling & FFN), [`FINDINGS_knobs.md`](FINDINGS_knobs.md)

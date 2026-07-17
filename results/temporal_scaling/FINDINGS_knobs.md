@@ -1,5 +1,15 @@
 # SSM performance knobs: width/FFN (4), LCA anchors (5), λ-range (3), modes/channel (1)
 
+> **⚠ Regime caveat (2026-07 reconciliation).** These results were measured with
+> the *single-position headless* TIR readout and **no input embedding**. The
+> phasor_torch/audio reconciliation (`phasor_torch/results/LINCHPIN_FINDINGS.md`)
+> showed that regime **over-states the FFN** (the audio pipeline's input embedding
+> + pooling readout make the FFN redundant). Re-verified under the corrected
+> regime (`input_embed=true, pool_frac=0.25`) in
+> `results/temporal_scaling/fixed_regime/`. Read the conclusions below alongside
+> that re-run.
+
+
 **Follow-up to** `FINDINGS.md` (depth is a weak lever; FFN load-bearing; width >
 depth). Having reframed the architecture as an **LRU/S5-style SSM-MLP**, we test
 four knobs the deep-SSM literature says should matter, all on the **FFN** (the
@@ -117,9 +127,74 @@ long-τ points carry real seed variance (reported), but the sweet-spot findings
 (M=2, D≈96, τ matched to range) are well separated from noise. All drivers
 append-per-trial and resume, so more seeds / larger D extend cheaply.
 
+## Corrected regime (input_embed + pooling readout) — re-run
+
+The numbers above used the **single-position headless** readout. The audio
+pipeline has an input embedding + a **pooling** readout, which the linchpin
+(`phasor_torch/results/LINCHPIN_FINDINGS.md`) showed is what makes the FFN
+redundant. Re-ran all four knobs with `input_embed=true, pool_frac=0.25`
+(`fixed_regime/*.csv`, ρ=0.9). The pooling readout does much of the temporal
+integration itself, so it **compresses the dynamic range of every
+temporal-integration knob:**
+
+| knob | original (single-pos) | corrected (embed+pool) | verdict |
+|---|---|---|---|
+| **Width `D`** | 0.44→0.62 (peak D96) | 0.43→0.58 (peak D96) | ✓ **holds** — strongest, plateau ~96 |
+| **FFN `d_ff`** | helps, saturates ~2× | helps, saturates | ✓ holds (modest) |
+| **Modes `n_modes=2` (long-range)** | 0.73→**0.94** (Δ+0.21) | 0.74→**0.80** (Δ+0.06) | ✓ direction holds; effect **~3× smaller** |
+| **λ-range (long-range)** | 0.37→0.77 (Δ+0.40) | 0.63→0.74 (Δ+0.11) | ✓ holds, smaller (pool lifts low-τ end) |
+| **λ-range (short-range)** | peaks @τ=64 | peaks @τ=64 | ✓ over-long τ still hurts |
+| **LCA `n_anchors`** | 0.41→0.49 monotonic | 0.39–0.43 **flat/noisy** | ✗ **does NOT hold** — was a readout artifact |
+
+**Revised takeaways (audio-representative regime):** width remains the robust
+lever (plateau ~D=96); `n_modes=2` is still the long-range peak (M>2 still worse)
+but the gain is modest once a pooling readout exists; λ-range still helps long
+range with the same short-range over-smoothing tradeoff; **anchors was a readout
+artifact** (flat under pooling). General lesson: a benchmark's *readout* can
+silently inflate temporal-integration components — evaluate knobs under a readout
+that matches deployment.
+
+## Tier-1 readout ablation — what shifts the needle (readout/loss > body knobs)
+
+The reconciliation showed the *readout* controls the knob conclusions. So we
+ablated a **Tier-1 readout upgrade** (cumulative) on LCA + input_embed, measuring
+the two biggest disparities (FFN on/off at spread; modes m1→m2 at long-range),
+2 seeds. Harness: `exp_readout_ladder` (`readout_ladder/ladder.csv`).
+
+| rung (cumulative) | FFN on | FFN off | Δ FFN | modes m1 | modes m2 | Δ modes |
+|---|---|---|---|---|---|---|
+| R0 mean-pool + sim-loss (current) | 0.408 | 0.385 | +0.022 | 0.749 | 0.826 | +0.077 |
+| R1 + softmax-CE (contrastive) | 0.466 | 0.453 | +0.013 | 0.785 | 0.866 | +0.081 |
+| R2 + learnable codes | 0.466 | 0.454 | +0.012 | 0.801 | 0.867 | +0.066 |
+| R3 + learnable β | 0.467 | 0.448 | +0.020 | 0.796 | 0.850 | +0.055 |
+| **R4 + logsumexp-over-time** | **0.503** | **0.543** | **−0.040** | 0.823 | 0.828 | **+0.005** |
+
+**Findings:**
+1. **Contrastive softmax-CE = biggest general accuracy lever** (+~0.06 over the
+   non-contrastive `similarity_loss`, which only pulls toward the true prototype).
+2. **LogSumExp-over-time pooling = biggest structural lever** — lifts accuracy
+   further (attn-only 0.448→**0.543**) and **flips the FFN delta negative**
+   (attn-only now *beats* the FFN model) and **collapses the modes advantage**
+   (Δ→+0.005). A max-over-time readout does the temporal aggregation itself, so
+   the FFN *and* the mode-bank become redundant-to-harmful. This is the strongest
+   reproduction of audio's "no-FFN wins," and explains the mechanism (KWS = "is
+   the keyword present *somewhere*" → max-pool is the right inductive bias).
+3. **Learnable codes / β = negligible** — fixed random codes + fixed temperature
+   were fine; the *loss* and *pooling* are the levers, not prototype geometry.
+4. Total Tier-1 accuracy gain: **+0.10 (FFN model) to +0.16 (attn-only)** — a
+   large lever living entirely in the readout/loss.
+
+**Audio recommendation:** swap `similarity_loss → softmax-CE` and `SSMReadout
+mean-pool → logsumexp-over-time`; expect a bump past 79.3%, largest for the
+no-FFN config.
+
 ## Reproduce
 ```julia
 include("scripts/temporal_scaling_sweep.jl")
-run_knobs(; use_cuda=true)   # exp_capacity/anchors/tau/modes + summarize_all()
+exp_readout_ladder(; use_cuda=true)                         # Tier-1 readout ablation
+run_knobs(; use_cuda=true)                                   # original single-pos regime
+run_knobs(; use_cuda=true, input_embed=true, pool_frac=0.25, # corrected audio-representative regime
+          outdir="results/temporal_scaling/fixed_regime")
 ```
-Artifacts: `results/temporal_scaling/{capacity,anchors,tau,modes}.csv`.
+Artifacts: `results/temporal_scaling/{capacity,anchors,tau,modes}.csv` (original)
+and `results/temporal_scaling/fixed_regime/*.csv` (corrected).
