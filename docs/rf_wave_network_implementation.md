@@ -9,7 +9,10 @@ already speaks — the **phase-SSM view** — so that the resulting layer is (a)
 demonstrably self-regulating, (b) GPU-native, (c) trainable end-to-end, and (d)
 a genuine *wave-based* transformation rather than a stack of discrete layers.
 
-Status: draft alongside the first prototype (`src/wave.jl`, `demos/wave_dispersion.jl`).
+Status: draft alongside the prototype (`src/wave.jl`, `demos/wave_dispersion.jl`).
+Related: [`wave_dispersion_derivation.md`](wave_dispersion_derivation.md) (phonon/Kuramoto
+dispersion theory), the step-by-step build-up notebook `demos/wave_sheet_explained.ipynb`,
+and its verification `demos/wave_dispersion_derivation.ipynb`.
 
 ---
 
@@ -82,6 +85,12 @@ gives us everything at once:
   stable. Training the DoG kernel = shaping which spatial-frequency waves sit at
   marginal stability. `dispersion(layer, ps, st)` returns `M`, the spectral
   radius, and `k_eff` directly.
+
+> **Full derivation:** the phonon-style dispersion relation is worked out from
+> first principles (Bloch ansatz, group velocity, the delay→dispersion /
+> DoG→gain-band split, 2-D, *and* the nonlinear `:spike` Kuramoto phase-mode
+> band) in **[`docs/wave_dispersion_derivation.md`](wave_dispersion_derivation.md)**,
+> with numerical verification in **`demos/wave_dispersion_derivation.ipynb`**.
 
 ### 2.3 A phase-only wave is self-limiting by construction
 
@@ -185,8 +194,9 @@ layer = PhasorWaveSheet(H, W;
   `z0 :: (H,W[,B])`, evolve `L` steps, return the full complex trajectory
   `(H,W,L[,B])`. `mode=:ode` integrates the continuous ODE (autonomous).
 - **`dispersion(layer, ps, st; mode=:discrete)`** — `(; M, spectral_radius,
-  k_eff, W_hat, growth_rate)` per spatial mode (§2.2). `mode=:continuous` returns
-  the exact ODE operator eigenvalue.
+  k_eff, W_hat, growth_rate)` per spatial mode (§2.2; full derivation in
+  [`wave_dispersion_derivation.md`](wave_dispersion_derivation.md)).
+  `mode=:continuous` returns the exact ODE operator eigenvalue.
 
 Coupling defaults to a parametric difference-of-Gaussians (`coupling = :dog`, a
 handful of interpretable trainable scalars), so ablations are one-liners:
