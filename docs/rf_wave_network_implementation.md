@@ -11,8 +11,10 @@ a genuine *wave-based* transformation rather than a stack of discrete layers.
 
 Status: draft alongside the prototype (`src/wave.jl`, `demos/wave_dispersion.jl`).
 Related: [`wave_dispersion_derivation.md`](wave_dispersion_derivation.md) (phonon/Kuramoto
-dispersion theory), the step-by-step build-up notebook `demos/wave_sheet_explained.ipynb`,
-and its verification `demos/wave_dispersion_derivation.ipynb`.
+dispersion theory), [`wavesheet_experts_design.md`](wavesheet_experts_design.md)
+(sparse read→gate→re-bind "expert" modules that transform waves in transit), the
+step-by-step build-up notebook `demos/wave_sheet_explained.ipynb`, and its
+verification `demos/wave_dispersion_derivation.ipynb`.
 
 ---
 

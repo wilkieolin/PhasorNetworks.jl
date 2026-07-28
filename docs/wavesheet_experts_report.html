@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The PhasorWaveSheet: derivation & implementation</title>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(','\\)']], displayMath: [['\\[','\\]']], tags: 'ams' },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<style>
+  :root{ --fg:#1b1b1f; --muted:#5b5b66; --accent:#3a5ba0; --bg:#fbfbfd;
+         --box:#f2f4f8; --bio:#eef6ee; --bio-b:#5a9a5a; --warn:#fbf1e6; --warn-b:#c98a3a;
+         --code:#f5f5f7; --border:#e2e2ea; }
+  html{ scroll-behavior:smooth; }
+  body{ margin:0; color:var(--fg); background:var(--bg); font-size:17px; line-height:1.65;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap{ max-width:860px; margin:0 auto; padding:48px 28px 120px; }
+  h1{ font-size:2.15rem; line-height:1.15; margin:0 0 .2em; letter-spacing:-.02em; }
+  h2{ font-size:1.5rem; margin:2.4em 0 .5em; padding-top:.4em; border-top:1px solid var(--border);
+      letter-spacing:-.01em; }
+  h3{ font-size:1.16rem; margin:1.8em 0 .4em; color:#26324a; }
+  .sub{ color:var(--muted); font-size:1.05rem; margin:.2em 0 1.6em; }
+  a{ color:var(--accent); text-decoration:none; } a:hover{ text-decoration:underline; }
+  p{ margin:.7em 0; } ul,ol{ padding-left:1.3em; } li{ margin:.35em 0; }
+  code{ background:var(--code); padding:.1em .35em; border-radius:4px; font-size:.9em;
+        font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; }
+  pre{ background:var(--code); padding:14px 16px; border-radius:8px; overflow-x:auto;
+       font-size:.86em; border:1px solid var(--border); }
+  pre code{ background:none; padding:0; }
+  .box{ background:var(--box); border:1px solid var(--border); border-radius:10px;
+        padding:2px 20px; margin:1.4em 0; }
+  .bio{ background:var(--bio); border-left:4px solid var(--bio-b); border-radius:6px;
+        padding:2px 18px; margin:1.4em 0; }
+  .bio h4, .warn h4{ margin:.9em 0 .3em; font-size:.98rem; text-transform:uppercase;
+        letter-spacing:.06em; font-weight:700; }
+  .bio h4{ color:#3f7a3f; } .warn h4{ color:#9c6a24; }
+  .warn{ background:var(--warn); border-left:4px solid var(--warn-b); border-radius:6px;
+         padding:2px 18px; margin:1.4em 0; }
+  table{ border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.93em; }
+  th,td{ border:1px solid var(--border); padding:7px 11px; text-align:left; }
+  th{ background:var(--box); }
+  td.n, th.n{ text-align:right; font-variant-numeric:tabular-nums; }
+  .toc{ background:var(--box); border:1px solid var(--border); border-radius:10px; padding:8px 24px; }
+  .toc ol{ margin:.5em 0; } .toc a{ color:var(--fg); }
+  .refs{ font-size:.92em; } .refs li{ margin:.5em 0; }
+  .refs .rid{ color:var(--muted); font-weight:600; }
+  .small{ color:var(--muted); font-size:.9em; }
+  hr{ border:none; border-top:1px solid var(--border); margin:2em 0; }
+  .tag{ display:inline-block; background:var(--accent); color:#fff; border-radius:5px;
+        font-size:.7rem; padding:1px 7px; vertical-align:middle; letter-spacing:.03em; }
+  figure.fig{ margin:1.7em 0; }
+  figure.fig .figframe{ background:#fff; border:1px solid var(--border); border-radius:10px; padding:16px 14px; text-align:center; }
+  figure.fig svg{ max-width:100%; height:auto; }
+  figure.fig figcaption{ color:var(--muted); font-size:.9em; margin-top:.7em; line-height:1.55; }
+  figure.fig figcaption b{ color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Sparse VSA experts on the PhasorWaveSheet</h1>
+<p class="sub">A transformer-style extension: gated, patch-local expert modules that read, route,
+and re-bind information into a passing wave — trained on the discrete SSM.</p>
+
+<div class="box">
+<p>This is the <strong>extension</strong> to the companion report
+<a href="wavesheet_report.html"><em>The PhasorWaveSheet: derivation &amp; implementation</em></a>,
+which derives the wave substrate itself — its dispersion, criticality, and discrete-SSM
+training. Here we build <em>on top of</em> that substrate. Section references of the form
+"main report §N" point back to it. Same audience: fluent in HDC/VSA and modern ML
+(state-space models, attention, mixture-of-experts).</p>
+</div>
+
+<h2 id="recap">1. What the substrate gives us</h2>
+<p>The main report establishes the pieces this extension depends on. The
+<code>PhasorWaveSheet</code> is a translation-invariant recurrent lattice of resonate-and-fire
+neurons that, in the Fourier basis, decouples into \(H\times W\) independent scalar state-space
+recurrences \(\hat z_q[n{+}1]=M(q)\,\hat z_q[n]+\hat u_q[n]\) with per-mode multiplier
+\(M(q)=A+g\hat W(q)\) (main report §3–4). It trains entirely on the <em>discrete</em> SSM — a
+parallel scan for the linear sheet, a deep-equilibrium fixed point for the spike sheet — with
+no ODE adjoint (main report §5–6). Information rides the shared carrier as <em>phase</em>, and
+binding a transformation onto a signal is a unit-phasor multiply (phase addition). Those two
+facts — a selective diagonal SSM and phase-domain binding — are exactly what the expert module
+below is built from.</p>
+
+<h2 id="experts">2. Sparse experts: read → gate → re-bind</h2>
+
+<p>The sheet <em>propagates</em> information; the natural next step is to make it
+<em>transform</em> information as waves pass through — sparsely and selectively. The design
+is a bank of <strong>experts</strong>, each owning a patch of the sheet, that (1) read their
+patch, (2) gate themselves on or off, and (3) re-bind their output into the wave. This
+reconciles three literatures inside one substrate.</p>
+
+<div class="bio">
+<h4>Biological motivation (and an honest caveat)</h4>
+<p>The columnar organisation of neocortex <span class="small">[Mountcastle 1997]</span> — a
+large folded sheet of repeated, locally-computing columns — motivates a repeated,
+patch-local "expert" unit. The stronger Thousand-Brains claims (every column carries a
+grid-cell reference frame; a single column learns a complete object model
+<span class="small">[Hawkins et&nbsp;al. 2019]</span>) are attractive but remain
+<em>hypothesis</em>, not established fact — an adversarial fact-check of these two specific
+claims did not sustain them. We therefore ground the repeated-expert unit on Mountcastle
+columnar repetition and travelling-wave phenomenology only, and treat the reference-frame
+story as inspiration, not evidence.</p>
+</div>
+
+<h3>2.1 The bind is a diagonal SSM insert</h3>
+<p>An expert's re-bind \(z_P \mapsto z_P \odot (g\,\varphi_e)\) is a per-site diagonal multiply
+\(D_e=\mathrm{diag}(g\,\varphi_e)\) — the <em>same kind of object</em> as the SSM transition
+\(M\). An expert step is thus an input-/state-dependent diagonal transition spliced into the
+recurrence: the module never leaves the SSM algebra, it merely makes the transition
+<strong>selective</strong>, exactly the generalisation Mamba <span class="small">[Gu &amp; Dao
+2023]</span> makes to diagonal SSMs. Two subtleties matter for the derivation. First,
+because a diagonal bind commutes with the diagonal self-propagator \(A\), the
+<em>sub-cycle placement</em> of the bind is a gauge the per-cycle step absorbs exactly:
+\(e^{k(T-t_b)}\,D_e\,e^{kt_b}=D_e\,e^{kT}=D_e A\). Second, a <em>spatially local</em> bind is
+diagonal in the <em>site</em> basis while transport \(M(q)\) is diagonal in the <em>Fourier</em>
+basis — they do not co-diagonalise, so a bind spliced into the state <em>transition</em> is
+not a scalar scan; the scan stays scalar only when the selectivity modulates the
+<em>input injection</em> (or is spatially global).</p>
+
+<h3>2.2 Routing: sparsely-gated mixture-of-experts</h3>
+<p>The gate is a top-1 router in the mould of sparsely-gated MoE
+<span class="small">[Shazeer et&nbsp;al. 2017]</span>, with two ingredients from recent
+practice. Fine-grained expert segmentation <span class="small">[DeepSeekMoE 2024]</span>
+gives combinatorial routing flexibility and drives experts toward non-overlapping
+specialisation. Crucially, load balancing uses the <strong>auxiliary-loss-free</strong> scheme
+<span class="small">[DeepSeek 2024]</span>: a per-expert bias is added to the routing scores
+<em>before</em> the top-\(k\) selection and nudged by each expert's recent load, so utilisation
+is balanced <em>without</em> injecting the interference gradients that an auxiliary loss
+would. The discrete choice is made differentiable by a straight-through / Gumbel-softmax
+estimator <span class="small">[Jang et&nbsp;al. 2016]</span> — hard one-hot in the forward
+pass, softmax gradient in the backward pass. This is <code>moe_gate</code> /
+<code>update_moe_bias</code> in the implementation.</p>
+
+<h3>2.3 Two routing regimes</h3>
+<p>A selective SSM stays parallel-scan-trainable iff its coefficients can be computed before
+the scan.</p>
+<ul>
+<li><strong>Input-conditioned</strong> (regime 1): the gate/bind read the input drive, so the
+modulated drive is precomputed and the whole augmented sheet is one parallel scan (or spike
+DEQ). Implemented as a drive modulation
+\(\text{drive}\odot(1+\sum_e \text{mask}_e\,g_e(\varphi_e-1))\).</li>
+<li><strong>State-conditioned</strong> (regime 2): the gate reads the <em>live wave</em> — the
+literal "modify a wave as it passes by." Coefficient↔state feedback breaks the global scan,
+so we use <strong>event-based operator splitting</strong>: run the linear sheet as a parallel
+scan <em>within</em> chunks and apply the read→gate→bind event at chunk boundaries. With an
+identity event this equals the full scan exactly (linear transport composes across
+boundaries), so the sequential cost is only the number of events — which is small precisely
+because the experts are sparse.</li>
+</ul>
+
+<h3>2.4 Recovering the bind: VSA unbinding and resonators</h3>
+<p>Because the stamp is a VSA bind, it is recoverable by unbinding — the same algebra that VSA
+uses to attach and detach transformations from a carrier
+<span class="small">[Plate 1995]</span>. When several codes are superposed, a
+<strong>resonator network</strong> <span class="small">[Frady et&nbsp;al. 2020; Kent et&nbsp;al.
+2020]</span> factors the product by searching in superposition; resonators have been
+realised as multi-compartment <em>spiking phasor</em> neurons on neuromorphic hardware
+<span class="small">[Renner et&nbsp;al. 2024]</span> — the same substrate as the sheet's spike
+mode — and FHRR has been merged with deep residual/attention networks
+<span class="small">[repo author 2022]</span>. Related reconciliations of oscillatory
+computation with attention/gating include Kuramoto oscillatory neurons composed with
+attentive connectivity <span class="small">[AKOrN 2024]</span>, attention on cellular automata
+<span class="small">[ViTCA 2022]</span>, and travelling-wave RNNs that store and transform
+sequences <span class="small">[Keller &amp; Welling 2023; Keller et&nbsp;al. 2024]</span>. The
+toroidal re-entry of the wave has a 1-D analogue in recurrent-depth / looped transformers
+<span class="small">[Geiping et&nbsp;al. 2025]</span>.</p>
+
+
+<h2 id="results">3. Empirical results</h2>
+
+<h3>3.1 The go/no-go: does discrete routing survive the wave substrate?</h3>
+<p>The central risk of the expert design is that a discrete straight-through gate, reading from
+and writing into the wave, collapses to one always-on expert. On a synthetic "which patch is
+coherent" routing task the router reaches 100% accuracy with per-expert load
+<em>staying spread</em> (load-entropy \(\approx 1.2\) of \(\ln 4 = 1.386\), all four experts
+used) — <strong>no collapse</strong> <span class="small">[<code>demos/wave_experts_gonogo.jl</code>]</span>.
+The straight-through gate gradient stays informative through the discrete-SSM rollout.</p>
+
+<h3>3.2 Decode check: is the stamped bind recoverable?</h3>
+<table>
+<tr><th>Decode</th><th>Coherent carrier</th><th>Incoherent carrier (\(\sigma=1\))</th></tr>
+<tr><td>Differential (unbind vs reference)</td><td class="n">100% (to E=64)</td><td class="n">92–99%</td></tr>
+<tr><td>Blind (no reference)</td><td class="n">100%</td><td class="n">0%</td></tr>
+</table>
+<p>The stamped bind <em>is</em> recoverable: unbinding the output against a bind-free reference
+recovers every expert's code, robustly and even under an incoherent carrier. A blind decode
+is coherence-limited (100% → 0% as the carrier decoheres) — the intrinsic square-law/coherence
+nature of the readable channel. The prototype's per-expert bind is a 1-D scalar phase, so
+codes on disjoint patches decode independently but cannot be superposed and factored at one
+site; genuine superposition capacity would require high-D per-site codes plus a resonator.</p>
+
+<h3>3.3 FashionMNIST</h3>
+<table>
+<tr><th>Model</th><th class="n">Test acc.</th><th class="n">Params</th></tr>
+<tr><td>Wave + experts (7 experts)</td><td class="n">0.770</td><td class="n">50 431</td></tr>
+<tr><td>Wave only (same head)</td><td class="n">0.759</td><td class="n">50 375</td></tr>
+</table>
+<p class="small">Quick run: 4k train / 1.5k test, 4 epochs, \(L=5\),
+<code>demos/wave_experts_fashionmnist.jl</code>. The expert bank adds \(+1.1\%\) for \(+56\)
+parameters, and the gate does not collapse during real-data training (entropy 1.60 of 1.95
+max, all experts used). Consistent with an attribution study on the plain sheet: the
+wave/expert layer is a near-free spatial-mixing adjunct on top of a head-dominated pipeline,
+not a stand-alone learner.</p>
+
+
+<h2 id="open">4. Open questions</h2>
+<ul>
+<li><strong>Superposition capacity.</strong> The prototype's scalar-per-expert bind has none;
+high-D per-site codes + a resonator are the path to carrying multiple bound transforms per
+wave, and the ceiling vs. hypervector dimension is unmeasured.</li>
+<li><strong>Scaling.</strong> The go/no-go and FashionMNIST runs are small and single-seed;
+scaling the expert bank, running on the spike-DEQ substrate, and larger real tasks remain to
+test.</li>
+<li><strong>State-conditioned routing at depth.</strong> The event-split keeps the
+state-conditioned path parallel <em>within</em> chunks; how gate quality and stability behave
+as chunks shrink (finer state feedback) is open.</li>
+<li><strong>Load signal on a torus.</strong> The DeepSeek per-expert bias balances token-style
+load; the right signal for spatially-localised patch occupancy on a 2-D torus is not yet
+characterised.</li>
+</ul>
+
+<h2 id="refs">5. References</h2>
+<ol class="refs">
+<li><span class="rid">Plate (1995).</span> Holographic Reduced Representations. <em>IEEE TNN</em> 6.</li>
+<li><span class="rid">Kleyko, Rachkovskij, Osipov &amp; Rahimi (2022).</span> A survey on HDC/VSA. <em>ACM Comput. Surv.</em> <a href="https://arxiv.org/abs/2111.06077">arXiv:2111.06077</a></li>
+<li><span class="rid">Frady, Kent, Olshausen &amp; Sommer (2020).</span> Resonator networks. <a href="https://arxiv.org/abs/2007.03748">arXiv:2007.03748</a>; Kent et&nbsp;al. <a href="https://arxiv.org/abs/1906.11684">arXiv:1906.11684</a></li>
+<li><span class="rid">Renner et&nbsp;al. (2024).</span> Neuromorphic resonator networks (spiking phasor neurons). <em>Nat. Mach. Intell.</em> <a href="https://arxiv.org/abs/2208.12880">arXiv:2208.12880</a></li>
+<li><span class="rid">(repo author) (2022).</span> FHRR VSA merged with deep residual/attention networks. <a href="https://arxiv.org/abs/2207.08953">arXiv:2207.08953</a></li>
+<li><span class="rid">Shazeer et&nbsp;al. (2017).</span> Sparsely-gated mixture-of-experts. <a href="https://arxiv.org/abs/1701.06538">arXiv:1701.06538</a></li>
+<li><span class="rid">Dai et&nbsp;al. (2024).</span> DeepSeekMoE (fine-grained experts). <a href="https://arxiv.org/abs/2401.06066">arXiv:2401.06066</a>; Auxiliary-loss-free load balancing. <a href="https://arxiv.org/abs/2408.15664">arXiv:2408.15664</a></li>
+<li><span class="rid">Jang, Gu &amp; Poole (2016).</span> Categorical reparameterization with Gumbel-softmax. <a href="https://arxiv.org/abs/1611.01144">arXiv:1611.01144</a></li>
+<li><span class="rid">Gu &amp; Dao (2023).</span> Mamba: selective state spaces.</li>
+<li><span class="rid">Miyato, Löwe, Geiger &amp; Welling (2024).</span> Artificial Kuramoto oscillatory neurons (AKOrN). <a href="https://arxiv.org/abs/2410.13821">arXiv:2410.13821</a></li>
+<li><span class="rid">Tesfaldet, Nowrouzezahrai &amp; Pal (2022).</span> Attention-based neural cellular automata (ViTCA). <a href="https://arxiv.org/abs/2211.01233">arXiv:2211.01233</a></li>
+<li><span class="rid">Keller &amp; Welling (2023).</span> Neural Wave Machine. <em>ICML</em>. Keller et&nbsp;al. (2024). Wave-RNN. <a href="https://arxiv.org/abs/2309.08045">arXiv:2309.08045</a></li>
+<li><span class="rid">Geiping et&nbsp;al. (2025).</span> Scaling test-time compute with latent reasoning (recurrent depth). <a href="https://arxiv.org/abs/2502.05171">arXiv:2502.05171</a></li>
+<li><span class="rid">Mountcastle (1997).</span> The columnar organization of the neocortex. <em>Brain</em> 120.</li>
+<li><span class="rid">Hawkins, Lewis, Klukas, Purdy &amp; Ahmad (2019).</span> A framework for intelligence and cortical function based on grid cells. <em>Front. Neural Circuits</em> 12. <a href="https://www.frontiersin.org/articles/10.3389/fncir.2018.00121/full">link</a> <span class="small">(hypothesis; see §2 caveat)</span></li>
+</ol>
+
+<hr>
+<p class="small">Companion to <a href="wavesheet_report.html">the PhasorWaveSheet report</a>. Implementation: <code>WaveExpertSheet</code> / <code>moe_gate</code> in <code>src/wave.jl</code>; demos <code>demos/wave_experts_gonogo.jl</code>, <code>demos/wave_experts_decode.jl</code>, <code>demos/wave_experts_fashionmnist.jl</code>; design notes <code>docs/wavesheet_experts_design.md</code>.</p>
+</div>
+</body>
+</html>

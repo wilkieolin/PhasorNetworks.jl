@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The PhasorWaveSheet: derivation & implementation</title>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(','\\)']], displayMath: [['\\[','\\]']], tags: 'ams' },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<style>
+  :root{ --fg:#1b1b1f; --muted:#5b5b66; --accent:#3a5ba0; --bg:#fbfbfd;
+         --box:#f2f4f8; --bio:#eef6ee; --bio-b:#5a9a5a; --warn:#fbf1e6; --warn-b:#c98a3a;
+         --code:#f5f5f7; --border:#e2e2ea; }
+  html{ scroll-behavior:smooth; }
+  body{ margin:0; color:var(--fg); background:var(--bg); font-size:17px; line-height:1.65;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap{ max-width:860px; margin:0 auto; padding:48px 28px 120px; }
+  h1{ font-size:2.15rem; line-height:1.15; margin:0 0 .2em; letter-spacing:-.02em; }
+  h2{ font-size:1.5rem; margin:2.4em 0 .5em; padding-top:.4em; border-top:1px solid var(--border);
+      letter-spacing:-.01em; }
+  h3{ font-size:1.16rem; margin:1.8em 0 .4em; color:#26324a; }
+  .sub{ color:var(--muted); font-size:1.05rem; margin:.2em 0 1.6em; }
+  a{ color:var(--accent); text-decoration:none; } a:hover{ text-decoration:underline; }
+  p{ margin:.7em 0; } ul,ol{ padding-left:1.3em; } li{ margin:.35em 0; }
+  code{ background:var(--code); padding:.1em .35em; border-radius:4px; font-size:.9em;
+        font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; }
+  pre{ background:var(--code); padding:14px 16px; border-radius:8px; overflow-x:auto;
+       font-size:.86em; border:1px solid var(--border); }
+  pre code{ background:none; padding:0; }
+  .box{ background:var(--box); border:1px solid var(--border); border-radius:10px;
+        padding:2px 20px; margin:1.4em 0; }
+  .bio{ background:var(--bio); border-left:4px solid var(--bio-b); border-radius:6px;
+        padding:2px 18px; margin:1.4em 0; }
+  .bio h4, .warn h4{ margin:.9em 0 .3em; font-size:.98rem; text-transform:uppercase;
+        letter-spacing:.06em; font-weight:700; }
+  .bio h4{ color:#3f7a3f; } .warn h4{ color:#9c6a24; }
+  .warn{ background:var(--warn); border-left:4px solid var(--warn-b); border-radius:6px;
+         padding:2px 18px; margin:1.4em 0; }
+  table{ border-collapse:collapse; width:100%; margin:1.2em 0; font-size:.93em; }
+  th,td{ border:1px solid var(--border); padding:7px 11px; text-align:left; }
+  th{ background:var(--box); }
+  td.n, th.n{ text-align:right; font-variant-numeric:tabular-nums; }
+  .toc{ background:var(--box); border:1px solid var(--border); border-radius:10px; padding:8px 24px; }
+  .toc ol{ margin:.5em 0; } .toc a{ color:var(--fg); }
+  .refs{ font-size:.92em; } .refs li{ margin:.5em 0; }
+  .refs .rid{ color:var(--muted); font-weight:600; }
+  .small{ color:var(--muted); font-size:.9em; }
+  hr{ border:none; border-top:1px solid var(--border); margin:2em 0; }
+  .tag{ display:inline-block; background:var(--accent); color:#fff; border-radius:5px;
+        font-size:.7rem; padding:1px 7px; vertical-align:middle; letter-spacing:.03em; }
+  figure.fig{ margin:1.7em 0; }
+  figure.fig .figframe{ background:#fff; border:1px solid var(--border); border-radius:10px; padding:16px 14px; text-align:center; }
+  figure.fig svg{ max-width:100%; height:auto; }
+  figure.fig figcaption{ color:var(--muted); font-size:.9em; margin-top:.7em; line-height:1.55; }
+  figure.fig figcaption b{ color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>The PhasorWaveSheet</h1>
+<p class="sub">A resonate-and-fire wave medium as a state-space model: derivation, dispersion theory,
+and discrete-SSM training — in <code>PhasorNetworks.jl</code>.</p>
+
+<div class="box">
+<p><strong>Scope &amp; audience.</strong> This report is written for a reader fluent in
+hyperdimensional / vector-symbolic computing (HDC/VSA) and modern machine learning
+(state-space models, attention, mixture-of-experts) who wants to see <em>how these
+pieces fit together</em> into a single oscillatory substrate and <em>how the mathematics is
+derived</em>, not a tutorial on the individual concepts. Each new mechanism is introduced,
+its biological motivation stated where one exists, and the key steps are derived rather
+than asserted. Cross-references point to the source docs
+(<code>rf_wave_network_implementation.md</code>, <code>wave_dispersion_derivation.md</code>,
+<code>wavesheet_experts_design.md</code>) and to the implementation in <code>src/wave.jl</code>.</p>
+</div>
+
+<div class="box"><p><strong>Companion.</strong> Transformer-style gated expert modules that read a patch, route, and re-bind information into a passing wave are treated in the extension report, <a href="wavesheet_experts_report.html"><em>Sparse VSA experts on the PhasorWaveSheet</em></a>. This report is confined to the wave substrate itself.</p></div>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#motivation">Motivation: waves as a computational medium</a></li>
+  <li><a href="#substrate">The substrate: resonate-and-fire neurons in the phasor/SSM view</a></li>
+  <li><a href="#sheet">From a feed-forward SSM to a recurrent wave sheet</a></li>
+  <li><a href="#dispersion">Dispersion: analysing the sheet like a solid</a></li>
+  <li><a href="#training">Training on the discrete SSM (not the ODE)</a></li>
+  <li><a href="#spike">Computing the spike sheet in parallel: the DEQ fixed point</a></li>
+  <li><a href="#results">Verification: dispersion &amp; equivalence</a></li>
+  <li><a href="#open">Limitations &amp; open questions</a></li>
+  <li><a href="#refs">References</a></li>
+</ol>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="motivation">1. Motivation: waves as a computational medium</h2>
+
+<p>Two research programmes motivate this work. The first is <strong>oscillatory / phasor
+computing</strong>, in which information is carried by the <em>phase</em> of a common carrier
+oscillation rather than by a scalar activation. In the Fourier Holographic Reduced
+Representation (FHRR) branch of VSA <span class="small">[Plate 1995; Kleyko et&nbsp;al. 2022]</span>,
+a hypervector is a list of unit-magnitude complex numbers \(e^{i\varphi_k}\); the algebra
+of <em>binding</em> (element-wise complex multiply = phase addition), <em>bundling</em>
+(superposition), and <em>similarity</em> (cosine of phase differences) gives a
+compositional symbolic calculus that lives natively on oscillators. The second is the
+observation, now well supported experimentally, that the cortex is threaded by
+<strong>travelling waves</strong> that organise and route activity across the sheet
+<span class="small">[Muller et&nbsp;al. 2018]</span>.</p>
+
+<p>The question this project asks is whether we can build a <em>single differentiable
+substrate</em> that (a) exhibits self-regulating, sparse wave dynamics, (b) runs efficiently
+on a GPU, (c) remains compatible with the phase-SSM view that makes phasor networks
+tractable to train, and (d) performs meaningful transformations <em>by wave propagation
+itself</em> rather than as a stack of discrete algebraic layers. The <code>PhasorWaveSheet</code>
+is that substrate: a two-dimensional recurrent lattice of resonate-and-fire neurons whose
+translation-invariant coupling turns the network into a wave medium, yet which reduces —
+exactly — to a diagonal state-space model that trains with ordinary reverse-mode AD.</p>
+
+<div class="bio">
+<h4>Biological motivation</h4>
+<p>Cortical travelling waves arise generically from recurrent circuits with conduction
+delays and are implicated in gating, phase coding and sequence organisation
+<span class="small">[Muller et&nbsp;al. 2018]</span>. The resonate-and-fire neuron
+<span class="small">[Izhikevich 2001]</span> is the minimal spiking unit with an intrinsic
+oscillation, making it the natural building block for a phase-coding wave sheet.</p>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="substrate">2. The substrate: resonate-and-fire neurons in the phasor/SSM view</h2>
+
+<h3>2.1 The resonate-and-fire unit</h3>
+<p>A resonate-and-fire (R&amp;F) neuron carries a complex state \(z\in\mathbb{C}\) whose real and
+imaginary parts play the roles of a current-like and a voltage-like variable. Its
+sub-threshold dynamics are linear,</p>
+\[ \frac{dz}{dt} = k\,z + I(t), \qquad k=\lambda + i\omega, \]
+<p>where \(\omega\) is the intrinsic angular frequency and \(\lambda<0\) a decay rate. The
+homogeneous solution \(z(t)=z(0)\,e^{kt}\) is a decaying rotation: the phasor spins at
+\(\omega\) while its magnitude relaxes at rate \(\lambda\). Information is read off as the
+<em>phase</em> \(\theta = \arg z / \pi \in[-1,1]\) (units of \(\pi\)); a spike is emitted at the
+sub-cycle time encoded by that phase. This is the entire physical basis of the model.</p>
+
+<h3>2.2 The unified state-space model</h3>
+<p>Every layer in <code>PhasorNetworks.jl</code> — encoders, dense maps, convolutions, and the
+wave sheet — is defined by the same equation with a per-channel complex eigenvalue,</p>
+\[ \frac{dz_c}{dt} = k_c\,z_c + (W I(t))_c, \qquad k_c=\lambda_c + i\omega. \]
+<p>Discretising the leaky oscillator over one step \(\Delta t\) with a zero-order hold gives an
+exact linear recurrence — a diagonal state-space model (SSM) in the sense of S4/S5
+<span class="small">[Gu et&nbsp;al. 2022; Smith et&nbsp;al. 2023]</span>:</p>
+\[ z[n{+}1] = A\,z[n] + B\,u[n], \qquad A=e^{k\Delta t},\quad B=\frac{A-1}{k}, \]
+<p>whose impulse response (the discrete kernel) is \(K[n]=A^{n}B\). A layer can therefore be
+evaluated in several mathematically equivalent modes — a phase-domain causal convolution
+with \(K\), an FFT, or the continuous ODE solved by an adaptive integrator — and the same
+kernel \(K[n]=A^nB\) links them. This equivalence is what lets us <em>train</em> in the cheap,
+stable discrete mode and <em>verify</em> against the continuous one.</p>
+
+<div class="box">
+<p><strong>The per-channel-\(\omega\) rule.</strong> Because downstream layers compare phases by
+interference, every channel within a layer must rotate at the <em>same</em> carrier \(\omega\)
+(a single shared scalar, \(\omega=2\pi\)); otherwise the carrier desynchronises and HD/VSA
+invariance breaks. Cross-channel diversity lives entirely in \(\lambda\) (multi-timescale
+memory) and in the weights \(W\). The wave sheet respects this rule — indeed it depends on
+it (§3.1).</p>
+</div>
+
+<h3>2.3 Binding as a phase operation</h3>
+<p>In FHRR, binding a transformation \(T\) onto a signal is the element-wise product
+\(z \mapsto z\odot \varphi_T\) with \(\varphi_T\) a unit phasor — i.e. phase addition
+\(\theta \mapsto \theta + \varphi_T\). Unbinding multiplies by the conjugate. This single
+fact recurs throughout the report: conduction delays (§3.1), the transformation "stamp" of the companion experts report, and
+the read-out phase shift (§4.5) are all instances of a unit-phasor multiply on the shared
+carrier.</p>
+
+<!-- ===================================================================== -->
+<h2 id="sheet">3. From a feed-forward SSM to a recurrent wave sheet</h2>
+
+<p>In an ordinary phasor network the weight matrix \(W\) is a <em>feed-forward</em> inter-layer
+map. Make it a <em>recurrent within-sheet</em> coupling on a 2-D torus and the SSM becomes a
+<strong>wave medium</strong>. Each site \(x\) on an \(H\times W\) toroidal lattice carries an
+R&amp;F state \(z_x\); the per-cycle update of a <em>single</em> neuron \(x\) sums the
+translation-invariant kernel, shifted to \(x\), against the whole sheet:</p>
+\[ z_x[n{+}1] = A\,z_x[n] + g\!\sum_{y} W(x-y)\,s_y[n] + \text{drive}_x[n]. \]
+<p>That neighbour sum is exactly the \(x\)-th entry of a spatial convolution, so stacking all
+sites gives the compact <em>whole-sheet</em> form (the one the spatial FFT diagonalises in
+§3.2 and the code evaluates as <code>ifft(Ŵ .* fft(s))</code>):</p>
+\[ z[n{+}1] = A\,z[n] + g\,(W \circledast s)[n] + \text{drive}[n], \qquad (W\circledast s)_x=\textstyle\sum_y W(x-y)s_y, \]
+<p>where every term is an \(H\times W\) field, \(\circledast\) is a (circular, toroidal)
+convolution with a translation-invariant kernel \(W\), \(g\) a global gain, and \(s\) the
+transmitted signal (below). The subscript \(x\) is what localises the convolution back to one
+neuron; without it, \(W\circledast s\) is the update for the entire sheet at once. The kernel is a
+<strong>difference-of-Gaussians (DoG)</strong>: a short-range excitatory Gaussian minus a
+broader inhibitory one, i.e. a Mexican-hat with \(\int W \approx 0\) (spatial balance).</p>
+
+<div class="bio">
+<h4>Biological motivation</h4>
+<p>DoG / Mexican-hat lateral connectivity — local excitation, surround inhibition — is the
+canonical cortical and retinal motif and the standard ingredient of continuous attractor
+and pattern-forming neural fields. The balance condition \(\int W\approx 0\) mirrors the
+excitatory/inhibitory balance that yields sparse, irregular activity
+<span class="small">[van Vreeswijk &amp; Sompolinsky 1996; Brunel 2000]</span>, and tuning the
+network to marginal stability echoes the near-critical (branching-ratio \(\approx 1\)) regime
+associated with cortical avalanches <span class="small">[Beggs &amp; Plenz 2003]</span>.</p>
+</div>
+
+<p>Three observations turn this recurrent SSM into something both tractable and GPU-native.</p>
+
+<h3>3.1 Insight 1 — conduction delays become complex weights</h3>
+<p>A physical wave sheet has conduction delays \(\tau_{xy}\) between sites; naively this is a
+delay-differential equation. But on a shared carrier \(\omega\), a delay \(\tau\) is
+<em>exactly</em> a phase rotation, \(s(t-\tau) = e^{-i\omega\tau}\,s(t)\) at the carrier. So the
+delayed coupling collapses to a <em>complex</em> weight \(W_{xy}=|W_{xy}|\,e^{-i\omega\tau_{xy}}\):
+the delay lives inside the linear complex SSM, with no DDE solver, no history buffer, and
+full differentiability. This is available <em>only</em> because of the per-channel-\(\omega\)
+discipline (§2.2) — the wave sheet is consistent with that rule, not an exception to it.
+(The identity is exact on the carrier; it is an approximation for broadband content.)</p>
+
+<h3>3.2 Insight 2 — translation invariance turns the coupled sheet into independent modes</h3>
+<p>The coupling links every neuron to a neighbourhood of others, so a single step is, in
+principle, a dense linear operator over all \(H\times W\) sites, and asking whether the sheet
+is stable means eigen-decomposing that \((HW)\times(HW)\) operator — hopeless to do literally,
+and step after step. What rescues us — and what makes the sheet a <em>wave</em> medium we can
+reason about in closed form — is a symmetry we have already built in: the coupling is
+<strong>translation-invariant</strong>.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 600 210" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <g><circle cx="40" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="40" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="70" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="100" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="130" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="160" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="190" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="220" cy="225" r="2.4" fill="#c3c7d4"/>
+  
+  <circle cx="100" cy="135" r="55" fill="none" stroke="#5a86c8" stroke-width="2" stroke-dasharray="4 4"/>
+  <circle cx="100" cy="135" r="30" fill="#e0876a" fill-opacity="0.22" stroke="#d0693f" stroke-width="2"/>
+  <circle cx="100" cy="135" r="4.5" fill="#3a5ba0"/>
+  <text x="100" y="71" text-anchor="middle" font-size="12" fill="#26324a" font-style="italic">x</text></g>
+  <g><circle cx="360" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="45" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="75" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="105" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="135" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="165" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="195" r="2.4" fill="#c3c7d4"/>
+<circle cx="360" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="390" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="420" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="450" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="480" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="510" cy="225" r="2.4" fill="#c3c7d4"/>
+<circle cx="540" cy="225" r="2.4" fill="#c3c7d4"/>
+  
+  <circle cx="480" cy="75" r="55" fill="none" stroke="#5a86c8" stroke-width="2" stroke-dasharray="4 4"/>
+  <circle cx="480" cy="75" r="30" fill="#e0876a" fill-opacity="0.22" stroke="#d0693f" stroke-width="2"/>
+  <circle cx="480" cy="75" r="4.5" fill="#3a5ba0"/>
+  <text x="480" y="11" text-anchor="middle" font-size="12" fill="#26324a" font-style="italic">x&#8242;</text></g>
+  <path d="M 250 120 C 300 150, 320 150, 360 105" fill="none" stroke="#9aa" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="305" y="168" text-anchor="middle" font-size="12" fill="#5b5b66">translate</text>
+  <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+    <path d="M0,0 L6,3 L0,6 Z" fill="#9aa"/></marker></defs>
+</svg></div>
+<figcaption><b>Figure 1.</b> Translation invariance. The weight between two neurons depends only on the vector between them, \(W(x-y)\), so the <em>same</em> difference-of-Gaussians stencil (warm centre = excitation, dashed cool ring = inhibition) sits over every neuron, merely shifted to its location. The coupling operator is thus fixed by one small stencil, not by an \((HW)\times(HW)\) table of independent weights.</figcaption></figure>
+
+<p>That stencil is the difference-of-Gaussians of §3: a warm centre that excites nearby sites
+and a cooler surround that inhibits the ring around them — the Mexican-hat profile of Figure&nbsp;2,
+whose spatial balance \(\int W\approx 0\) is what keeps the sheet near marginal stability.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 560 210" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <line x1="55" y1="120" x2="505" y2="120" stroke="#c3c7d4" stroke-width="1"/>
+  <line x1="280" y1="30" x2="280" y2="185" stroke="#c3c7d4" stroke-width="1"/>
+  <polygon points="236.0,120 236.0,119.8 239.7,112.4 243.3,104.7 247.0,96.9 250.7,89.1 254.3,81.7 258.0,74.7 261.7,68.4 265.3,62.9 269.0,58.5 272.7,55.2 276.3,53.2 280.0,52.5 283.7,53.2 287.3,55.2 291.0,58.5 294.7,62.9 298.3,68.4 302.0,74.7 305.7,81.7 309.3,89.1 313.0,96.9 316.7,104.7 320.3,112.4 324.0,119.8 324.0,120" fill="#e0876a" fill-opacity="0.18"/>
+  <polyline points="60.0,123.6 63.7,124.0 67.3,124.4 71.0,124.9 74.7,125.4 78.3,126.0 82.0,126.6 85.7,127.2 89.3,127.9 93.0,128.6 96.7,129.4 100.3,130.3 104.0,131.2 107.7,132.1 111.3,133.1 115.0,134.2 118.7,135.4 122.3,136.6 126.0,137.8 129.7,139.1 133.3,140.5 137.0,142.0 140.7,143.4 144.3,145.0 148.0,146.6 151.7,148.2 155.3,149.8 159.0,151.4 162.7,153.0 166.3,154.6 170.0,156.1 173.7,157.5 177.3,158.8 181.0,159.9 184.7,160.8 188.3,161.4 192.0,161.6 195.7,161.5 199.3,160.9 203.0,159.7 206.7,158.0 210.3,155.6 214.0,152.6 217.7,148.8 221.3,144.4 225.0,139.2 228.7,133.3 232.3,126.8 236.0,119.8 239.7,112.4 243.3,104.7 247.0,96.9 250.7,89.1 254.3,81.7 258.0,74.7 261.7,68.4 265.3,62.9 269.0,58.5 272.7,55.2 276.3,53.2 280.0,52.5 283.7,53.2 287.3,55.2 291.0,58.5 294.7,62.9 298.3,68.4 302.0,74.7 305.7,81.7 309.3,89.1 313.0,96.9 316.7,104.7 320.3,112.4 324.0,119.8 327.7,126.8 331.3,133.3 335.0,139.2 338.7,144.4 342.3,148.8 346.0,152.6 349.7,155.6 353.3,158.0 357.0,159.7 360.7,160.9 364.3,161.5 368.0,161.6 371.7,161.4 375.3,160.8 379.0,159.9 382.7,158.8 386.3,157.5 390.0,156.1 393.7,154.6 397.3,153.0 401.0,151.4 404.7,149.8 408.3,148.2 412.0,146.6 415.7,145.0 419.3,143.4 423.0,142.0 426.7,140.5 430.3,139.1 434.0,137.8 437.7,136.6 441.3,135.4 445.0,134.2 448.7,133.1 452.3,132.1 456.0,131.2 459.7,130.3 463.3,129.4 467.0,128.6 470.7,127.9 474.3,127.2 478.0,126.6 481.7,126.0 485.3,125.4 489.0,124.9 492.7,124.4 496.3,124.0 500.0,123.6" fill="none" stroke="#3a5ba0" stroke-width="2.5"/>
+  <text x="500" y="136" text-anchor="end" font-size="12" fill="#5b5b66" font-style="italic">displacement&#160;&#160;r = x &#8722; y</text>
+  <text x="286" y="42" font-size="12" fill="#5b5b66" font-style="italic">W(r)</text>
+  <text x="280" y="66" text-anchor="middle" font-size="11" fill="#d0693f">excitation (+)</text>
+  <text x="162" y="154" text-anchor="middle" font-size="11" fill="#4a6fb0">inhibition (&#8722;)</text>
+  <text x="398" y="154" text-anchor="middle" font-size="11" fill="#4a6fb0">inhibition (&#8722;)</text>
+</svg></div>
+<figcaption><b>Figure 2.</b> The coupling kernel as a function of displacement \(r=x-y\): a short-range excitatory Gaussian minus a broader inhibitory one (difference-of-Gaussians / Mexican hat). Distance lives here, in the kernel — not in the modes.</figcaption></figure>
+
+<p>A translation-invariant operator has a <em>universal</em> eigenbasis, independent of the
+particular kernel: the <strong>plane waves</strong>. A spatial mode is one such plane wave,
+\(e^{\,iq\cdot x}\) — a single global ripple washing across the entire sheet, its wavevector
+\(q=(q_1,q_2)\) fixing the ripple's wavelength and orientation (Figure&nbsp;3). This is the crux
+to internalise: <strong>a mode is a spatial <em>frequency</em>, not a neuron-to-neuron
+distance.</strong> There are exactly \(H\times W\) of them because writing the field in the
+plane-wave basis (the 2-D DFT) is a change of coordinates, not a compression.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 500 145" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs><linearGradient id="g0" x1="0" y1="0" x2="0.5" y2="0" spreadMethod="repeat">
+      <stop offset="0" stop-color="#2b2b3a"/><stop offset="0.5" stop-color="#e6e9f2"/><stop offset="1" stop-color="#2b2b3a"/>
+    </linearGradient><linearGradient id="g1" x1="0" y1="0" x2="0.2" y2="0" spreadMethod="repeat">
+      <stop offset="0" stop-color="#2b2b3a"/><stop offset="0.5" stop-color="#e6e9f2"/><stop offset="1" stop-color="#2b2b3a"/>
+    </linearGradient><linearGradient id="g2" x1="0" y1="0" x2="0.34" y2="0.34" spreadMethod="repeat">
+      <stop offset="0" stop-color="#2b2b3a"/><stop offset="0.5" stop-color="#e6e9f2"/><stop offset="1" stop-color="#2b2b3a"/>
+    </linearGradient><linearGradient id="g3" x1="0" y1="0" x2="0" y2="0.5" spreadMethod="repeat">
+      <stop offset="0" stop-color="#2b2b3a"/><stop offset="0.5" stop-color="#e6e9f2"/><stop offset="1" stop-color="#2b2b3a"/>
+    </linearGradient></defs>
+  <rect x="20" y="15" width="96" height="96" rx="6" fill="url(#g0)" stroke="#d2d6e0"/>
+      <text x="68" y="128" text-anchor="middle" font-size="12" fill="#26324a">q=(1,0)</text><rect x="136" y="15" width="96" height="96" rx="6" fill="url(#g1)" stroke="#d2d6e0"/>
+      <text x="184" y="128" text-anchor="middle" font-size="12" fill="#26324a">q=(3,0)</text><rect x="252" y="15" width="96" height="96" rx="6" fill="url(#g2)" stroke="#d2d6e0"/>
+      <text x="300" y="128" text-anchor="middle" font-size="12" fill="#26324a">q=(2,2)</text><rect x="368" y="15" width="96" height="96" rx="6" fill="url(#g3)" stroke="#d2d6e0"/>
+      <text x="416" y="128" text-anchor="middle" font-size="12" fill="#26324a">q=(0,1)</text>
+</svg></div>
+<figcaption><b>Figure 3.</b> Four spatial modes \(e^{\,iq\cdot x}\) on the sheet (light/dark = wave crest/trough). The wavevector \(q\) sets wavelength and orientation: low vs. high spatial frequency, horizontal, diagonal, vertical. A field is a weighted sum of all \(H\times W\) such modes.</figcaption></figure>
+
+<p>Now feed a single plane wave through the coupling. Because every neuron applies the same
+shifted stencil, the convolution returns the <em>same</em> plane wave, only rescaled by a
+complex number:</p>
+\[ W\circledast e^{\,iq\cdot x} \;=\; \hat W(q)\,e^{\,iq\cdot x}, \qquad
+   \hat W(q)=\sum_r W(r)\,e^{-\,iq\cdot r}. \]
+<p>This is the convolution theorem, and it is the whole game: in the mode basis the coupling is
+<strong>diagonal</strong>. Each mode is an eigenvector; its eigenvalue \(\hat W(q)\) is nothing
+but the Fourier transform of the kernel-over-displacement — the one and only place the
+neuron-to-neuron distances enter. Modes (frequency) and the kernel's footprint (distance) are
+Fourier <em>duals</em>: both indexed by \(H\times W\), which is exactly why they are so easy to
+conflate.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 600 165" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+  <defs><marker id="ah4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+    <path d="M0,0 L7,3 L0,6 Z" fill="#8891a8"/></marker></defs>
+  <g><rect x="20" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="31" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="42" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="53" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="20" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="31" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="42" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="53" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="20" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="31" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="42" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="53" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="20" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="31" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="42" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="53" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><text x="43" y="118" text-anchor="middle" font-size="11" fill="#26324a">s (field)</text></g>
+  <line x1="95" y1="70" x2="150" y2="70" stroke="#8891a8" stroke-width="1.6" marker-end="url(#ah4)"/><text x="122.5" y="62" text-anchor="middle" font-size="12" fill="#26324a">FFT</text>
+  <g><circle cx="178" cy="30" r="7" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="178" cy="52" r="7" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="178" cy="74" r="7" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="178" cy="96" r="7" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="178" cy="118" r="7" fill="#3a5ba0" fill-opacity="0.75"/><text x="178" y="150" text-anchor="middle" font-size="11" fill="#26324a">&#375;(q) modes</text></g>
+  <line x1="205" y1="70" x2="300" y2="70" stroke="#8891a8" stroke-width="1.6" marker-end="url(#ah4)"/><text x="252.5" y="62" text-anchor="middle" font-size="12" fill="#26324a">&#215; &#372;(q)</text><text x="252.5" y="88" text-anchor="middle" font-size="10" fill="#5b5b66">diagonal: modes independent</text>
+  <g><circle cx="330" cy="30" r="4" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="330" cy="52" r="9" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="330" cy="74" r="6" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="330" cy="96" r="10" fill="#3a5ba0" fill-opacity="0.75"/><circle cx="330" cy="118" r="5" fill="#3a5ba0" fill-opacity="0.75"/><text x="330" y="150" text-anchor="middle" font-size="11" fill="#26324a">&#372;(q)&#183;&#375;(q)</text></g>
+  <line x1="357" y1="70" x2="452" y2="70" stroke="#8891a8" stroke-width="1.6" marker-end="url(#ah4)"/><text x="404.5" y="62" text-anchor="middle" font-size="12" fill="#26324a">IFFT</text>
+  <g><rect x="478" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="489" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="500" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="511" y="42" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="478" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="489" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="500" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="511" y="53" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="478" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="489" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="500" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="511" y="64" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="478" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="489" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="500" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><rect x="511" y="75" width="8" height="8" rx="1.5" fill="#b9c0d6"/><text x="501" y="118" text-anchor="middle" font-size="11" fill="#26324a">s&#8242; = W&#8859;s</text></g>
+</svg></div>
+<figcaption><b>Figure 4.</b> Applying the coupling is not a per-mode operation. One forward FFT carries the field into the mode basis; there the coupling is a single pointwise multiply by the precomputed \(\hat W(q)\) (diagonal — modes never mix); one inverse FFT returns the result. In code: <code>ifft(&#372; .* fft(s))</code>.</figcaption></figure>
+
+<p>Diagonal means the modes <em>do not talk to each other</em>. The single coupled sheet
+decouples into \(H\times W\) independent scalar recurrences, one per mode,</p>
+\[ \hat z_q[n{+}1] = M(q)\,\hat z_q[n] + \hat u_q[n], \qquad
+   \boxed{\,M(q)=A + g\,\hat W(q)\,}. \]
+<p>Two payoffs follow. Analytically, each mode's fate is a single complex number \(M(q)\) — from
+which dispersion, group velocity and criticality all read off in closed form (§4).
+Computationally, all \(H\times W\) modes are advanced by two FFTs and an elementwise product per
+step — a batched cuFFT plus a pointwise multiply, which is the sheet's entire GPU story.</p>
+
+<h3>3.3 Insight 3 — the sheet is self-limiting</h3>
+<p>A purely linear recurrent sheet either decays or diverges. Two mechanisms keep it bounded
+<em>and</em> phase-meaningful. In the legacy <em>phase-only</em> mode
+(<code>saturating=true</code>) the state is projected to the unit circle each step, which
+discards magnitude. The default is <strong>spike transmission</strong>
+(<code>transmit=:spike</code>): each neuron transmits a fixed-magnitude event
+\(s_x = z_x/|z_x|\) (a unit phasor carrying its phase), so the coupling drive is
+hard-bounded, \(|\sum_y W_{xy}s_y|\le \sum_y|W_{xy}|\), giving a BIBO-stable leaky integrator
+<em>without</em> snapping the state — the magnitude \(|z|\) survives to encode local phase
+coherence. Sub-threshold neurons (\(|z|\approx 0\)) emit \(\approx 0\) through an
+\(\varepsilon\)-safe normalisation, a natural threshold.</p>
+
+<div class="bio">
+<h4>Biological motivation</h4>
+<p>Spike transmission is the more faithful abstraction: neurons communicate through
+fixed-size action potentials whose <em>timing</em> (here, phase) carries the message, not
+through graded membrane potentials broadcast to their neighbours. This is also what makes
+the model <em>self-limiting for free</em>, since a spike's magnitude is fixed by
+construction. The spike lattice is formally a Sakaguchi–Kuramoto system (§4.3).</p>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="dispersion">4. Dispersion: analysing the sheet like a solid</h2>
+
+<p>Section 3 reduced the coupled sheet to \(H\times W\) independent scalar recurrences, one per
+spatial mode \(q\), each governed by a single complex number \(M(q)=A+g\hat W(q)\). That is
+exactly the situation a solid-state physicist is in when analysing lattice vibrations: the
+crystal's translational symmetry decouples the atoms into independent <em>phonon</em> modes,
+and one reads a mode's behaviour off a <strong>dispersion relation</strong> \(\omega(q)\). We
+do the same here. Substituting a Bloch plane wave \(\hat z_q e^{i q\cdot x}\) into the
+continuous sheet gives the per-mode law directly, and from it every propagation property —
+how fast a disturbance travels, which wavelengths grow, and whether the sheet is stable —
+follows in closed form.</p>
+
+<div class="box">
+<p><strong>Two transmission modes — the distinction this section turns on.</strong> The sheet's
+coupling can carry one of two things between neurons, and the choice is what separates
+<em>exact</em> from <em>linearised</em> everywhere below.</p>
+<table>
+<tr><th></th><th>Potential mode (<code>:potential</code>)</th><th>Spike / phase mode (<code>:spike</code>)</th></tr>
+<tr><td>what a neuron transmits</td><td>its full state \(s_x=z_x\) (graded "potential")</td><td>a fixed-magnitude event \(s_x=z_x/|z_x|=e^{i\pi\theta_x}\) (phase carries the info)</td></tr>
+<tr><td>recurrence</td><td><strong>linear</strong> (LTI)</td><td><strong>nonlinear</strong> (per-cycle normalisation)</td></tr>
+<tr><td>Bloch waves are…</td><td>exact eigenmodes, at any amplitude</td><td>eigenmodes of the <em>linearised</em> dynamics only</td></tr>
+<tr><td>dispersion</td><td>exact &amp; global: \(\kappa(q)=k+g\hat W(q)\) (§4.1)</td><td>linearised about a coherent state: \(\nu(q')\), gain \(g/r\), delay&#8594;frustration (§4.4)</td></tr>
+<tr><td>stability</td><td>needs subcritical gain (\(\rho<1\))</td><td>BIBO-stable by construction</td></tr>
+<tr><td>discrete-SSM training</td><td>one parallel linear scan (§5)</td><td>DEQ fixed-point sweeps (§6)</td></tr>
+</table>
+<p>In short: the <strong>potential</strong> mode is the clean analytic object — a linear wave
+medium whose Bloch modes propagate with an exact dispersion, valid for any amplitude and any
+superposition. The <strong>spike</strong> mode is the biophysically faithful medium — neurons
+communicate by fixed action potentials whose timing is the phase — but being nonlinear it has
+no exact dispersion; §4.4 recovers a Bloch-mode band only by <em>linearising</em> about a
+phase-coherent reference state, with the coupling gain renormalised to \(g/r\) by the spike
+normalisation. The two are thus complementary, not interchangeable: potential gives the exact
+propagation law, spike gives its local, gain-adjusted counterpart in the regime where the
+neurons actually spike.</p>
+</div>
+
+<h3>4.1 The exact (potential-mode) dispersion</h3>
+<p>In the linear (potential-transmission) sheet, mode \(q\) obeys the scalar ODE
+\(\dot{\hat z}_q = \kappa(q)\,\hat z_q\), whose complex rate is the <strong>dispersion
+relation</strong></p>
+\[ \kappa(q) = k + g\,\hat W(q)
+   = \underbrace{\big(\lambda + g\,\mathrm{Re}\,\hat W(q)\big)}_{\textstyle \Gamma(q)\ \text{(growth)}}
+   \;+\; i\,\underbrace{\big(\omega + g\,\mathrm{Im}\,\hat W(q)\big)}_{\textstyle \Omega(q)\ \text{(band)}}. \]
+<p>Splitting \(\kappa\) into real and imaginary parts separates two physically distinct effects,
+because a mode evolves as \(\hat z_q(t)\propto e^{\Gamma(q)t}\,e^{i\Omega(q)t}\). The real part
+\(\Gamma(q)\) is a per-mode <em>growth or decay rate</em>: it is set by the DoG magnitude, and
+because a Mexican-hat kernel suppresses the uniform (\(q=0\)) mode while boosting an
+intermediate wavelength, \(\Gamma(q)\) is <em>band-pass</em> — it selects a preferred
+wavelength \(q^\ast\) (Fig. 5, left). The imaginary part \(\Omega(q)\) is the mode's
+<em>oscillation frequency</em>: it is the carrier \(\omega\) shifted by the conduction-delay
+phase, and its \(q\)-dependence <em>is</em> dispersion in the optical sense — different
+wavelengths rotate at different rates (Fig. 5, right).</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 520 210" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif"><line x1="48" y1="33.9" x2="238" y2="33.9" stroke="#c3c7d4" stroke-dasharray="3 3"/><line x1="143.0" y1="20" x2="143.0" y2="170" stroke="#eceef4"/><polyline points="48.0,75.0 49.5,75.0 51.0,75.0 52.5,75.0 53.9,75.0 55.4,75.0 56.9,75.0 58.4,75.0 59.9,74.9 61.4,74.9 62.8,74.8 64.3,74.8 65.8,74.7 67.3,74.6 68.8,74.5 70.3,74.4 71.8,74.2 73.2,74.1 74.7,73.9 76.2,73.6 77.7,73.4 79.2,73.0 80.7,72.7 82.1,72.3 83.6,71.8 85.1,71.2 86.6,70.6 88.1,69.9 89.6,69.1 91.0,68.2 92.5,67.3 94.0,66.2 95.5,65.0 97.0,63.7 98.5,62.3 100.0,60.7 101.4,59.1 102.9,57.3 104.4,55.4 105.9,53.4 107.4,51.4 108.9,49.3 110.3,47.3 111.8,45.4 113.3,43.7 114.8,42.3 116.3,41.5 117.8,41.4 119.2,42.2 120.7,44.1 122.2,47.3 123.7,52.0 125.2,58.2 126.7,65.9 128.2,75.0 129.6,85.2 131.1,96.2 132.6,107.5 134.1,118.7 135.6,129.1 137.1,138.4 138.5,146.1 140.0,151.9 141.5,155.4 143.0,156.6 144.5,155.4 146.0,151.9 147.5,146.1 148.9,138.4 150.4,129.1 151.9,118.7 153.4,107.5 154.9,96.2 156.4,85.2 157.8,75.0 159.3,65.9 160.8,58.2 162.3,52.0 163.8,47.3 165.3,44.1 166.8,42.2 168.2,41.4 169.7,41.5 171.2,42.3 172.7,43.7 174.2,45.4 175.7,47.3 177.1,49.3 178.6,51.4 180.1,53.4 181.6,55.4 183.1,57.3 184.6,59.1 186.0,60.7 187.5,62.3 189.0,63.7 190.5,65.0 192.0,66.2 193.5,67.3 195.0,68.2 196.4,69.1 197.9,69.9 199.4,70.6 200.9,71.2 202.4,71.8 203.9,72.3 205.3,72.7 206.8,73.0 208.3,73.4 209.8,73.6 211.3,73.9 212.8,74.1 214.2,74.2 215.7,74.4 217.2,74.5 218.7,74.6 220.2,74.7 221.7,74.8 223.2,74.8 224.6,74.9 226.1,74.9 227.6,75.0 229.1,75.0 230.6,75.0 232.1,75.0 233.5,75.0 235.0,75.0 236.5,75.0" fill="none" stroke="#d0693f" stroke-width="2.4"/><line x1="168.2" y1="20" x2="168.2" y2="170" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="1"/><text x="168.2" y="16" text-anchor="middle" font-size="11" fill="#d0693f">q*</text><text x="238" y="186" text-anchor="end" font-size="11" fill="#5b5b66">wavevector q</text><text x="42" y="28" text-anchor="end" font-size="11" fill="#d0693f">&#915;(q)</text><text x="143.0" y="29.9" font-size="9" fill="#9aa">0</text><text x="48" y="200" font-size="10.5" fill="#26324a">growth rate (gain band)</text><line x1="300" y1="118.0" x2="490" y2="118.0" stroke="#c3c7d4" stroke-dasharray="3 3"/><line x1="395.0" y1="20" x2="395.0" y2="170" stroke="#eceef4"/><polyline points="300.0,117.3 301.5,117.3 303.0,117.3 304.5,117.3 305.9,117.3 307.4,117.3 308.9,117.2 310.4,117.2 311.9,117.2 313.4,117.1 314.8,117.1 316.3,117.0 317.8,117.0 319.3,116.9 320.8,116.9 322.3,116.8 323.8,116.8 325.2,116.7 326.7,116.6 328.2,116.6 329.7,116.5 331.2,116.5 332.7,116.4 334.1,116.4 335.6,116.4 337.1,116.4 338.6,116.4 340.1,116.5 341.6,116.6 343.0,116.8 344.5,117.0 346.0,117.3 347.5,117.7 349.0,118.1 350.5,118.7 352.0,119.3 353.4,120.1 354.9,121.1 356.4,122.2 357.9,123.5 359.4,125.1 360.9,126.9 362.3,129.0 363.8,131.5 365.3,134.2 366.8,137.3 368.3,140.6 369.8,144.0 371.2,147.4 372.7,150.3 374.2,152.6 375.7,153.6 377.2,153.0 378.7,150.3 380.2,145.1 381.6,137.2 383.1,126.7 384.6,113.9 386.1,99.4 387.6,84.1 389.1,69.2 390.5,56.0 392.0,45.5 393.5,38.7 395.0,36.4 396.5,38.7 398.0,45.5 399.5,56.0 400.9,69.2 402.4,84.1 403.9,99.4 405.4,113.9 406.9,126.7 408.4,137.2 409.8,145.1 411.3,150.3 412.8,153.0 414.3,153.6 415.8,152.6 417.3,150.3 418.8,147.4 420.2,144.0 421.7,140.6 423.2,137.3 424.7,134.2 426.2,131.5 427.7,129.0 429.1,126.9 430.6,125.1 432.1,123.5 433.6,122.2 435.1,121.1 436.6,120.1 438.0,119.3 439.5,118.7 441.0,118.1 442.5,117.7 444.0,117.3 445.5,117.0 447.0,116.8 448.4,116.6 449.9,116.5 451.4,116.4 452.9,116.4 454.4,116.4 455.9,116.4 457.3,116.4 458.8,116.5 460.3,116.5 461.8,116.6 463.3,116.6 464.8,116.7 466.2,116.8 467.7,116.8 469.2,116.9 470.7,116.9 472.2,117.0 473.7,117.0 475.2,117.1 476.6,117.1 478.1,117.2 479.6,117.2 481.1,117.2 482.6,117.3 484.1,117.3 485.5,117.3 487.0,117.3 488.5,117.3" fill="none" stroke="#3a5ba0" stroke-width="2.4"/><text x="490" y="186" text-anchor="end" font-size="11" fill="#5b5b66">wavevector q</text><text x="294" y="28" text-anchor="end" font-size="11" fill="#3a5ba0">&#937;(q)&#8722;&#969;</text><text x="300" y="200" font-size="10.5" fill="#26324a">frequency band (dispersion)</text></svg></div>
+<figcaption><b>Figure 5.</b> The dispersion relation of the sheet, computed from a 1-D difference-of-Gaussians kernel with conduction delay. <b>Left:</b> the growth rate \(\Gamma(q)\) is band-pass — it is negative at the uniform mode \(q=0\) and peaks at a selected wavelength \(q^\ast\) (dashed), so that mode grows fastest. <b>Right:</b> the frequency band \(\Omega(q)-\omega\) bends with \(q\): the carrier is dispersive.</figcaption></figure>
+
+<p>The discrete per-step multiplier of §3.2 is the one-period exponential of this rate,
+\(M(q)=e^{\kappa(q)T}=A+g\hat W(q)\), so the discrete SSM and the continuous dispersion are two
+views of the same complex number.</p>
+
+<h3>4.2 Group velocity: how fast information travels</h3>
+<p>A single Fourier mode is a standing ripple; <em>information</em> travels as a localised
+<strong>wave packet</strong>, a narrow band of modes around some carrier \(q_0\). Two speeds
+then matter (Fig. 6). The individual crests move at the <strong>phase velocity</strong>
+\(v_p=-\Omega(q_0)/q_0\); the packet's envelope — where the energy and the signal are — moves at
+the <strong>group velocity</strong></p>
+\[ v_g = -\,\frac{d\Omega}{dq}\bigg|_{q_0}, \]
+<p>the local slope of the dispersion curve of Fig. 5 (right). Because \(\Omega(q)\) is curved,
+\(v_g\) depends on \(q_0\): different wavelengths carry information at different speeds, so an
+extended pattern spreads as it propagates. The sign follows the sheet's \(e^{+i\Omega t}\)
+convention; a flat \(\Omega\) would give a non-dispersive medium in which all wavelengths keep
+step.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 500 200" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <polyline points="20.0,69.7 21.5,69.7 22.9,69.6 24.4,69.6 25.9,69.6 27.4,69.5 28.8,69.5 30.3,69.4 31.8,69.4 33.2,69.3 34.7,69.3 36.2,69.2 37.7,69.2 39.1,69.1 40.6,69.0 42.1,68.9 43.5,68.9 45.0,68.8 46.5,68.7 48.0,68.6 49.4,68.5 50.9,68.3 52.4,68.2 53.8,68.1 55.3,68.0 56.8,67.8 58.3,67.7 59.7,67.5 61.2,67.3 62.7,67.1 64.1,67.0 65.6,66.8 67.1,66.5 68.6,66.3 70.0,66.1 71.5,65.9 73.0,65.6 74.4,65.3 75.9,65.1 77.4,64.8 78.9,64.5 80.3,64.2 81.8,63.9 83.3,63.5 84.7,63.2 86.2,62.8 87.7,62.5 89.2,62.1 90.6,61.7 92.1,61.3 93.6,60.9 95.1,60.5 96.5,60.0 98.0,59.6 99.5,59.1 100.9,58.7 102.4,58.2 103.9,57.7 105.4,57.2 106.8,56.7 108.3,56.2 109.8,55.7 111.2,55.2 112.7,54.6 114.2,54.1 115.7,53.6 117.1,53.0 118.6,52.5 120.1,52.0 121.5,51.4 123.0,50.9 124.5,50.3 126.0,49.8 127.4,49.3 128.9,48.7 130.4,48.2 131.8,47.7 133.3,47.2 134.8,46.7 136.3,46.2 137.7,45.7 139.2,45.3 140.7,44.8 142.1,44.4 143.6,44.0 145.1,43.6 146.6,43.2 148.0,42.8 149.5,42.5 151.0,42.1 152.4,41.8 153.9,41.5 155.4,41.3 156.9,41.0 158.3,40.8 159.8,40.6 161.3,40.5 162.7,40.3 164.2,40.2 165.7,40.1 167.2,40.0 168.6,40.0 170.1,40.0 171.6,40.0 173.0,40.1 174.5,40.1 176.0,40.2 177.5,40.3 178.9,40.5 180.4,40.7 181.9,40.9 183.3,41.1 184.8,41.3 186.3,41.6 187.8,41.9 189.2,42.2 190.7,42.5 192.2,42.9 193.6,43.2 195.1,43.6 196.6,44.0 198.1,44.5 199.5,44.9 201.0,45.3 202.5,45.8 203.9,46.3 205.4,46.8 206.9,47.3 208.4,47.8 209.8,48.3 211.3,48.8 212.8,49.3 214.2,49.9 215.7,50.4 217.2,51.0 218.7,51.5 220.1,52.0 221.6,52.6 223.1,53.1 224.5,53.7 226.0,54.2 227.5,54.7 229.0,55.2 230.4,55.8 231.9,56.3 233.4,56.8 234.8,57.3 236.3,57.8 237.8,58.3 239.3,58.7 240.7,59.2 242.2,59.6 243.7,60.1 245.2,60.5 246.6,60.9 248.1,61.4 249.6,61.8 251.0,62.1 252.5,62.5 254.0,62.9 255.5,63.2 256.9,63.6 258.4,63.9 259.9,64.2 261.3,64.5 262.8,64.8 264.3,65.1 265.8,65.4 267.2,65.6 268.7,65.9 270.2,66.1 271.6,66.4 273.1,66.6 274.6,66.8 276.1,67.0 277.5,67.2 279.0,67.3 280.5,67.5 281.9,67.7 283.4,67.8 284.9,68.0 286.4,68.1 287.8,68.2 289.3,68.4 290.8,68.5 292.2,68.6 293.7,68.7 295.2,68.8 296.7,68.9 298.1,68.9 299.6,69.0 301.1,69.1 302.5,69.2 304.0,69.2 305.5,69.3 307.0,69.3 308.4,69.4 309.9,69.4 311.4,69.5 312.8,69.5 314.3,69.6 315.8,69.6 317.3,69.6 318.7,69.7 320.2,69.7 321.7,69.7 323.1,69.7 324.6,69.8 326.1,69.8 327.6,69.8 329.0,69.8 330.5,69.8 332.0,69.9 333.4,69.9 334.9,69.9 336.4,69.9 337.9,69.9 339.3,69.9 340.8,69.9 342.3,69.9 343.7,69.9 345.2,69.9 346.7,69.9 348.2,70.0 349.6,70.0 351.1,70.0 352.6,70.0 354.0,70.0 355.5,70.0 357.0,70.0 358.5,70.0 359.9,70.0 361.4,70.0 362.9,70.0 364.3,70.0 365.8,70.0 367.3,70.0 368.8,70.0 370.2,70.0 371.7,70.0 373.2,70.0 374.6,70.0 376.1,70.0 377.6,70.0 379.1,70.0 380.5,70.0 382.0,70.0 383.5,70.0 384.9,70.0 386.4,70.0 387.9,70.0 389.4,70.0 390.8,70.0 392.3,70.0 393.8,70.0 395.3,70.0 396.7,70.0 398.2,70.0 399.7,70.0 401.1,70.0 402.6,70.0 404.1,70.0 405.6,70.0 407.0,70.0 408.5,70.0 410.0,70.0 411.4,70.0 412.9,70.0 414.4,70.0 415.9,70.0 417.3,70.0 418.8,70.0 420.3,70.0 421.7,70.0 423.2,70.0 424.7,70.0 426.2,70.0 427.6,70.0 429.1,70.0 430.6,70.0 432.0,70.0 433.5,70.0 435.0,70.0 436.5,70.0 437.9,70.0 439.4,70.0 440.9,70.0 442.3,70.0 443.8,70.0 445.3,70.0 446.8,70.0 448.2,70.0 449.7,70.0 451.2,70.0 452.6,70.0 454.1,70.0 455.6,70.0 457.1,70.0 458.5,70.0 460.0,70.0" fill="none" stroke="#c9a15a" stroke-width="1.4" stroke-dasharray="4 3"/><polyline points="20.0,70.3 21.5,70.3 22.9,70.4 24.4,70.4 25.9,70.4 27.4,70.5 28.8,70.5 30.3,70.6 31.8,70.6 33.2,70.7 34.7,70.7 36.2,70.8 37.7,70.8 39.1,70.9 40.6,71.0 42.1,71.1 43.5,71.1 45.0,71.2 46.5,71.3 48.0,71.4 49.4,71.5 50.9,71.7 52.4,71.8 53.8,71.9 55.3,72.0 56.8,72.2 58.3,72.3 59.7,72.5 61.2,72.7 62.7,72.9 64.1,73.0 65.6,73.2 67.1,73.5 68.6,73.7 70.0,73.9 71.5,74.1 73.0,74.4 74.4,74.7 75.9,74.9 77.4,75.2 78.9,75.5 80.3,75.8 81.8,76.1 83.3,76.5 84.7,76.8 86.2,77.2 87.7,77.5 89.2,77.9 90.6,78.3 92.1,78.7 93.6,79.1 95.1,79.5 96.5,80.0 98.0,80.4 99.5,80.9 100.9,81.3 102.4,81.8 103.9,82.3 105.4,82.8 106.8,83.3 108.3,83.8 109.8,84.3 111.2,84.8 112.7,85.4 114.2,85.9 115.7,86.4 117.1,87.0 118.6,87.5 120.1,88.0 121.5,88.6 123.0,89.1 124.5,89.7 126.0,90.2 127.4,90.7 128.9,91.3 130.4,91.8 131.8,92.3 133.3,92.8 134.8,93.3 136.3,93.8 137.7,94.3 139.2,94.7 140.7,95.2 142.1,95.6 143.6,96.0 145.1,96.4 146.6,96.8 148.0,97.2 149.5,97.5 151.0,97.9 152.4,98.2 153.9,98.5 155.4,98.7 156.9,99.0 158.3,99.2 159.8,99.4 161.3,99.5 162.7,99.7 164.2,99.8 165.7,99.9 167.2,100.0 168.6,100.0 170.1,100.0 171.6,100.0 173.0,99.9 174.5,99.9 176.0,99.8 177.5,99.7 178.9,99.5 180.4,99.3 181.9,99.1 183.3,98.9 184.8,98.7 186.3,98.4 187.8,98.1 189.2,97.8 190.7,97.5 192.2,97.1 193.6,96.8 195.1,96.4 196.6,96.0 198.1,95.5 199.5,95.1 201.0,94.7 202.5,94.2 203.9,93.7 205.4,93.2 206.9,92.7 208.4,92.2 209.8,91.7 211.3,91.2 212.8,90.7 214.2,90.1 215.7,89.6 217.2,89.0 218.7,88.5 220.1,88.0 221.6,87.4 223.1,86.9 224.5,86.3 226.0,85.8 227.5,85.3 229.0,84.8 230.4,84.2 231.9,83.7 233.4,83.2 234.8,82.7 236.3,82.2 237.8,81.7 239.3,81.3 240.7,80.8 242.2,80.4 243.7,79.9 245.2,79.5 246.6,79.1 248.1,78.6 249.6,78.2 251.0,77.9 252.5,77.5 254.0,77.1 255.5,76.8 256.9,76.4 258.4,76.1 259.9,75.8 261.3,75.5 262.8,75.2 264.3,74.9 265.8,74.6 267.2,74.4 268.7,74.1 270.2,73.9 271.6,73.6 273.1,73.4 274.6,73.2 276.1,73.0 277.5,72.8 279.0,72.7 280.5,72.5 281.9,72.3 283.4,72.2 284.9,72.0 286.4,71.9 287.8,71.8 289.3,71.6 290.8,71.5 292.2,71.4 293.7,71.3 295.2,71.2 296.7,71.1 298.1,71.1 299.6,71.0 301.1,70.9 302.5,70.8 304.0,70.8 305.5,70.7 307.0,70.7 308.4,70.6 309.9,70.6 311.4,70.5 312.8,70.5 314.3,70.4 315.8,70.4 317.3,70.4 318.7,70.3 320.2,70.3 321.7,70.3 323.1,70.3 324.6,70.2 326.1,70.2 327.6,70.2 329.0,70.2 330.5,70.2 332.0,70.1 333.4,70.1 334.9,70.1 336.4,70.1 337.9,70.1 339.3,70.1 340.8,70.1 342.3,70.1 343.7,70.1 345.2,70.1 346.7,70.1 348.2,70.0 349.6,70.0 351.1,70.0 352.6,70.0 354.0,70.0 355.5,70.0 357.0,70.0 358.5,70.0 359.9,70.0 361.4,70.0 362.9,70.0 364.3,70.0 365.8,70.0 367.3,70.0 368.8,70.0 370.2,70.0 371.7,70.0 373.2,70.0 374.6,70.0 376.1,70.0 377.6,70.0 379.1,70.0 380.5,70.0 382.0,70.0 383.5,70.0 384.9,70.0 386.4,70.0 387.9,70.0 389.4,70.0 390.8,70.0 392.3,70.0 393.8,70.0 395.3,70.0 396.7,70.0 398.2,70.0 399.7,70.0 401.1,70.0 402.6,70.0 404.1,70.0 405.6,70.0 407.0,70.0 408.5,70.0 410.0,70.0 411.4,70.0 412.9,70.0 414.4,70.0 415.9,70.0 417.3,70.0 418.8,70.0 420.3,70.0 421.7,70.0 423.2,70.0 424.7,70.0 426.2,70.0 427.6,70.0 429.1,70.0 430.6,70.0 432.0,70.0 433.5,70.0 435.0,70.0 436.5,70.0 437.9,70.0 439.4,70.0 440.9,70.0 442.3,70.0 443.8,70.0 445.3,70.0 446.8,70.0 448.2,70.0 449.7,70.0 451.2,70.0 452.6,70.0 454.1,70.0 455.6,70.0 457.1,70.0 458.5,70.0 460.0,70.0" fill="none" stroke="#c9a15a" stroke-width="1.4" stroke-dasharray="4 3"/><polyline points="20.0,69.7 21.5,69.7 22.9,69.7 24.4,69.6 25.9,69.7 27.4,69.7 28.8,69.7 30.3,69.8 31.8,69.8 33.2,69.9 34.7,70.0 36.2,70.2 37.7,70.3 39.1,70.5 40.6,70.6 42.1,70.8 43.5,71.0 45.0,71.2 46.5,71.3 48.0,71.4 49.4,71.5 50.9,71.6 52.4,71.6 53.8,71.6 55.3,71.5 56.8,71.3 58.3,71.0 59.7,70.7 61.2,70.4 62.7,69.9 64.1,69.4 65.6,68.9 67.1,68.3 68.6,67.7 70.0,67.1 71.5,66.5 73.0,65.9 74.4,65.5 75.9,65.1 77.4,64.8 78.9,64.7 80.3,64.7 81.8,64.9 83.3,65.3 84.7,65.8 86.2,66.6 87.7,67.5 89.2,68.7 90.6,70.0 92.1,71.4 93.6,72.9 95.1,74.4 96.5,76.0 98.0,77.6 99.5,79.0 100.9,80.3 102.4,81.4 103.9,82.2 105.4,82.8 106.8,83.0 108.3,82.8 109.8,82.2 111.2,81.2 112.7,79.8 114.2,78.0 115.7,75.9 117.1,73.4 118.6,70.7 120.1,67.8 121.5,64.8 123.0,61.7 124.5,58.7 126.0,55.8 127.4,53.3 128.9,51.0 130.4,49.2 131.8,47.9 133.3,47.2 134.8,47.1 136.3,47.7 137.7,48.9 139.2,50.7 140.7,53.2 142.1,56.3 143.6,59.8 145.1,63.7 146.6,68.0 148.0,72.4 149.5,76.9 151.0,81.2 152.4,85.4 153.9,89.2 155.4,92.6 156.9,95.4 158.3,97.5 159.8,98.9 161.3,99.5 162.7,99.3 164.2,98.3 165.7,96.5 167.2,94.0 168.6,90.8 170.1,87.0 171.6,82.7 173.0,78.1 174.5,73.3 176.0,68.4 177.5,63.6 178.9,59.0 180.4,54.8 181.9,51.1 183.3,47.9 184.8,45.3 186.3,43.5 187.8,42.5 189.2,42.2 190.7,42.7 192.2,43.9 193.6,45.8 195.1,48.3 196.6,51.4 198.1,54.8 199.5,58.6 201.0,62.5 202.5,66.5 203.9,70.4 205.4,74.2 206.9,77.7 208.4,80.8 209.8,83.5 211.3,85.7 212.8,87.4 214.2,88.5 215.7,89.0 217.2,89.0 218.7,88.4 220.1,87.4 221.6,86.0 223.1,84.2 224.5,82.1 226.0,79.8 227.5,77.4 229.0,75.0 230.4,72.6 231.9,70.2 233.4,68.1 234.8,66.1 236.3,64.4 237.8,63.0 239.3,61.9 240.7,61.1 242.2,60.6 243.7,60.5 245.2,60.6 246.6,61.0 248.1,61.6 249.6,62.3 251.0,63.3 252.5,64.3 254.0,65.4 255.5,66.5 256.9,67.6 258.4,68.7 259.9,69.7 261.3,70.6 262.8,71.4 264.3,72.1 265.8,72.6 267.2,73.0 268.7,73.3 270.2,73.4 271.6,73.5 273.1,73.4 274.6,73.2 276.1,73.0 277.5,72.7 279.0,72.3 280.5,72.0 281.9,71.6 283.4,71.2 284.9,70.8 286.4,70.5 287.8,70.2 289.3,69.9 290.8,69.6 292.2,69.4 293.7,69.3 295.2,69.2 296.7,69.1 298.1,69.1 299.6,69.1 301.1,69.1 302.5,69.2 304.0,69.2 305.5,69.3 307.0,69.4 308.4,69.5 309.9,69.6 311.4,69.7 312.8,69.8 314.3,69.9 315.8,70.0 317.3,70.0 318.7,70.1 320.2,70.1 321.7,70.1 323.1,70.2 324.6,70.2 326.1,70.2 327.6,70.2 329.0,70.2 330.5,70.2 332.0,70.1 333.4,70.1 334.9,70.1 336.4,70.1 337.9,70.1 339.3,70.1 340.8,70.0 342.3,70.0 343.7,70.0 345.2,70.0 346.7,70.0 348.2,70.0 349.6,70.0 351.1,70.0 352.6,70.0 354.0,70.0 355.5,70.0 357.0,70.0 358.5,70.0 359.9,70.0 361.4,70.0 362.9,70.0 364.3,70.0 365.8,70.0 367.3,70.0 368.8,70.0 370.2,70.0 371.7,70.0 373.2,70.0 374.6,70.0 376.1,70.0 377.6,70.0 379.1,70.0 380.5,70.0 382.0,70.0 383.5,70.0 384.9,70.0 386.4,70.0 387.9,70.0 389.4,70.0 390.8,70.0 392.3,70.0 393.8,70.0 395.3,70.0 396.7,70.0 398.2,70.0 399.7,70.0 401.1,70.0 402.6,70.0 404.1,70.0 405.6,70.0 407.0,70.0 408.5,70.0 410.0,70.0 411.4,70.0 412.9,70.0 414.4,70.0 415.9,70.0 417.3,70.0 418.8,70.0 420.3,70.0 421.7,70.0 423.2,70.0 424.7,70.0 426.2,70.0 427.6,70.0 429.1,70.0 430.6,70.0 432.0,70.0 433.5,70.0 435.0,70.0 436.5,70.0 437.9,70.0 439.4,70.0 440.9,70.0 442.3,70.0 443.8,70.0 445.3,70.0 446.8,70.0 448.2,70.0 449.7,70.0 451.2,70.0 452.6,70.0 454.1,70.0 455.6,70.0 457.1,70.0 458.5,70.0 460.0,70.0" fill="none" stroke="None" stroke-width="2"/>
+ <text x="20" y="18" font-size="11" fill="#5b5b66">a wave packet = carrier (v_p) under an envelope (v_g)</text>
+ <line x1="130" y1="120" x2="180" y2="120" stroke="#3a5ba0" stroke-width="2" marker-end="url(#a6)"/>
+ <text x="155" y="136" text-anchor="middle" font-size="11" fill="#3a5ba0">v_p = &#8722;&#937;/q  (carrier crest)</text>
+ <line x1="130" y1="158" x2="230" y2="158" stroke="#c9a15a" stroke-width="2" marker-end="url(#a6b)"/>
+ <text x="180" y="174" text-anchor="middle" font-size="11" fill="#b8862f">v_g = &#8722;d&#937;/dq  (envelope, information)</text>
+ <defs>
+  <marker id="a6" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3a5ba0"/></marker>
+  <marker id="a6b" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#c9a15a"/></marker>
+ </defs>
+</svg></div>
+<figcaption><b>Figure 6.</b> Phase vs. group velocity. A wave packet is a fast carrier (blue, phase velocity \(v_p=-\Omega/q\)) under a slowly-moving envelope (gold, group velocity \(v_g=-d\Omega/dq\)). The envelope carries the information; its speed is the slope of the dispersion curve, so a curved band disperses the packet.</figcaption></figure>
+
+<h3>4.3 Criticality as a spectral radius</h3>
+<p>Stability is not something to discover empirically during training — it is an eigenvalue
+condition on the very same \(M(q)\). Because each mode is scaled by \(M(q)\) every cycle, the
+whole sheet's fate is governed by the <strong>spectral radius</strong></p>
+\[ \rho \;=\; \max_q\,|M(q)| \;=\; \max_q\,|A+g\,\hat W(q)|. \]
+<p>If \(\rho<1\) every mode decays and activity extinguishes; if \(\rho>1\) the fastest-growing
+mode diverges; and \(\rho\approx 1\) is the marginal, <em>near-critical</em> regime in which the
+selected wavelength \(q^\ast\) propagates without dying or blowing up (Fig. 7). Sweeping the
+coupling gain \(g\) moves \(\rho\) smoothly through 1 at a well-defined \(g_{\text{crit}}\), so
+"tune the sheet to criticality" is a one-line bisection, not a heuristic. The
+<code>dispersion()</code> routine returns \(M(q)\), \(\hat W(q)\), \(\Gamma(q)\) and \(\rho\)
+directly.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 540 205" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <rect x="56" y="20" width="420" height="62.7" fill="#c1392b" fill-opacity="0.05"/>
+ <rect x="56" y="82.7" width="420" height="87.3" fill="#2e7d32" fill-opacity="0.06"/>
+ <line x1="56" y1="82.7" x2="476" y2="82.7" stroke="#8891a8" stroke-dasharray="5 4"/>
+ <text x="472" y="76.7" text-anchor="end" font-size="11" fill="#8891a8">&#961; = 1 (marginal)</text>
+ <polyline points="56.0,170.0 59.5,168.9 63.1,167.7 66.6,166.6 70.1,165.4 73.6,164.3 77.2,163.1 80.7,162.0 84.2,160.8 87.8,159.7 91.3,158.5 94.8,157.4 98.4,156.2 101.9,155.1 105.4,153.9 108.9,152.8 112.5,151.6 116.0,150.5 119.5,149.3 123.1,148.1 126.6,147.0 130.1,145.8 133.6,144.7 137.2,143.5 140.7,142.3 144.2,141.2 147.8,140.0 151.3,138.8 154.8,137.7 158.4,136.5 161.9,135.3 165.4,134.2 168.9,133.0 172.5,131.8 176.0,130.7 179.5,129.5 183.1,128.3 186.6,127.1 190.1,126.0 193.6,124.8 197.2,123.6 200.7,122.4 204.2,121.2 207.8,120.1 211.3,118.9 214.8,117.7 218.4,116.5 221.9,115.3 225.4,114.2 228.9,113.0 232.5,111.8 236.0,110.6 239.5,109.4 243.1,108.2 246.6,107.0 250.1,105.9 253.6,104.7 257.2,103.5 260.7,102.3 264.2,101.1 267.8,99.9 271.3,98.7 274.8,97.5 278.4,96.3 281.9,95.1 285.4,93.9 288.9,92.7 292.5,91.5 296.0,90.3 299.5,89.1 303.1,87.9 306.6,86.7 310.1,85.5 313.6,84.3 317.2,83.1 320.7,81.9 324.2,80.7 327.8,79.5 331.3,78.3 334.8,77.1 338.4,75.9 341.9,74.7 345.4,73.5 348.9,72.3 352.5,71.1 356.0,69.9 359.5,68.7 363.1,67.5 366.6,66.2 370.1,65.0 373.6,63.8 377.2,62.6 380.7,61.4 384.2,60.2 387.8,59.0 391.3,57.8 394.8,56.5 398.4,55.3 401.9,54.1 405.4,52.9 408.9,51.7 412.5,50.5 416.0,49.2 419.5,48.0 423.1,46.8 426.6,45.6 430.1,44.4 433.6,43.1 437.2,41.9 440.7,40.7 444.2,39.5 447.8,38.2 451.3,37.0 454.8,35.8 458.4,34.6 461.9,33.3 465.4,32.1 468.9,30.9 472.5,29.7 476.0,28.4" fill="none" stroke="#3a5ba0" stroke-width="2.4"/>
+ <line x1="318.5" y1="20" x2="318.5" y2="170" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="1"/>
+ <text x="318.5" y="16" text-anchor="middle" font-size="11" fill="#d0693f">g_crit</text>
+ <text x="126" y="162" font-size="11" fill="#2e7d32">subcritical: activity decays</text>
+ <text x="468" y="36" text-anchor="end" font-size="11" fill="#c1392b">supercritical: runaway</text>
+ <text x="476" y="188" text-anchor="end" font-size="11" fill="#5b5b66">coupling gain g</text>
+ <text x="48" y="28" text-anchor="end" font-size="11" fill="#3a5ba0">&#961;(g)=max|M(q)|</text>
+</svg></div>
+<figcaption><b>Figure 7.</b> Criticality is a knob. The spectral radius \(\rho(g)=\max_q|M(q)|\) rises monotonically with the coupling gain \(g\) and crosses \(\rho=1\) at a sharp \(g_{\text{crit}}\): subcritical (green) activity decays, supercritical (red) runs away, and the edge is where a selected wave persists.</figcaption></figure>
+
+<div class="bio">
+<h4>Biological motivation</h4>
+<p>Cortex is thought to operate near a critical point, where neuronal avalanches follow
+power-law statistics and dynamic range is maximised <span class="small">[Beggs &amp; Plenz
+2003]</span>. Here criticality is literally \(\rho\to 1\): the marginal spectral radius is the
+computational sweet spot between a silent (\(\rho<1\)) and a saturated (\(\rho>1\)) sheet.</p>
+</div>
+
+<h3>4.4 Spike mode: the Kuramoto linearisation</h3>
+<p>Everything so far is exact for the <em>linear</em> (potential) sheet. With spike
+transmission the coupling acts on the unit-magnitude events \(s_x=e^{i\pi\theta_x}\), so the
+phases obey the dynamics of a lattice of coupled phase oscillators — formally a
+<strong>Sakaguchi–Kuramoto</strong> model <span class="small">[Kuramoto 1975; Sakaguchi &amp;
+Kuramoto 1986]</span>, in which the conduction delay reappears as a coupling
+<em>frustration</em> \(\psi_m=-\omega|m|/c\) rather than as an explicit time lag (Fig. 8).</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 500 215" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <defs><marker id="a8" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3a5ba0"/></marker></defs>
+ <circle cx="250" cy="105" r="78" fill="none" stroke="#eceef4" stroke-width="10"/>
+ <circle cx="328.0" cy="105.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="328.0" y1="105.0" x2="343.0" y2="105.0" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="320.3" cy="138.8" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="320.3" y1="138.8" x2="329.6" y2="127.1" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="298.6" cy="166.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="298.6" y1="166.0" x2="295.3" y2="151.4" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="267.4" cy="181.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="267.4" y1="181.0" x2="253.8" y2="174.5" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="232.6" cy="181.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="232.6" y1="181.0" x2="219.1" y2="187.6" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="201.4" cy="166.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="201.4" y1="166.0" x2="198.0" y2="180.6" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="179.7" cy="138.8" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="179.7" y1="138.8" x2="189.1" y2="150.6" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="172.0" cy="105.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="172.0" y1="105.0" x2="187.0" y2="105.0" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="179.7" cy="71.2" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="179.7" y1="71.2" x2="189.1" y2="59.4" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="201.4" cy="44.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="201.4" y1="44.0" x2="198.0" y2="29.4" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="232.6" cy="29.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="232.6" y1="29.0" x2="219.1" y2="22.4" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="267.4" cy="29.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="267.4" y1="29.0" x2="253.8" y2="35.5" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="298.6" cy="44.0" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="298.6" y1="44.0" x2="295.3" y2="58.6" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/><circle cx="320.3" cy="71.2" r="12" fill="#eef1f8" stroke="#c3c7d4"/><line x1="320.3" y1="71.2" x2="329.6" y2="82.9" stroke="#3a5ba0" stroke-width="2.2" marker-end="url(#a8)"/>
+ <text x="250" y="109" text-anchor="middle" font-size="11" fill="#5b5b66">phase gradient</text>
+ <text x="250" y="205" text-anchor="middle" font-size="11" fill="#26324a">spike coupling on a ring: a Sakaguchi&#8211;Kuramoto lattice; the conduction delay becomes a coupling frustration &#968; = &#8722;&#969;|m|/c</text>
+</svg></div>
+<figcaption><b>Figure 8.</b> Spike transmission makes the sheet a Sakaguchi–Kuramoto lattice: each site is a phase oscillator (arrow), coupled to its neighbours through the delay-induced frustration. A smooth phase gradient around the ring is a travelling wave.</figcaption></figure>
+
+<p>This is nonlinear (the emit step is a projection to the unit circle), so there is no exact
+dispersion. But linearising a small perturbation about a phase-coherent reference state of
+amplitude \(r=g\,\hat D(0)/|\lambda|\) yields a closed-form <strong>phase-mode band</strong></p>
+\[ \nu(q') \;=\; |\lambda|\left(\frac{\hat D(q')}{\hat D(0)} - 1\right), \]
+<p>with \(\hat D\) the delay-dressed coupling transform and an effective gain \(g/r\). It plays
+the role of \(\Gamma(q)\) for the spike sheet, and matches direct simulation of the spike
+lattice to \(\sim 10^{-4}\). So the two modes are complementary: the potential sheet has an
+<em>exact</em> dispersion, the spike sheet an <em>exact linearisation</em> about coherence.</p>
+
+<p><strong>What "coherence" means here.</strong> The reference state is phase-<em>locked</em>,
+not uniform: every neuron rotates at the shared carrier \(\omega\) with <em>steady relative
+phases</em>, so the spatial pattern is a rigidly-rotating shape — for the sheet, a steady
+travelling wave with a constant phase gradient. How strongly the population is locked is the
+mean-field order parameter of magnitude \(r\) (large \(=\) strongly coherent, \(r\to 0 =\)
+scattered/incoherent); here \(r=g\,\hat D(0)/|\lambda|\) is the amplitude the locked state
+settles to as coupling balances decay. The linearisation holds only for small phase deviations
+\(\delta\theta\) about this locked pattern <em>and</em> while \(r\) stays bounded away from
+zero — an incoherent sheet has no mean field to perturb about, the effective gain \(g/r\)
+diverges, and the band is meaningless. So \(\nu(q')\) describes ripples riding on an organised
+wave, not a desynchronised sheet.</p>
+
+<h3>4.5 Read-out phase shift during propagation</h3>
+<p>The dispersion also answers a question one actually asks of a phasor network: as a wave
+travels from where it is stamped to where it is read, how does its phase shift? Driving the
+sheet at the carrier and reading a point source at separation \(d\) gives a Green's function
+whose argument is precisely that read-out phase shift,</p>
+\[ \Delta\phi(d) \;=\; \arg\!\Big[\,\textstyle\sum_q \dfrac{e^{iqd}}{-\big(\lambda + g\,\hat W(q)\big)}\Big]. \]
+<p>Near criticality the sum is dominated by the selected mode, so \(\Delta\phi(d)\approx q^\ast d\):
+the read-out phase advances <em>linearly</em> with distance at the dominant wavevector (Fig. 9).
+The sheet is thus a computable, distance-dependent phase-delay line — exact for the potential
+mode, and the \(g/r\) linearisation for the spike mode. This is the linearly-readable channel;
+the interference <em>intensity</em> lives in \(|z|^2\), a square law no linear read-out can
+recover (§8).</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 540 205" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <polyline points="56.0,21.9 74.3,28.3 92.5,34.7 110.8,41.0 129.0,47.4 147.3,53.8 165.6,60.1 183.8,66.5 202.1,72.9 220.3,79.3 238.6,85.6 256.9,92.0 275.1,98.4 293.4,104.7 311.7,111.1 329.9,117.5 348.2,123.9 366.4,130.2 384.7,136.6 403.0,143.0 421.2,149.3 439.5,155.7 457.7,162.1 476.0,168.5" fill="none" stroke="#c3c7d4" stroke-width="1.6"/>
+ <polyline points="56.0,21.3 74.3,30.8 92.5,35.5 110.8,39.3 129.0,45.1 147.3,55.7 165.6,61.3 183.8,65.4 202.1,70.9 220.3,80.4 238.6,86.9 256.9,91.4 275.1,96.6 293.4,105.3 311.7,112.4 329.9,117.2 348.2,122.4 366.4,130.3 384.7,137.8 403.0,143.0 421.2,148.2 439.5,155.4 457.7,163.2 476.0,168.7" fill="none" stroke="#3a5ba0" stroke-width="2.4"/>
+ <text x="476" y="188" text-anchor="end" font-size="11" fill="#5b5b66">read-out distance d</text>
+ <text x="48" y="28" text-anchor="end" font-size="11" fill="#3a5ba0">&#916;&#966;(d)</text>
+ <text x="476.0" y="160.5" text-anchor="end" font-size="10.5" fill="#9aa">slope &#8776; q*</text>
+</svg></div>
+<figcaption><b>Figure 9.</b> Read-out phase shift \(\Delta\phi(d)\) versus propagation distance \(d\), from the sheet&#8217;s Green function (blue) against its linear fit (grey): the read-out phase advances essentially linearly with distance, at a slope set by the dominant propagating wavevector &#8212; the sheet is a phase-delay line.</figcaption></figure>
+
+<h2 id="training">5. Training on the discrete SSM (not the ODE)</h2>
+
+<p>The sheet has two evaluation tiers. <strong>Tier&nbsp;2</strong> is the continuous ODE
+\(\dot z = kz + g(W\circledast s)\), integrated by an adaptive solver
+(<code>Tsit5</code>) with <code>BacksolveAdjoint</code>+<code>ZygoteVJP</code> for gradients.
+<strong>Tier&nbsp;1</strong> is the discrete per-cycle recurrence of §3, evaluated as a
+causal convolution / parallel scan. Although the ODE is the "ground-truth" continuous
+dynamics (the two agree to field-similarity 0.997–0.9997), it is <em>not</em> the trainer —
+the discrete SSM is, for two reasons.</p>
+
+<ul>
+<li><strong>Stability is a knob, not a gamble.</strong> Training near \(\rho=\max_q|M(q)|\lesssim 1\)
+bounds the forward <em>and</em> backward pass by construction (§4.2). The adjoint instead
+reconstructs the trajectory in reverse time and accrues reconstruction/stiffness error.</li>
+<li><strong>Parallelism.</strong> Being LTI and diagonal per mode, the linear sheet's whole
+time evolution is a causal convolution with the geometric kernel \(K_q[m]=M(q)^{m-1}\) (FFT
+in space <em>and</em> time) or an associative scan — \(O(\log L)\) depth instead of the ODE's
+inherently sequential stepping.</li>
+</ul>
+
+<p>The closed form of the \(L\)-cycle rollout is a homogeneous term plus a causal
+time-convolution of the drive,</p>
+\[ \hat z_q[n] = M(q)^{n}\,\hat z_q[0] \;+\; \sum_{m=1}^{n} M(q)^{\,n-m}\,\hat{\text{drive}}_q[m], \]
+<p>implemented in <code>_wave_rollout_scan</code> (exposed as
+<code>wave_simulate(...; mode=:scan)</code>). The geometric kernel is built as
+\(M(q)^{m-1}=e^{(m-1)\log M(q)}\) rather than by <code>cumprod</code>, which keeps it
+differentiable (the <code>cumprod</code> <code>dims</code>-adjoint is unsupported) and is
+branch-cut-safe for integer exponents. The parallel forward matches the sequential Buffer
+loop to \(\sim 6\times10^{-8}\).</p>
+
+<div class="box">
+<p><strong>Phase-per-cycle, not sub-cycle potentials.</strong> One discrete step advances a whole
+carrier period (\(A=e^{k\Delta t}\), \(\Delta t=T\)); the state we track and train on is the
+per-cycle phasor, and a neuron's sub-cycle spike time <em>is</em> its phase — exactly as
+<code>PhasorDense</code>'s Dirac encoding folds sub-cycle timing into a one-shot phase map.
+The trainable path therefore never integrates a potential at an arbitrary sub-cycle time;
+the ODE's fine \(dt\) is a verifier artifact. The only thing that genuinely needs sub-cycle
+resolution is a hard threshold-and-reset nonlinearity (a discontinuity at an arbitrary
+instant), which is scoped to the ODE demo mode.</p>
+</div>
+
+<p>That is the trainer for the <em>linear</em> (potential) sheet — one scan does the whole rollout. The spike sheet is nonlinear, so its parallel trainer needs one more idea, which is the subject of §6.</p>
+
+<!-- ===================================================================== -->
+<h2 id="spike">6. Computing the spike sheet in parallel: the DEQ fixed point</h2>
+
+<p>This section is the computational counterpart of §5 for the <em>nonlinear</em> spike mode &mdash; how to evaluate and train it in parallel, not new physics. Spike transmission inserts a per-cycle nonlinearity (the emit \(z\mapsto z/|z|\)), so the rollout is not a single linear scan. But it is still a phase-domain SSM, structurally
+identical to <code>PhasorDense</code>'s — only recurrent rather than feed-forward. The key
+observation is that the state is <em>linear given the spike train</em>: with the transmitted
+spikes \(s[j]=\mathrm{emit}(z[j{-}1])\) held fixed,</p>
+\[ z[n] = A^{n}z[0] + \sum_{j\le n} A^{\,n-j}\big(g\,(W\circledast s[j{-}1]) + \text{drive}[j]\big), \]
+<p>a parallel <code>causal_conv</code> with the <em>scalar</em> transport \(A\). Call this map \(\text{linear\_response}(s)\): a bank of independent
+leaky integrators (transport \(A\), <em>no</em> state-coupling) driven by the fixed spike
+train's coupling \(g\,(W\circledast s)\) plus the external drive. It is <em>not</em> the
+potential sheet of §3&ndash;4: there the coupling feeds back on the <em>state</em>, giving the
+transition \(M(q)=A+g\hat W(q)\); here it enters as an <em>input</em> because \(s\) is held
+fixed, so the transport is the bare \(A\). (The potential sheet is the \(\mathrm{emit}=\text{id}\)
+special case: with \(s=z\) the coupling closes back onto the state and the transition becomes
+\(M\).) The only nonlinearity is re-emitting \(s=\mathrm{emit}(z)\), so spike mode
+is a <strong>fixed point</strong></p>
+\[ s^\ast = \mathrm{emit}\big(\text{linear\_response}(s^\ast)\big), \]
+<p>solved by iterating parallel sweeps with a cheap pointwise emit between them
+(<code>_wave_rollout_deq</code>). The map is strictly causal, so \(n_{\text{sweeps}}=L\)
+reproduces the sequential rollout <em>exactly</em>, while fewer sweeps settle toward it. This is a
+<strong>deep-equilibrium model</strong> (DEQ <span class="small">[Bai et&nbsp;al. 2019]</span>):
+the output is the fixed point of one map iterated to convergence, with gradients taken
+<em>through</em> the fixed point by the implicit-function theorem (constant memory) rather than
+through the unrolled sweeps. It reuses the repo's attractor and equilibrium-propagation
+machinery and, again, avoids the ODE adjoint. Two emissions are provided: the unit phasor
+\(e^{i\pi\theta}\), and the <em>Dirac-consistent</em> \(e^{k\,dt}\) with \(dt=T(0.5-\theta/2)\),
+which reuses <code>PhasorDense</code>'s encoding core so the two layers share one phase-SSM
+formalism (they agree in phase, differing only in the sub-cycle leak magnitude).</p>
+
+<h2 id="results">7. Verification: dispersion &amp; equivalence</h2>
+<p>Numerical checks that the derivations above hold and that the equivalent evaluation modes agree.</p>
+<table>
+<tr><th>Check</th><th>Result</th></tr>
+<tr><td>Eigenmode exactness (potential dispersion vs simulation)</td><td class="n">\(\approx 6\times10^{-8}\)</td></tr>
+<tr><td>Group velocity: simulated vs \(-d\Omega/dq\)</td><td>match</td></tr>
+<tr><td>Spike phase-mode band: simulation vs analytic \(\nu(q')\)</td><td class="n">\(\approx 10^{-4}\)</td></tr>
+<tr><td>Discrete (Tier 1) vs continuous ODE (Tier 2) field similarity</td><td class="n">0.997–0.9997</td></tr>
+<tr><td>Parallel scan vs sequential Buffer rollout</td><td class="n">\(\approx 6\times10^{-8}\)</td></tr>
+<tr><td>Spike DEQ (\(n_{\text{sweeps}}=L\)) vs sequential spike rollout</td><td class="n">exact (\(\lesssim 10^{-4}\))</td></tr>
+</table>
+
+<!-- ===================================================================== -->
+<h2 id="open">8. Limitations &amp; open questions</h2>
+<ul>
+<li><strong>The readable channel is coherence-limited.</strong> Interference intensity lives in
+\(|z|^2\), a square law that a purely linear \((\mathrm{Re},\mathrm{Im})\) readout cannot
+recover; the phase channel is linearly readable but needs carrier coherence (§4.5). This is
+wave physics, not a fixable artifact.</li>
+<li><strong>Criticality \(\ne\) linear SSM.</strong> Genuine avalanche/branching criticality
+needs the nonlinear threshold-and-reset (ODE-only); the trainable path is near-critical
+<em>linear</em>. Traveling <em>bumps</em> (amplitude packets) need symmetry-breaking the
+isotropic sheet lacks.</li>
+<li><strong>Delay-as-phase is exact only on the carrier</strong>, approximate for broadband;
+patchy (non-translation-invariant) connectivity forfeits the closed-form dispersion.</li>
+</ul>
+
+<!-- ===================================================================== -->
+<h2 id="refs">9. References</h2>
+<ol class="refs">
+<li><span class="rid">Izhikevich (2001).</span> Resonate-and-fire neurons. <em>Neural Networks</em> 14(6–7).</li>
+<li><span class="rid">Muller, Chavane, Reynolds &amp; Sejnowski (2018).</span> Cortical travelling waves. <em>Nat. Rev. Neurosci.</em> 19. <a href="https://www.nature.com/articles/s41583-018-0038-8">link</a></li>
+<li><span class="rid">van Vreeswijk &amp; Sompolinsky (1996); Brunel (2000).</span> Balanced excitatory/inhibitory sparse irregular dynamics.</li>
+<li><span class="rid">Beggs &amp; Plenz (2003).</span> Neuronal avalanches; branching ratio \(\approx 1\). <em>J. Neurosci.</em> 23.</li>
+<li><span class="rid">Kuramoto (1975); Sakaguchi &amp; Kuramoto (1986).</span> Coupled-oscillator synchronisation with phase frustration.</li>
+<li><span class="rid">Plate (1995).</span> Holographic Reduced Representations. <em>IEEE TNN</em> 6.</li>
+<li><span class="rid">Kleyko, Rachkovskij, Osipov &amp; Rahimi (2022).</span> A survey on HDC/VSA. <em>ACM Comput. Surv.</em> <a href="https://arxiv.org/abs/2111.06077">arXiv:2111.06077</a></li>
+<li><span class="rid">Gu, Goel &amp; Ré (2022).</span> S4: structured state spaces. Smith, Warrington &amp; Linderman (2023). S5. </li>
+<li><span class="rid">Keller &amp; Welling (2023).</span> Neural Wave Machine. <em>ICML</em>. Keller et&nbsp;al. (2024). Wave-RNN. <a href="https://arxiv.org/abs/2309.08045">arXiv:2309.08045</a></li>
+<li><span class="rid">Chen et&nbsp;al. (2018).</span> Neural ODEs (adjoint sensitivity). <a href="https://arxiv.org/abs/1806.07366">arXiv:1806.07366</a></li>
+<li><span class="rid">Bai, Kolter &amp; Koltun (2019).</span> Deep Equilibrium Models. <a href="https://arxiv.org/abs/1909.01377">arXiv:1909.01377</a></li>
+<li><span class="rid">Kerr, Ashwin &amp; Wedgwood (2025).</span> Resonance, wave speed and ISI locking in R&amp;F lattices. <a href="https://arxiv.org/abs/2511.05232">arXiv:2511.05232</a></li>
+</ol>
+
+<hr>
+<p class="small">Generated for <code>PhasorNetworks.jl</code> (branch work on the wave sheet).
+Companion sources: <code>docs/rf_wave_network_implementation.md</code>,
+<code>docs/wave_dispersion_derivation.md</code>, <code>docs/wavesheet_experts_design.md</code>;
+implementation in <code>src/wave.jl</code>; demos in <code>demos/wave_*.jl</code>.</p>
+
+</div>
+</body>
+</html>
