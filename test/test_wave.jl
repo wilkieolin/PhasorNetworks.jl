@@ -22,6 +22,14 @@ function wave_tests()
         test_wave_inhibition_ablation()
         test_wave_gradient_flow()
         test_wave_simulate_shapes()
+        test_wave_scan_equivalence()
+        test_wave_experts()
+        test_wave_state_experts()
+        test_wave_spike_deq()
+        test_wave_expert_layer()
+        test_wave_expert_decode()
+        test_wave_route_features()
+        test_wave_aniso_coupling()
         # ---- Tier 2: continuous ODE mode (needs the ODE stack from runtests.jl)
         test_wave_continuous_dispersion()
         test_wave_ode_equivalence()
@@ -419,5 +427,525 @@ function test_wave_spike_transmission()
 
         # Guard: invalid transmit mode.
         @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :bogus)
+    end
+end
+
+# ---- Parallel scan equivalence (§5.8 #1) ------------------------------
+#
+# The linear sheet (transmit=:potential, no snap/adaptation) is a diagonal SSM
+# per spatial mode, so the sequential Buffer recurrence (`_wave_rollout`) and the
+# parallel FFT-in-time forward (`_wave_rollout_scan`, exposed as
+# wave_simulate mode=:scan) must produce identical trajectories. This pins that
+# equivalence and checks gradients flow through the parallel path.
+
+function test_wave_scan_equivalence()
+    @testset "parallel scan ≈ discrete recurrence (linear sheet)" begin
+        rng = Xoshiro(11)
+        H = W = 16; L = 12; B = 3
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false,
+                                init_A_exc = 1.0, init_B_inh = 0.25,
+                                init_log_sigma_exc = log(1.5),
+                                init_log_sigma_inh = log(3.0),
+                                init_log_speed = log(40.0))
+        ps, st = Lux.setup(rng, layer)
+
+        # Subcritical g (discrete spectral radius < 1) so neither path diverges.
+        setg(g) = merge(ps, (log_g = Float32[log(g)],))
+        sr(g) = dispersion(layer, setg(g), st; mode = :discrete).spectral_radius
+        lo, hi = 1f-3, 1f2
+        for _ in 1:40
+            m = sqrt(lo * hi); sr(m) < 1f0 ? (lo = m) : (hi = m)
+        end
+        psg = setg(0.7f0 * sqrt(lo * hi))
+
+        relerr(a, b) = maximum(abs.(a .- b)) / (maximum(abs.(a)) + 1f-20)
+
+        # (a) autonomous, batched: seed one impulse per batch element. The
+        # parallel scan must match the sequential recurrence to FFT round-off.
+        z0 = zeros(ComplexF32, H, W, B)
+        for b in 1:B
+            z0[rand(rng, 1:H), rand(rng, 1:W), b] = 1f0
+        end
+        td = wave_simulate(layer, psg, st; z0 = z0, L = L, mode = :discrete)
+        ts = wave_simulate(layer, psg, st; z0 = z0, L = L, mode = :scan)
+        @test size(ts) == (H, W, L, B)
+        @test all(isfinite, ts)
+        @test relerr(td, ts) < 1f-5
+
+        # (b) driven.
+        drive = 0.1f0 .* randn(rng, ComplexF32, H, W, L)
+        z0s = zeros(ComplexF32, H, W)
+        dd = wave_simulate(layer, psg, st; z0 = z0s, L = L, drive = drive, mode = :discrete)
+        ds = wave_simulate(layer, psg, st; z0 = z0s, L = L, drive = drive, mode = :scan)
+        @test size(ds) == (H, W, L)
+        @test relerr(dd, ds) < 1f-5
+
+        # (c) gradients flow through the parallel scan path.
+        loss(p) = sum(abs2, abs.(wave_simulate(layer, p, st; z0 = z0, L = L, mode = :scan)))
+        val, gs = Zygote.withgradient(loss, psg)
+        @test isfinite(val)
+        @test any(any(abs.(gs[1][name]) .> 0) for name in keys(psg))
+
+        # (d) the scan refuses the nonlinear regimes.
+        spikelayer = PhasorWaveSheet(H, W; transmit = :spike)
+        psk, stk = Lux.setup(rng, spikelayer)
+        @test_throws ArgumentError wave_simulate(spikelayer, psk, stk; z0 = z0s,
+                                                 L = L, mode = :scan)
+    end
+end
+
+# ---- Sparse experts: gate + input-conditioned bind (§5.3/§5.4/§5.8) ---
+#
+# Exercises the input-conditioned expert path: a straight-through top-1 router
+# (`moe_gate`) with DeepSeek loss-free per-expert bias, the drive-modulating bind
+# (`_apply_wave_experts`), and the end-to-end composition through the parallel
+# scan with gradients reaching the bind phasors and router logits.
+
+function test_wave_experts()
+    @testset "sparse experts: gate + input-conditioned bind" begin
+        rng = Xoshiro(23)
+        E = 4; Lt = 6; Bt = 3
+
+        # moe_gate: hard straight-through one-hot.
+        logits = randn(rng, Float32, E, Lt, Bt)
+        bias0 = zeros(Float32, E)
+        gh = moe_gate(logits, bias0; hard = true)
+        @test size(gh) == (E, Lt, Bt)
+        @test all(isapprox.(sum(gh; dims = 1), 1f0; atol = 1f-4))          # one-hot per (n,b)
+        @test all(x -> isapprox(x, 0f0; atol = 1f-4) || isapprox(x, 1f0; atol = 1f-4), gh)
+        v, g = Zygote.withgradient(l -> sum(moe_gate(l, bias0; hard = true)), logits)
+        @test g[1] !== nothing && all(isfinite, g[1])                      # grad via soft surrogate
+
+        # soft gate is a softmax.
+        gsoft = moe_gate(logits, bias0; hard = false)
+        @test all(isapprox.(sum(gsoft; dims = 1), 1f0; atol = 1f-4))
+
+        # bias steers selection only.
+        lz = zeros(Float32, E, 1, 1); lz[1] = 0.1f0    # expert 1 has the max logit
+        b = zeros(Float32, E); b[3] = 10f0             # but bias favours expert 3
+        @test argmax(vec(moe_gate(lz, b; hard = true))) == 3
+
+        # DeepSeek loss-free load-balancing update.
+        gate_load = zeros(Float32, E, Lt, Bt); gate_load[1, :, :] .= 1f0   # expert 1 overused
+        b1 = update_moe_bias(zeros(Float32, E), gate_load; rate = 1f-2)
+        @test b1[1] < 0f0                              # overused → bias down
+        @test all(b1[2:end] .> 0f0)                    # underused → bias up
+
+        # drive modulation: off vs on.
+        H = W = 8
+        drive = randn(rng, ComplexF32, H, W, Lt, Bt)
+        masks = zeros(Float32, H, W, E)
+        for e in 1:E; masks[e, e, e] = 1f0; end        # disjoint single-site patches
+        phis = ComplexF32.(cis.(Float32.(range(0.3, 1.2; length = E))))
+        maskflat = reshape(masks, H * W, E)
+        d_off = PhasorNetworks._apply_wave_experts(drive, maskflat, phis,
+                                                   zeros(Float32, E, Lt, Bt))
+        @test maximum(abs.(d_off .- drive)) < 1f-6     # gate off ⇒ unchanged
+        d_on = PhasorNetworks._apply_wave_experts(drive, maskflat, phis,
+                                                  ones(Float32, E, Lt, Bt))
+        @test all(isapprox.(d_on[1, 1, :, :], drive[1, 1, :, :] .* phis[1]; atol = 1f-4))
+        @test all(isapprox.(d_on[5, 5, :, :], drive[5, 5, :, :]; atol = 1f-6))  # unowned site
+
+        # end-to-end: router → bind → parallel scan, gradients to expert params.
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false)
+        ps, st = Lux.setup(rng, layer)
+        setg(g) = merge(ps, (log_g = Float32[log(g)],))
+        sr(g) = dispersion(layer, setg(g), st; mode = :discrete).spectral_radius
+        lo, hi = 1f-3, 1f2
+        for _ in 1:40
+            m = sqrt(lo * hi); sr(m) < 1f0 ? (lo = m) : (hi = m)
+        end
+        psg = setg(0.7f0 * sqrt(lo * hi))
+        z0 = zeros(ComplexF32, H, W, Bt)
+        function eloss(θ)
+            logit, phi = θ
+            gate = moe_gate(logit, bias0; hard = true)
+            d = PhasorNetworks._apply_wave_experts(drive, maskflat, phi, gate)
+            Y = PhasorNetworks._wave_rollout_scan(layer, psg, st, z0, d, Lt)
+            sum(abs2, abs.(Y))
+        end
+        θ0 = (randn(rng, Float32, E, Lt, Bt), phis)
+        val, gr = Zygote.withgradient(eloss, θ0)
+        @test isfinite(val)
+        @test all(isfinite, gr[1][1])                  # ∂/∂logits
+        @test all(isfinite, gr[1][2])                  # ∂/∂phis
+        @test any(abs.(gr[1][2]) .> 0)                 # bind phasors receive gradient
+    end
+end
+
+# ---- State-conditioned experts: chunked operator split (§5.4/§5.8 #4) --
+#
+# The event-based operator split: linear transport runs as a parallel scan within
+# each chunk, a state-conditioned gate+bind fires at chunk boundaries. Anchors on
+# the exactness guarantee (identity event ⇒ chunked == full scan for any chunk
+# size) and checks a real state-conditioned expert trains through the feedback.
+
+function test_wave_state_experts()
+    @testset "state-conditioned experts: chunked operator split" begin
+        rng = Xoshiro(29)
+        H = W = 12; L = 12; B = 2; E = 3
+        layer = PhasorWaveSheet(H, W; transmit = :potential, saturating = false)
+        ps, st = Lux.setup(rng, layer)
+        setg(g) = merge(ps, (log_g = Float32[log(g)],))
+        sr(g) = dispersion(layer, setg(g), st; mode = :discrete).spectral_radius
+        lo, hi = 1f-3, 1f2
+        for _ in 1:40
+            m = sqrt(lo * hi); sr(m) < 1f0 ? (lo = m) : (hi = m)
+        end
+        psg = setg(0.7f0 * sqrt(lo * hi))
+
+        z0 = zeros(ComplexF32, H, W, B)
+        for b in 1:B; z0[rand(rng, 1:H), rand(rng, 1:W), b] = 1f0; end
+        drive = 0.05f0 .* randn(rng, ComplexF32, H, W, L, B)
+        relerr(a, b) = maximum(abs.(a .- b)) / (maximum(abs.(a)) + 1f-20)
+
+        # (a) operator-split exactness: identity event ⇒ chunked == full scan.
+        ref = PhasorNetworks._wave_rollout_scan(layer, psg, st, z0, drive, L)
+        for ch in (1, 3, 4, 5, L)
+            ci = PhasorNetworks._wave_rollout_chunked(layer, psg, st, z0, drive, L;
+                                                      chunk = ch, interact = (z, c) -> z)
+            @test size(ci) == (H, W, L, B)
+            @test relerr(ref, ci) < 1f-4
+        end
+
+        # State-conditioned gate+bind interact, built from moe_gate + state read.
+        masks = zeros(Float32, H, W, E)
+        for e in 1:E                                   # disjoint 2-site patches
+            r = 2 * e; c = 2 * e
+            masks[r, c, e] = 1f0; masks[r, c + 1, e] = 1f0
+        end
+        maskflat = reshape(masks, H * W, E)
+        phis = ComplexF32.(cis.(Float32.(range(0.4, 1.3; length = E))))
+        bias0 = zeros(Float32, E)
+        w0 = ones(Float32, E)
+        mk_interact(w, phi) = (z, c) -> begin
+            r = PhasorNetworks._state_read(z, maskflat)                   # (E,B) complex
+            gate = moe_gate(w .* abs.(r), bias0)                          # (E,B) state-cond.
+            zb = PhasorNetworks._apply_wave_experts(reshape(z, H, W, 1, B),
+                                                    maskflat, phi, reshape(gate, E, 1, B))
+            reshape(zb, H, W, B)
+        end
+
+        # (b) nontrivial: the state-conditioned events perturb the linear field.
+        traj = PhasorNetworks._wave_rollout_chunked(layer, psg, st, z0, drive, L;
+                                                    chunk = 4, interact = mk_interact(w0, phis))
+        @test all(isfinite, traj)
+        @test relerr(ref, traj) > 1f-3
+
+        # (c) gradients flow to router weights + bind phasors through the feedback.
+        function loss(θ)
+            w, phi = θ
+            Y = PhasorNetworks._wave_rollout_chunked(layer, psg, st, z0, drive, L;
+                                                     chunk = 4, interact = mk_interact(w, phi))
+            sum(abs2, abs.(Y))
+        end
+        val, gr = Zygote.withgradient(loss, (w0, phis))
+        @test isfinite(val)
+        @test all(isfinite, gr[1][1]) && all(isfinite, gr[1][2])
+        @test any(abs.(gr[1][2]) .> 0)                 # bind phasors get gradient
+    end
+end
+
+# ---- Spike DEQ: phase-domain fixed-point trainer (§5.6) ---------------
+#
+# Spike mode as a fixed point s* = emit(linear_response(s*)): parallel sweeps
+# with a pointwise emit between them. Anchors on exactness (n_sweeps == L equals
+# the sequential spike rollout), checks settling for fewer sweeps, that the
+# dirac-consistent emission runs and differs from the unit emit, and that
+# gradients flow through the sweeps.
+
+function test_wave_spike_deq()
+    @testset "spike DEQ fixed-point trainer" begin
+        rng = Xoshiro(31)
+        H = W = 12; L = 8; B = 2
+        layer = PhasorWaveSheet(H, W; transmit = :spike, saturating = false)
+        ps, st = Lux.setup(rng, layer)
+        # keep it subcritical-ish so the sequential rollout stays bounded
+        setg(g) = merge(ps, (log_g = Float32[log(g)],))
+        psg = setg(0.15f0)
+
+        z0 = zeros(ComplexF32, H, W, B)
+        for b in 1:B; z0[rand(rng, 1:H), rand(rng, 1:W), b] = 1f0; end
+        drive = 0.05f0 .* randn(rng, ComplexF32, H, W, L, B)
+        relerr(a, b) = maximum(abs.(a .- b)) / (maximum(abs.(a)) + 1f-20)
+
+        # sequential spike rollout (the reference).
+        ref = PhasorNetworks._wave_rollout(layer, psg, st, z0, drive, L)
+
+        # (a) exactness: n_sweeps == L reproduces the sequential rollout.
+        deqL = PhasorNetworks._wave_rollout_deq(layer, psg, st, z0, drive, L;
+                                                n_sweeps = L, emit_mode = :unit)
+        @test size(deqL) == (H, W, L, B)
+        @test relerr(ref, deqL) < 1f-4
+
+        # (b) settling: the causal fixed point converges monotonically in sweeps.
+        e2 = relerr(ref, PhasorNetworks._wave_rollout_deq(layer, psg, st, z0, drive, L;
+                                                          n_sweeps = 2, emit_mode = :unit))
+        e5 = relerr(ref, PhasorNetworks._wave_rollout_deq(layer, psg, st, z0, drive, L;
+                                                          n_sweeps = 5, emit_mode = :unit))
+        @test e2 > e5 >= 0f0                            # more sweeps ⇒ closer
+
+        # via the public API.
+        wd = wave_simulate(layer, psg, st; z0 = z0, L = L, drive = drive,
+                           mode = :deq, n_sweeps = L)
+        @test relerr(ref, wd) < 1f-4
+
+        # (c) dirac-consistent emission runs, is finite, and differs from unit.
+        deqd = PhasorNetworks._wave_rollout_deq(layer, psg, st, z0, drive, L;
+                                                n_sweeps = L, emit_mode = :dirac)
+        @test all(isfinite, deqd)
+        @test relerr(deqL, deqd) > 1f-3                 # sub-cycle leak ⇒ different dynamics
+
+        # (d) gradients flow through the parallel sweeps.
+        loss(p) = sum(abs2, abs.(PhasorNetworks._wave_rollout_deq(layer, p, st, z0, drive, L;
+                                                                  n_sweeps = 4, emit_mode = :unit)))
+        val, gs = Zygote.withgradient(loss, psg)
+        @test isfinite(val)
+        @test any(any(abs.(gs[1][name]) .> 0) for name in keys(psg))
+    end
+end
+
+# ---- §6 prototype: WaveExpertSheet ------------------------------------
+#
+# The read-patch → gate → re-bind Lux layer trained on the discrete SSM. Checks
+# both routing modes (input/state) on both substrates, that gradients reach the
+# sheet coupling + router + bind phasors, the route_stats go/no-go readout, and
+# the online DeepSeek bias plumbing.
+
+function test_wave_expert_layer()
+    @testset "WaveExpertSheet prototype (§6)" begin
+        rng = Xoshiro(37)
+        H = W = 8; L = 5; B = 3; E = 4
+        mkx() = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
+
+        # input routing on both substrates: forward + gradients to all params.
+        for tr in (:potential, :spike)
+            layer = WaveExpertSheet(H, W; n_experts = E, routing = :input, transmit = tr,
+                                    saturating = false, n_sweeps = L, init_log_g = log(0.1))
+            ps, st = Lux.setup(rng, layer)
+            x = mkx()
+            y, st2 = layer(x, ps, st)
+            @test size(y) == (H * W, L, B)
+            @test eltype(y) === Phase
+            @test all(isfinite, Float32.(y))
+            @test all(-1f0 - 1f-4 .<= Float32.(y) .<= 1f0 + 1f-4)
+            @test length(st2.route_bias) == E && all(isfinite, st2.route_bias)  # online balance
+            gl(p) = sum(abs2, Float32.(first(layer(x, p, st))))
+            v, g = Zygote.withgradient(gl, ps)
+            @test isfinite(v)
+            @test any(abs.(g[1].Wr) .> 0)                       # router learns
+            @test any(abs.(g[1].bind_phase) .> 0)               # bind phasors learn
+            @test any(any(abs.(g[1].sheet[name]) .> 0) for name in keys(ps.sheet))
+        end
+
+        # route_stats go/no-go readout.
+        layer = WaveExpertSheet(H, W; n_experts = E, routing = :input,
+                                transmit = :potential, init_log_g = log(0.1))
+        ps, st = Lux.setup(rng, layer)
+        x = mkx()
+        rs = route_stats(layer, ps, st, x)
+        @test length(rs.load) == E
+        @test isapprox(sum(rs.load), 1f0; atol = 1f-4)          # soft occupancy is a distribution
+        @test 0f0 <= rs.entropy <= log(Float32(E)) + 1f-3       # entropy in [0, log E]
+        @test size(rs.gate) == (E, L, B)
+
+        # state routing (potential substrate): forward + gradients.
+        slayer = WaveExpertSheet(H, W; n_experts = E, routing = :state, chunk = 2,
+                                 transmit = :potential, balance = false, init_log_g = log(0.1))
+        sps, sst = Lux.setup(rng, slayer)
+        ys, _ = slayer(x, sps, sst)
+        @test size(ys) == (H * W, L, B)
+        @test all(isfinite, Float32.(ys))
+        vs, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(slayer(x, p, sst)))), sps)
+        @test isfinite(vs)
+        @test any(abs.(gs[1].bind_phase) .> 0)
+
+        # state routing requires a linear substrate.
+        @test_throws ArgumentError WaveExpertSheet(H, W; routing = :state, transmit = :spike)
+    end
+end
+
+# ---- §6 step 3: decode check — stamped bind is recoverable -------------
+#
+# Confirms the expert's stamped bind φ_e is a recoverable VSA operation: unbinding
+# the sheet output against a bind-free reference recovers the code (differential
+# decode), robustly even under an incoherent carrier; while a blind decode (no
+# reference) is coherence-limited — the square-law channel from the readout study.
+
+function test_wave_expert_decode()
+    @testset "decode check: stamped bind recoverable (§6 step 3)" begin
+        rng = Xoshiro(43)
+        H = W = 8; E = 6; L = 3; B = 1
+        layer = WaveExpertSheet(H, W; n_experts = E, routing = :input,
+                                transmit = :potential, init_log_g = log(0.1))
+        ps, st = Lux.setup(rng, layer)
+        codes = Float32.(collect(range(-1f0, 1f0, length = E + 1))[1:E])
+        ps = merge(ps, (bind_phase = codes,))
+        phis = ComplexF32.(cis.(Float32(pi) .* codes))
+        acc(dec) = sum(e -> argmax([cos(Float32(pi) * (dec[e] - codes[ep])) for ep in 1:E]) == e, 1:E) / E
+
+        function run(csigma)
+            x = Phase.(clamp.(csigma .* randn(rng, Float32, H * W, L, B), -1f0, 1f0))
+            drive = reshape(PhasorNetworks.angle_to_complex(x), H, W, L, B)
+            z0 = zeros(ComplexF32, H, W, B)
+            d2 = PhasorNetworks._apply_wave_experts(drive, st.masks, phis, ones(Float32, E, L, B))
+            Y  = PhasorNetworks._wave_rollout_scan(layer.sheet, ps.sheet, st.sheet, z0, d2, L)
+            Yr = PhasorNetworks._wave_rollout_scan(layer.sheet, ps.sheet, st.sheet, z0, drive, L)
+            r  = vec(PhasorNetworks._patch_read(Y[:, :, end, :],  st.masks))
+            r0 = vec(PhasorNetworks._patch_read(Yr[:, :, end, :], st.masks))
+            return acc(angle.(r .* conj.(r0)) ./ Float32(pi)),      # differential (unbind ref)
+                   acc(angle.(r) ./ Float32(pi))                    # blind (carrier assumed 0)
+        end
+
+        # coherent carrier: both decodes recover every expert.
+        d0, b0 = run(0f0)
+        @test d0 == 1f0
+        @test b0 == 1f0
+        # incoherent carrier: differential still recovers; blind is coherence-limited.
+        dd, bb = run(1f0)
+        @test dd >= 0.66f0                              # stamp recoverable via unbind
+        @test bb <= dd + 1f-6                           # blind no better (needs coherence)
+
+        # row-band tiling requires E ≤ H.
+        @test_throws ArgumentError WaveExpertSheet(4, 4; n_experts = 8)
+    end
+end
+
+# ---- §6 step 4: phase-domain routing features -------------------------
+#
+# The router summarises each patch by a phase-domain feature rather than raw
+# amplitude. Checks the matched-filter ("is this my key?") read mechanism, that
+# each of :coherence/:dispersion/:matched runs forward + differentiates to the
+# right parameters, and that :matched is phase-selective (fires on a key match,
+# is suppressed by the anti-phase).
+
+function test_wave_route_features()
+    @testset "phase-domain routing features (§6 step 4)" begin
+        rng = Xoshiro(71)
+        H = W = 8; L = 4; B = 2; E = 4
+        mkx() = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
+
+        # (0) constructor validation.
+        @test_throws ArgumentError WaveExpertSheet(H, W; route_feature = :bogus)
+
+        # (1) matched-filter read mechanism (internal): unbinding a patch by its own
+        #     key gives Re(ρ) = +1 on an exact phase match, −1 on the anti-phase.
+        masks = PhasorNetworks._tile_masks(H, W, E)                       # (HW,E)
+        key   = 2f0 .* rand(rng, Float32, H * W, E) .- 1f0               # (HW,E) per-site key
+        fmatch = reshape(PhasorNetworks.angle_to_complex(key[:, 1]), H, W)  # field = expert-1 key
+        ρm = PhasorNetworks._patch_read_keyed(fmatch, masks, key)         # (E,)
+        @test real(ρm[1]) > 0.99f0                                        # exact match on patch 1
+        ρa = PhasorNetworks._patch_read_keyed(-fmatch, masks, key)        # −f ≡ +π (anti-phase)
+        @test real(ρa[1]) < -0.99f0                                       # anti-phase suppressed
+        # key === nothing reduces to the plain pooled read.
+        @test PhasorNetworks._patch_read_keyed(fmatch, masks, nothing) ≈
+              PhasorNetworks._patch_read(fmatch, masks)
+
+        # (2) each feature: bind_key iff :matched, forward + shape + finite,
+        #     gradients to the router (and to the keys for :matched), route_stats OK.
+        for feat in (:coherence, :dispersion, :matched)
+            layer = WaveExpertSheet(H, W; n_experts = E, routing = :input,
+                                    route_feature = feat, transmit = :potential,
+                                    init_log_g = log(0.1))
+            ps, st = Lux.setup(rng, layer)
+            @test haskey(ps, :bind_key) == (feat === :matched)
+            x = mkx()
+            y, _ = layer(x, ps, st)
+            @test size(y) == (H * W, L, B)
+            @test all(isfinite, Float32.(y))
+            @test all(-1f0 - 1f-4 .<= Float32.(y) .<= 1f0 + 1f-4)
+            gl(p) = sum(abs2, Float32.(first(layer(x, p, st))))
+            v, g = Zygote.withgradient(gl, ps)
+            @test isfinite(v)
+            @test any(abs.(g[1].Wr) .> 0)                                 # router learns
+            feat === :matched && @test any(abs.(g[1].bind_key) .> 0)      # keys learn
+            rs = route_stats(layer, ps, st, x)
+            @test length(rs.load) == E && isapprox(sum(rs.load), 1f0; atol = 1f-4)
+            @test 0f0 <= rs.entropy <= log(Float32(E)) + 1f-3
+        end
+
+        # (3) end-to-end selectivity: with keys frozen to the tile pattern, a patch
+        #     matching expert e's key routes to e more than a random patch does.
+        layer = WaveExpertSheet(H, W; n_experts = E, routing = :input,
+                                route_feature = :matched, transmit = :potential,
+                                hard = false, init_log_g = log(0.1))
+        ps, st = Lux.setup(rng, layer)
+        ps = merge(ps, (; Wr = Float32.([i == j for i in 1:E, j in 1:E])))  # identity mix
+        # input phase = expert-2's key inside every site (matches patch 2 exactly).
+        xk = Phase.(reshape(repeat(ps.bind_key[:, 2], 1, L * B), H * W, L, B))
+        gk = route_stats(layer, ps, st, xk).gate                         # (E,L,B) soft
+        @test argmax(vec(sum(gk; dims = (2, 3)))) == 2                    # patch-2 expert wins
+    end
+end
+
+# ---- Anisotropic coupling: directed transport (:aniso) ----------------
+#
+# The isotropic DoG (:dog) is reflection-symmetric ⇒ waves spread both ways ⇒
+# no net transport. `:aniso` adds a real antisymmetric advection stencil whose
+# transform is Ŵ_adv(q) = −i(β_h·sin q_h + β_w·sin q_w) — purely imaginary, odd
+# in q — giving a net group velocity v = g·β (a drifting packet) while staying
+# FFT-diagonal. Checks: β=0 reduces to :dog exactly; the advection term is
+# imaginary+odd; a seeded pulse drifts with the sign/magnitude of β; β is
+# trainable.
+
+function test_wave_aniso_coupling()
+    @testset "anisotropic coupling: directed transport (:aniso)" begin
+        H = W = 40
+        ω = PhasorNetworks.period_to_angfreq(SpikingArgs().t_period)
+
+        # (1) β=0 ⇒ :aniso W_hat is exactly the :dog W_hat.
+        ld = PhasorWaveSheet(H, W; coupling = :dog, transmit = :potential)
+        la0 = PhasorWaveSheet(H, W; coupling = :aniso, transmit = :potential,
+                              init_beta_h = 0.0, init_beta_w = 0.0)
+        pd, sd = Lux.setup(Xoshiro(1), ld)
+        pa, sa = Lux.setup(Xoshiro(1), la0)
+        _, _, Wd = PhasorNetworks._build_coupling(ld, pd, sd, ω)
+        _, _, Wa = PhasorNetworks._build_coupling(la0, pa, sa, ω)
+        @test maximum(abs.(Wa .- Wd)) < 1f-6
+
+        # (2) advection term (the β-part) is purely imaginary and odd in q.
+        la = PhasorWaveSheet(H, W; coupling = :aniso, transmit = :potential,
+                             init_beta_h = 0.6, init_beta_w = 0.0)
+        pa2, sa2 = Lux.setup(Xoshiro(1), la)
+        _, _, Wa2 = PhasorNetworks._build_coupling(la, pa2, sa2, ω)
+        adv = Wa2 .- Wd
+        rev = adv[mod.(-(0:H-1), H) .+ 1, mod.(-(0:W-1), W) .+ 1]         # adv(−q)
+        @test maximum(abs.(real.(adv))) < 1f-5                            # imaginary
+        @test maximum(abs.(adv .+ rev)) < 1f-5                            # odd in q
+
+        # (3) directed drift: seed a centered pulse, roll autonomously, track the
+        #     row-centroid. Drift follows the sign of β_h, is ~0 at β=0, monotone.
+        ctr = 20
+        centroid_row(z) = (w = abs2.(z); sum((1:H) .* vec(sum(w; dims = 2))) / (sum(w) + 1f-12))
+        function drift(beta)
+            l = PhasorWaveSheet(H, W; coupling = :aniso, transmit = :potential,
+                                init_beta_h = Float32(beta), init_beta_w = 0.0,
+                                init_log_g = log(0.5), saturating = false)
+            p, s = Lux.setup(Xoshiro(2), l)
+            z0 = zeros(ComplexF32, H, W)
+            for i in ctr-2:ctr+2, j in ctr-2:ctr+2
+                z0[i, j] = exp(-((i - ctr)^2 + (j - ctr)^2) / 3f0)
+            end
+            Y = PhasorNetworks._wave_rollout(l, p, s, reshape(z0, H, W, 1), nothing, 8)
+            return centroid_row(Y[:, :, end, 1]) - centroid_row(Y[:, :, 1, 1])
+        end
+        dp, dz, dn = drift(0.8), drift(0.0), drift(-0.8)
+        @test dp > dz > dn                                                # monotone in β
+        @test abs(dz) < 0.1                                               # ~no drift at β=0
+        @test dp > 0.3 && dn < -0.3                                       # substantial, sign-controlled
+        @test isapprox(dp, -dn; atol = 0.15)                             # symmetric ±β (advection)
+
+        # (4) forward + β trainable.
+        x = Phase.(2f0 .* rand(Xoshiro(4), Float32, H * W, 4, 2) .- 1f0)
+        y, _ = la(x, pa2, sa2)
+        @test size(y) == (H * W, 4, 2)
+        @test all(isfinite, Float32.(y))
+        gl(p) = sum(abs2, Float32.(first(la(x, p, sa2))))
+        v, g = Zygote.withgradient(gl, pa2)
+        @test isfinite(v)
+        @test abs(g[1].beta_h[1]) > 0                                     # drift learns
+
+        # (5) constructor rejects bad coupling.
+        @test_throws ArgumentError PhasorWaveSheet(H, W; coupling = :bogus)
     end
 end
