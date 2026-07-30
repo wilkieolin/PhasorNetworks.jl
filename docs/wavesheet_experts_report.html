@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The PhasorWaveSheet: derivation & implementation</title>
+<title>Sparse VSA experts on the PhasorWaveSheet</title>
 <script>
 window.MathJax = {
   tex: { inlineMath: [['\\(','\\)']], displayMath: [['\\[','\\]']], tags: 'ams' },
@@ -299,9 +299,9 @@ the read magnitude into a routing score, and those scores drive a straight-throu
 selection whose <em>load</em> — not a loss — balances the experts:</p>
 \[
 \begin{aligned}
-r_e &= \tfrac{1}{|P_e|}\!\sum_{x\in P_e} z_x, & \ell &= W_r\,|r| && \text{(read}\to\text{logits)}\\[2pt]
-\mathrm{sel} &= \mathrm{onehot}\!\big(\arg\max_e(\ell_e + b_e)\big), & \mathrm{soft} &= \mathrm{softmax}(\ell/\tau) && \text{(select}\;\cdot\;\text{soften)}\\[2pt]
-g &= \mathrm{sel} + \big(\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\big), & b_e &\leftarrow b_e + \eta\,\mathrm{sign}\!\big(\tfrac1E-\bar\ell_e\big) && \text{(STE gate}\;\cdot\;\text{loss-free balance)}
+r_e &amp;= \tfrac{1}{|P_e|}\!\sum_{x\in P_e} z_x, &amp; \ell &amp;= W_r\,|r| &amp;&amp; \text{(read}\to\text{logits)}\\[2pt]
+\mathrm{sel} &amp;= \mathrm{onehot}\!\big(\arg\max_e(\ell_e + b_e)\big), &amp; \mathrm{soft} &amp;= \mathrm{softmax}(\ell/\tau) &amp;&amp; \text{(select}\;\cdot\;\text{soften)}\\[2pt]
+g &amp;= \mathrm{sel} + \big(\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\big), &amp; b_e &amp;\leftarrow b_e + \eta\,\mathrm{sign}\!\big(\tfrac1E-\bar\ell_e\big) &amp;&amp; \text{(STE gate}\;\cdot\;\text{loss-free balance)}
 \end{aligned}
 \]
 <p>where \(P_e\) is expert \(e\)'s patch, \(\mathrm{sg}\) is the stop-gradient, and
