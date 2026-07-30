@@ -785,88 +785,197 @@ trained; what is forfeited is the analytic handle, not the dynamics.</li>
 <!-- ===================================================================== -->
 <h2 id="transport">10. Directed transport: breaking isotropy</h2>
 
-<p>§8 and the reservoir study leave the sheet as a <em>medium</em>, not a selective
-transformer: the isotropic difference-of-Gaussians is reflection-symmetric,
-\(W(\mathbf d)=W(-\mathbf d)\), so \(\hat W(\mathbf q)\) is even, the band \(\Omega(\mathbf q)\)
-is even, and the group velocity \(v_g=-\partial_q\Omega\) is <em>odd</em> — every rightward
-mode has an equal leftward twin. A perturbation spreads symmetrically with zero net
-velocity: information cannot be handed from one region to the next, so a spatial
-<em>sequence</em> of processors is impossible. This section is the constructive follow-up —
-adding directed transport, and deriving what it costs.</p>
+<p>Everything so far treats the sheet as a <em>medium</em> — it transmits and mixes information,
+but it does not process it in <em>stages</em>. The reason is the very symmetry that made the
+dispersion analysis so clean. On the isotropic sheet, disturbing one spot sends ripples outward
+in every direction equally, like a stone dropped in a pond: there is no "downstream", so you
+cannot line up a sequence of processors (expert 1, then expert 2, …) along a flow. To compute in
+a sequence we need the opposite of a pond — a <em>river</em>, a medium that carries information in
+a definite direction. This section builds that directed transport, says plainly why the isotropic
+sheet cannot, and works out what each fix costs.</p>
 
-<h3>10.1 The cure: advection breaks reflection symmetry</h3>
-<p>Net transport requires an <strong>odd</strong> term in the coupling. A real, antisymmetric
-stencil — advection — is the minimal one:</p>
+<div class="box"><p><strong>The obstruction, precisely.</strong> The speed at which a localised
+packet's centre travels is the <em>group velocity</em> \(v_g=-\partial_q\Omega(q)\) — the slope of
+the dispersion band from §4. Because the isotropic coupling is <em>reflection-symmetric</em> (it
+depends only on distance, so left and right are mirror images, \(W(\mathbf d)=W(-\mathbf d)\)), the
+band \(\Omega(q)\) is an <em>even</em> function of \(q\), which makes \(v_g\) an <em>odd</em> one:
+for every wavelength drifting right at speed \(v\) there is an identical one drifting left at
+\(-v\). They cancel, so a packet merely spreads and its centre goes nowhere. Directed transport
+therefore requires <em>breaking the left–right symmetry</em> of the coupling.</p></div>
+
+<h3>10.1 A directed current: advection</h3>
+<p>Physics has a word for transport by a directed current: <strong>advection</strong> — a leaf
+carried downstream by a river is advected, whereas ink spreading in still water merely
+<em>diffuses</em> (spreads outward with no preferred direction). The isotropic sheet is pure
+diffusion; we want to add a current. The minimal way to break the mirror symmetry is to couple
+each neuron a little more strongly to its neighbour in one direction than the other — a small
+<em>antisymmetric</em> (front-minus-back) term added to the symmetric Mexican hat. In the Fourier
+picture that term is</p>
 \[ \hat W_{\text{adv}}(\mathbf q) = -i\big(\beta_h\sin q_h + \beta_w\sin q_w\big),\qquad
-   v_{\text{drift}} = g\,\boldsymbol\beta . \]
-<p>It is purely imaginary and odd in \(\mathbf q\), so it adds a <em>uniform</em> group
-velocity \(g\boldsymbol\beta\) to the whole band (a drifting packet) rather than merely
-relocating it — a directional <em>delay</em> or an <em>offset</em> kernel only shift
-\(\hat W(\mathbf q\!-\!\mathbf b)\) and leave the \(\pm q\) twins counter-propagating, so
-neither transports. Because the stencil is still a function of the displacement \(\mathbf d\)
-alone, the coupling stays translation-invariant and FFT-diagonal — the parallel-scan/DEQ
-training of §5–6 is untouched. This is <code>coupling = :aniso</code> in <code>src/wave.jl</code>
-(two extra scalars \(\beta_h,\beta_w\)); at \(\boldsymbol\beta=0\) it reduces exactly to
-<code>:dog</code>.</p>
+   \text{net drift } \mathbf v = g\,\boldsymbol\beta, \]
+<p>where \(\boldsymbol\beta=(\beta_h,\beta_w)\) sets the current's strength and direction. Unlike a
+symmetric term, this one adds the <em>same</em> drift \(g\boldsymbol\beta\) to <em>every</em>
+wavelength, so the whole packet moves together instead of splitting into counter-travelling
+halves. (Two "obvious" alternatives fail: a directional <em>delay</em> or an <em>offset</em>
+kernel merely slide the pattern in \(q\)-space and leave the mirror-image halves still
+counter-travelling — only a genuine current transports.) Crucially the current is still a fixed
+function of relative position, so the coupling stays translation-invariant and FFT-diagonal, and
+the fast parallel-scan / DEQ training of §5–6 is untouched. This is <code>coupling = :aniso</code>
+in <code>src/wave.jl</code> (the two extra numbers \(\beta_h,\beta_w\)); with
+\(\boldsymbol\beta=0\) it reduces exactly to the isotropic <code>:dog</code>.</p>
 
-<h3>10.2 Two spreading mechanisms, and which one bites</h3>
-<p>Directed drift is necessary but not sufficient — a packet also <em>spreads</em>, by two
-distinct routes. (i) <strong>Gain narrowing</strong>: the band-pass gain \(\Gamma(\mathbf q)\)
-is peaked at \(q_*\), so a broadband packet is reshaped toward the \(q_*\) ring and
-delocalises (rate \(\sim g\,|\Gamma''(q_*)|\)). (ii) <strong>Group-velocity dispersion
-(GVD)</strong>: curvature of the phase band, \(\beta_2=\Omega''(q_*)\), so components drift
-at different speeds. The diagnostics <code>dispersion_diagnostics</code>/<code>zero_gvd_speed</code>
-read \(\Gamma,\Omega,v_g,\beta_2\) straight off the coupling (potential map \(M=A+g\hat W\)
-and the spike Kuramoto generator \(\Lambda\)), and they localise the problem: <strong>GVD is
-curable</strong> — there is a zero-dispersion conduction speed (\(c\!\approx\!2\) px/period)
-where \(\beta_2(q_*)=0\) with the drift intact — whereas <strong>gain narrowing is the real
-obstruction</strong> (\(|\Gamma''(q_*)|\approx2.2\) there), which is exactly why a seeded bump
-reshapes into the band-pass pattern and stalls.</p>
+<figure class="fig"><div class="figframe">
+<svg viewBox="0 0 660 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="t1a" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a7fc0"/></marker>
+    <marker id="t1b" markerWidth="9" markerHeight="9" refX="6" refY="3.2" orient="auto"><path d="M0,0 L7,3.2 L0,6.4 Z" fill="#c0392b"/></marker>
+  </defs>
+  <line x1="330" y1="18" x2="330" y2="232" stroke="#e2e2ea"/>
+  <text x="165" y="22" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">isotropic ( :dog ) — a pond</text>
+  <line x1="35" y1="72" x2="295" y2="72" stroke="#f0f0f4"/><line x1="35" y1="130" x2="295" y2="130" stroke="#f0f0f4"/><line x1="35" y1="188" x2="295" y2="188" stroke="#f0f0f4"/>
+  <circle cx="165" cy="130" r="66" fill="none" stroke="#c3d2ec"/><circle cx="165" cy="130" r="44" fill="none" stroke="#9db4e0"/><circle cx="165" cy="130" r="22" fill="none" stroke="#7f9fd6"/>
+  <circle cx="165" cy="130" r="4.5" fill="#3a5ba0"/>
+  <line x1="165" y1="130" x2="165" y2="62" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="165" y2="198" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="233" y2="130" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="97" y2="130" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="213" y2="82" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="117" y2="82" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="213" y2="178" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <line x1="165" y1="130" x2="117" y2="178" stroke="#5a7fc0" stroke-width="1.3" marker-end="url(#t1a)"/>
+  <text x="165" y="243" text-anchor="middle" font-size="11" fill="#5b5b66">ripples out every way — no “downstream”</text>
+  <text x="495" y="22" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">directed ( advection / shift ) — a river</text>
+  <line x1="365" y1="72" x2="625" y2="72" stroke="#f0f0f4"/><line x1="365" y1="130" x2="625" y2="130" stroke="#f0f0f4"/><line x1="365" y1="188" x2="625" y2="188" stroke="#f0f0f4"/>
+  <circle cx="480" cy="70" r="15" fill="#c0392b" opacity="0.22"/><circle cx="480" cy="128" r="15" fill="#c0392b" opacity="0.5"/><circle cx="480" cy="186" r="15" fill="#c0392b" opacity="0.92"/>
+  <line x1="545" y1="58" x2="545" y2="198" stroke="#c0392b" stroke-width="2.4" marker-end="url(#t1b)"/>
+  <text x="562" y="132" font-size="11" fill="#c0392b">drift</text>
+  <text x="495" y="243" text-anchor="middle" font-size="11" fill="#5b5b66">travels one way — stages act in sequence</text>
+</svg></div>
+<figcaption><b>Figure 11. Why isotropy blocks staged processing.</b> On the isotropic sheet (left)
+a disturbance spreads outward in all directions at once — a stone in a pond — so there is no
+downstream and no way to line up a sequence of processors. Breaking the left–right symmetry of the
+coupling adds a directed current (right): the disturbance now <em>travels</em> one way, so experts
+placed along its path can act on it in turn.</figcaption>
+</figure>
 
-<h3>10.3 The low-dispersion regime</h3>
-<p>A sharp spatial-frequency filter is <em>necessarily</em> dispersive — the same gain
-curvature that makes the sheet selective spreads packets. The resolution is to run the sheet
-as a <strong>near-neutral advective medium</strong>: a gentle Mexican hat at marginality
-(\(\Gamma(q_*)\!\approx\!0\)), operated at the <strong>DC carrier</strong> \(q_*=0\), where GVD
-vanishes for free (\(g\beta\sin 0=0\)) and \(\beta\) is a dispersion-free drift knob. A search
-over \((\sigma_E,\sigma_I,B_I,g)\) with the diagnostics finds this point and flattens the gain
-\(\sim60\times\):</p>
+<h3>10.2 The catch: a travelling packet blurs</h3>
+<p>A current makes the packet move, but not necessarily hold together. As it travels it also
+<em>disperses</em> — blurs — and there are two distinct causes, both worth naming (Figure 12).
+The first is <strong>gain narrowing</strong>. The Mexican-hat coupling is a <em>band-pass
+filter</em> (§4): it amplifies one wavelength — the peak \(q_*\) of the growth curve
+\(\Gamma(q)\) — and damps the rest. A compact blob is built from many wavelengths, so the sheet
+reshapes it toward its single preferred ripple and the blob delocalises. The second is
+<strong>group-velocity dispersion</strong> (GVD): the drift speed is not quite the same for
+every wavelength (the band \(\Omega(q)\) has curvature \(\beta_2=\Omega''(q_*)\)), so the
+components separate and the packet stretches. The diagnostics routine reads all of these — growth
+\(\Gamma\), band \(\Omega\), group velocity \(v_g\), and its curvature \(\beta_2\) — straight off
+the coupling (<code>dispersion_diagnostics</code> / <code>zero_gvd_speed</code> in
+<code>src/wave.jl</code>), for both the linear and the spiking sheet.</p>
+
+<figure class="fig"><div class="figframe">
+<svg viewBox="0 0 660 230" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs><marker id="t2a" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9a9aa6"/></marker></defs>
+  <line x1="330" y1="18" x2="330" y2="205" stroke="#e2e2ea"/>
+  <text x="165" y="22" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">gain narrowing</text>
+  <g transform="translate(20,40)"><line x1="0" y1="34" x2="66" y2="34" stroke="#c9c9d4"/><path d="M2,34 C24,34 29,6 33,6 C37,6 42,34 64,34" fill="none" stroke="#c0392b" stroke-width="1.5"/><text x="33" y="47" text-anchor="middle" font-size="8.5" fill="#9aa">Γ(q): peaked</text></g>
+  <circle cx="120" cy="130" r="12" fill="#3a5ba0"/>
+  <line x1="140" y1="130" x2="176" y2="130" stroke="#9a9aa6" stroke-width="1.5" marker-end="url(#t2a)"/>
+  <circle cx="200" cy="118" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="218" cy="140" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="236" cy="122" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="254" cy="144" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="272" cy="120" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="290" cy="138" r="6" fill="#3a5ba0" opacity="0.32"/><circle cx="308" cy="128" r="6" fill="#3a5ba0" opacity="0.32"/>
+  <text x="165" y="200" text-anchor="middle" font-size="11" fill="#5b5b66">a blob is reshaped into the sheet's one preferred ripple</text>
+  <text x="495" y="22" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">group-velocity dispersion (GVD)</text>
+  <g transform="translate(360,40)"><line x1="0" y1="34" x2="66" y2="34" stroke="#c9c9d4"/><path d="M2,10 C24,20 42,44 64,54" fill="none" stroke="#3a5ba0" stroke-width="1.5"/><text x="33" y="49" text-anchor="middle" font-size="8.5" fill="#9aa">Ω(q): curved</text></g>
+  <circle cx="410" cy="130" r="12" fill="#3a5ba0"/>
+  <line x1="430" y1="130" x2="466" y2="130" stroke="#9a9aa6" stroke-width="1.5" marker-end="url(#t2a)"/>
+  <ellipse cx="558" cy="130" rx="58" ry="12" fill="#3a5ba0" opacity="0.34"/>
+  <text x="505" y="112" font-size="9.5" fill="#5b5b66">slow</text><text x="612" y="112" font-size="9.5" fill="#5b5b66" text-anchor="end">fast</text>
+  <text x="495" y="200" text-anchor="middle" font-size="11" fill="#5b5b66">wavelengths travel at different speeds → it stretches</text>
+</svg></div>
+<figcaption><b>Figure 12. Two ways a travelling packet blurs.</b> Even with a current, a compact
+packet does not stay compact. <em>Gain narrowing</em> (left): the band-pass coupling amplifies one
+wavelength and damps the others, reshaping any blob into that ripple and spreading it out.
+<em>Group-velocity dispersion</em> (right): different wavelengths drift at slightly different
+speeds, so the packet stretches. The finding below is that GVD is fixable but gain narrowing is the
+stubborn one.</figcaption>
+</figure>
+
+<h3>10.3 Diagnosis: flatten the gain</h3>
+<p>The diagnostics deliver a clear verdict. GVD is <em>curable</em>: there is a conduction speed
+(about \(c\approx2\) cells per period) at which \(\beta_2(q_*)=0\) while the drift survives. The
+stubborn one is gain narrowing — and there is a deep reason, worth stating as a principle:
+<em>a sharp spatial-frequency filter is necessarily dispersive</em>. The very band-pass
+selectivity that makes the sheet a useful filter is what shreds a travelling packet. The
+resolution is therefore to stop asking the sheet to filter and run it as a <strong>near-neutral
+medium</strong>: a <em>gentle</em> Mexican hat, tuned to the edge of stability, carrying the
+smooth long-wavelength component (the "DC" carrier, \(q_*=0\)) where every wavelength in the
+packet is treated almost alike — there the drift is dispersion-free for free and the current
+strength \(\boldsymbol\beta\) becomes a clean knob. A search over the coupling shape finds this
+point and flattens the gain curvature by about \(60\times\):</p>
 <table>
-<tr><th>regime</th><th class="n">\(v_g^*\)</th><th class="n">\(\beta_2^*\)</th><th class="n">\(|\Gamma''(q_*)|\)</th></tr>
-<tr><td>sharp hat (selective)</td><td class="n">0.13</td><td class="n">0.71</td><td class="n">2.19</td></tr>
+<tr><th>regime</th><th class="n">drift \(v_g^*\)</th><th class="n">GVD \(\beta_2^*\)</th><th class="n">gain curvature \(|\Gamma''(q_*)|\)</th></tr>
+<tr><td>sharp hat (selective filter)</td><td class="n">0.13</td><td class="n">0.71</td><td class="n">2.19</td></tr>
 <tr><td>gentle hat, DC carrier (searched)</td><td class="n">0.09</td><td class="n">\(\approx0\)</td><td class="n"><strong>0.035</strong></td></tr>
 </table>
-<p>A seeded bump in the searched regime drifts with its width essentially fixed (spread
-\(2.1\!\to\!2.2\) over 24 steps); the sharp-hat regime stalls at sheet-centre and more than
-doubles its spread — same substrate, opposite behaviour, predicted analytically.</p>
+<p>A seeded blob in the flat regime drifts keeping its width (spread \(2.1\to2.2\) over 24 steps),
+whereas the sharp-hat regime stalls at the sheet centre and more than doubles its spread — the
+same substrate behaving oppositely, exactly as the diagnostics predict.</p>
 
-<h3>10.4 The drift–dispersion trade-off (an honest limit)</h3>
-<p>Pushing the drift exposes a fundamental tension. Drift is \(g\beta\), but <em>both</em> low
-dispersion and stability push \(g\to0\) (a central-difference advection is only the leading term
-of a true shift, and its imaginary contribution raises the spectral radius). So ballistic,
-coherent transport reaches only <strong>\(\sim2\) bands</strong> before the packet spreads: a
-diffusive sheet cannot be at once a sharp spatial filter <em>and</em> a deep conveyor. The way
-out is to stop using a diffusive coupling for transport and use a <strong>shift</strong>
-(§10.5).</p>
+<h3>10.4 The honest limit of a diffusive conveyor</h3>
+<p>Flattening the gain, though, collides with the drift. The current strength is \(g\beta\), but
+keeping the sheet both flat <em>and</em> stable forces the coupling weak (\(g\to0\)): the
+antisymmetric current is only the leading term of a true shift, and its contribution nudges the
+sheet toward instability (its <em>spectral radius</em> — the largest per-step amplification —
+toward the critical value 1). Weak coupling means weak drift, so a coherent packet survives only
+<strong>about two stages</strong> before the residual blur wins. In one sentence: a diffusive
+sheet cannot be at once a sharp filter and a deep conveyor. The way out is to stop using a
+diffusive coupling for transport at all (§10.5).</p>
 
-<h3>10.5 The shift conveyor: dispersion-free transport at any depth</h3>
-<p>A pure directed shift breaks the trade-off by construction. A translation by \(\mathbf s\) is
-the Fourier ramp</p>
-\[ \hat W_{\text{shift}}(\mathbf q) = e^{-i(s_h q_h + s_w q_w)},\qquad |\hat W|=1,\ \ \arg=-\mathbf s\!\cdot\!\mathbf q, \]
-<p>so the gain is <em>flat</em> (no narrowing), the phase is <em>linear</em> (constant group
-velocity \(\mathbf v_g=\mathbf s\)), and the GVD is <em>exactly zero</em> — a translation
-preserves the packet shape. Run with a strong leak (\(A=e^{kT}\!\approx\!0\)) so the shift
-dominates the self term, and the sheet becomes a <strong>ballistic delay-line</strong>: the
-diagnostics give \(v_g^*\!\approx\!s\), \(\beta_2^*\!\approx\!0\), \(|\Gamma''(q_*)|\!\approx\!0.02\)
-at marginality, and a seeded bump translates at \(s\) sites/period with its width fixed (spread
-\(1.38\!\to\!1.39\)) clear across the sheet. The price is honest: with \(A\approx0\) the sheet
-carries phase but has no resonant self-memory — it is a directed conveyor, not a diffusive wave.
-This is <code>coupling = :shift</code> (trainable shift vector \(s_h,s_w\)).</p>
+<h3>10.5 The conveyor belt: a pure shift</h3>
+<p>The cleanest transport is not a wave at all — it is a <strong>shift</strong>: each step, move
+the whole field over by \(\mathbf s\) cells, like a conveyor belt carrying its load rigidly. A
+rigid translation <em>cannot</em> blur, because it preserves shape exactly. In Fourier terms a
+shift is the ramp</p>
+\[ \hat W_{\text{shift}}(\mathbf q) = e^{-i(s_h q_h + s_w q_w)},\qquad |\hat W|=1,\quad \arg\hat W=-\mathbf s\!\cdot\!\mathbf q, \]
+<p>whose magnitude is flat (so no gain narrowing) and whose phase is exactly linear (so one
+constant speed \(\mathbf v_g=\mathbf s\) and <em>zero</em> GVD) — all three spreading channels
+closed by construction. The price is honest: to make the shift dominate, each neuron must mostly
+forget its own state between steps (a strong leak, \(A=e^{kT}\approx0\)), so the sheet becomes a
+directed <em>delay-line</em> that carries phase rather than a resonant wave. The diagnostics
+confirm the ideal — group velocity \(\approx s\), zero GVD, flat gain — and a seeded blob
+translates at \(s\) cells per period with its width fixed (spread \(1.38\to1.39\)) clear across
+the sheet. This is <code>coupling = :shift</code> (a trainable shift vector \(s_h,s_w\)).</p>
 
-<p>On this conveyor the wave-programmed pipeline runs at depth. A smooth payload injected at the
-top drifts through <em>all</em> \(E\) expert bands; each active expert stamps a VSA bind \(V_e\)
-as the packet passes; the composition \(\sum_e V_e\) is recovered by a differential unbind
-(bound run minus a transport-off control cancels the propagation phase):</p>
+<figure class="fig"><div class="figframe">
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs><marker id="t3a" markerWidth="9" markerHeight="9" refX="6" refY="3.2" orient="auto"><path d="M0,0 L7,3.2 L0,6.4 Z" fill="#c0392b"/></marker></defs>
+  <text x="175" y="24" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">shift conveyor</text>
+  <rect x="100" y="45" width="150" height="228" rx="6" fill="#fbfbfd" stroke="#c9c9d4"/>
+  <line x1="100" y1="102" x2="250" y2="102" stroke="#e8e8ee"/><line x1="100" y1="159" x2="250" y2="159" stroke="#e8e8ee"/><line x1="100" y1="216" x2="250" y2="216" stroke="#e8e8ee"/>
+  <circle cx="113" cy="73" r="6" fill="#5a9a5a"/><text x="90" y="77" font-size="10" fill="#3f7a3f" text-anchor="end">E₁</text>
+  <circle cx="113" cy="130" r="6" fill="#5a9a5a"/><text x="90" y="134" font-size="10" fill="#3f7a3f" text-anchor="end">E₂</text>
+  <circle cx="113" cy="187" r="6" fill="#5a9a5a"/><text x="90" y="191" font-size="10" fill="#3f7a3f" text-anchor="end">E₃</text>
+  <circle cx="113" cy="244" r="6" fill="#5a9a5a"/><text x="90" y="248" font-size="10" fill="#3f7a3f" text-anchor="end">E₄</text>
+  <line x1="185" y1="60" x2="185" y2="260" stroke="#c0392b" stroke-width="2" marker-end="url(#t3a)"/>
+  <circle cx="185" cy="73" r="12" fill="#c0392b" opacity="0.92"/><circle cx="185" cy="130" r="12" fill="#c0392b" opacity="0.92"/><circle cx="185" cy="187" r="12" fill="#c0392b" opacity="0.92"/><circle cx="185" cy="244" r="12" fill="#c0392b" opacity="0.92"/>
+  <text x="212" y="77" font-size="10.5" fill="#26324a">×V₁</text><text x="212" y="134" font-size="10.5" fill="#26324a">×V₂</text><text x="212" y="191" font-size="10.5" fill="#26324a">×V₃</text><text x="212" y="248" font-size="10.5" fill="#26324a">×V₄</text>
+  <text x="175" y="292" text-anchor="middle" font-size="11" fill="#26324a">read out: unbind → V₁+V₂+V₃+V₄</text>
+  <text x="490" y="24" text-anchor="middle" font-size="13" fill="#26324a" font-weight="700">diffusive conveyor</text>
+  <rect x="430" y="45" width="120" height="180" rx="6" fill="#fbfbfd" stroke="#c9c9d4"/>
+  <line x1="430" y1="90" x2="550" y2="90" stroke="#e8e8ee"/><line x1="430" y1="135" x2="550" y2="135" stroke="#e8e8ee"/><line x1="430" y1="180" x2="550" y2="180" stroke="#e8e8ee"/>
+  <ellipse cx="490" cy="135" rx="52" ry="46" fill="#3a5ba0" opacity="0.14"/><ellipse cx="490" cy="135" rx="30" ry="26" fill="#3a5ba0" opacity="0.2"/><circle cx="490" cy="135" r="9" fill="#3a5ba0" opacity="0.4"/>
+  <text x="490" y="245" text-anchor="middle" font-size="10.5" fill="#5b5b66">smears + stalls (~2 stages)</text>
+</svg></div>
+<figcaption><b>Figure 13. The shift conveyor runs a deep pipeline.</b> A pure shift translates the
+whole field one step at a time — a conveyor belt — so a payload packet passes each expert band in
+turn (E₁→E₄) keeping its shape, and each active expert stamps its transform \(V_e\) as the packet
+goes by; the readout recovers the composition by unbinding. A diffusive conveyor (right) instead
+smears the packet and stalls it near the sheet centre, reaching only about two stages.</figcaption>
+</figure>
+
+<p>On this conveyor the wave-programmed pipeline finally runs at depth. A smooth payload injected
+at the top drifts through <em>all</em> \(E\) expert bands; each active expert stamps its VSA bind
+\(V_e\) as the packet passes; and the composition \(\sum_e V_e\) is recovered downstream by
+unbinding (comparing the bound run against a transport-off control cancels the propagation
+phase):</p>
 <table>
 <tr><th>check (\(E=4\) bands)</th><th>result</th></tr>
 <tr><td>band-visit order</td><td>\(1\to2\to3\to4\) (directed path)</td></tr>
@@ -876,9 +985,10 @@ as the packet passes; the composition \(\sum_e V_e\) is recovered by a different
 </table>
 <p class="small"><code>demos/wave_experts_pipeline.jl</code>. This turns the isotropy limitation of
 §8 into a constructive result: deep directed serial composition on the shift conveyor, provably
-impossible without directed transport (\(\mathbf s=0\)). The diffusive <code>:aniso</code>
-conveyor of §10.1–10.4 reaches the same result but only to \(\sim2\) stages; the shift removes
-that ceiling at the cost of the sheet's resonant self-memory.</p>
+impossible without directed transport (\(\mathbf s=0\) freezes the packet in the first band). The
+diffusive <code>:aniso</code> conveyor of §10.1–10.4 reaches the same kind of result but only to
+about two stages; the shift removes that ceiling, at the cost of the sheet's resonant
+self-memory.</p>
 
 <!-- ===================================================================== -->
 <h2 id="conclusion">11. Conclusion &amp; commentary</h2>
