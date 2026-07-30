@@ -465,12 +465,70 @@ toroidal re-entry of the wave has a 1-D analogue in recurrent-depth / looped tra
 <h2 id="results">3. Empirical results</h2>
 
 <h3>3.1 The go/no-go: does discrete routing survive the wave substrate?</h3>
-<p>The central risk of the expert design is that a discrete straight-through gate, reading from
-and writing into the wave, collapses to one always-on expert. On a synthetic "which patch is
-coherent" routing task the router reaches 100% accuracy with per-expert load
-<em>staying spread</em> (load-entropy \(\approx 1.2\) of \(\ln 4 = 1.386\), all four experts
-used) — <strong>no collapse</strong> <span class="small">[<code>demos/wave_experts_gonogo.jl</code>]</span>.
-The straight-through gate gradient stays informative through the discrete-SSM rollout.</p>
+<p>The first thing to check is not accuracy but <em>survival</em>: does the router keep using all
+its experts, or does it <strong>collapse</strong> onto one always-on expert? Discrete top-1
+routers are prone to a rich-get-richer spiral (§2.2), and here the danger is sharper than usual.
+The gate is a <em>straight-through</em> estimator (§2.2): its learning signal must travel from a
+hard \(\arg\max\), through a bind written <em>into</em> the wave, through the entire discrete-SSM
+rollout, and back again as a gradient. If that round trip degrades the signal, the router can no
+longer tell experts apart and one expert swallows all the traffic. The detector is the
+<strong>load entropy</strong> \(-\sum_e \bar\ell_e\ln\bar\ell_e\), where \(\bar\ell_e\) is expert
+\(e\)'s share of the traffic: it equals \(\ln E\) when the load is perfectly spread and falls to
+\(0\) if one expert takes everything (Figure 5).</p>
+
+<p>The synthetic probe is the smallest task with a ground-truth "correct expert." The sheet is
+split into \(E=4\) row-band patches, one per expert; in each example a <em>randomly chosen</em>
+band is made phase-<em>coherent</em> (its neurons share a phase) while the other bands carry
+random phases, and the label is which band. To answer, the router must detect the coherent patch
+and route to that band's expert — a genuinely input-dependent decision that a collapsed router
+(which sends everything to one expert regardless of input) cannot fake.</p>
+
+<p>The router passes cleanly: it reaches <strong>100% accuracy</strong> while the per-expert load
+<em>stays spread</em> — load entropy \(\approx 1.2\) of the maximum \(\ln 4 = 1.386\), all four
+experts in use, <strong>no collapse</strong>. With the phase-matched gate (§3.4) the balance is
+even better, essentially <em>maximal</em> (\(\approx\ln 4\), a uniform \(\sim0.25\) each). So the
+straight-through gradient stays informative through the wave rollout — the hard route trains.
+<span class="small">[<code>demos/wave_experts_gonogo.jl</code>]</span></p>
+
+<figure class="fig"><div class="figframe">
+<svg viewBox="0 0 660 250" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs><marker id="g5a" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5a9a5a"/></marker></defs>
+  <line x1="330" y1="18" x2="330" y2="232" stroke="#e2e2ea"/>
+  <text x="165" y="22" text-anchor="middle" font-size="12.5" fill="#26324a" font-weight="700">task: which patch is coherent?</text>
+  <rect x="55" y="48" width="100" height="152" rx="4" fill="#fbfbfd" stroke="#c9c9d4"/>
+  <rect x="55" y="86" width="100" height="38" fill="#eef6ee"/>
+  <line x1="55" y1="86" x2="155" y2="86" stroke="#d7e4d7"/><line x1="55" y1="124" x2="155" y2="124" stroke="#d7e4d7"/><line x1="55" y1="162" x2="155" y2="162" stroke="#e2e2ea"/>
+  <text x="48" y="70" font-size="9" fill="#9aa" text-anchor="end">E₁</text><text x="48" y="108" font-size="9" fill="#3f7a3f" text-anchor="end">E₂</text><text x="48" y="146" font-size="9" fill="#9aa" text-anchor="end">E₃</text><text x="48" y="185" font-size="9" fill="#9aa" text-anchor="end">E₄</text>
+  <text x="105" y="72" text-anchor="middle" font-size="10" fill="#b0b0bb">random phases</text>
+  <text x="105" y="109" text-anchor="middle" font-size="10" fill="#3f7a3f" font-weight="700">coherent →→→</text>
+  <text x="105" y="147" text-anchor="middle" font-size="10" fill="#b0b0bb">random phases</text>
+  <text x="105" y="185" text-anchor="middle" font-size="10" fill="#b0b0bb">random phases</text>
+  <line x1="158" y1="105" x2="200" y2="105" stroke="#5a9a5a" stroke-width="1.8" marker-end="url(#g5a)"/>
+  <circle cx="216" cy="105" r="9" fill="#5a9a5a"/><text x="216" y="128" text-anchor="middle" font-size="10" fill="#3f7a3f" font-weight="700">E₂ fires</text>
+  <text x="165" y="244" text-anchor="middle" font-size="10.5" fill="#5b5b66">route to the coherent patch's expert</text>
+  <text x="495" y="22" text-anchor="middle" font-size="12.5" fill="#26324a" font-weight="700">per-expert load</text>
+  <text x="360" y="48" font-size="10.5" fill="#3f7a3f" font-weight="700">observed ✓  (entropy ≈ ln 4)</text>
+  <line x1="360" y1="115" x2="500" y2="115" stroke="#c9c9d4"/>
+  <rect x="372" y="67" width="24" height="48" fill="#3a5ba0"/><rect x="404" y="75" width="24" height="40" fill="#3a5ba0"/><rect x="436" y="71" width="24" height="44" fill="#3a5ba0"/><rect x="468" y="79" width="24" height="36" fill="#3a5ba0"/>
+  <text x="384" y="127" font-size="8.5" fill="#9aa" text-anchor="middle">E₁</text><text x="416" y="127" font-size="8.5" fill="#9aa" text-anchor="middle">E₂</text><text x="448" y="127" font-size="8.5" fill="#9aa" text-anchor="middle">E₃</text><text x="480" y="127" font-size="8.5" fill="#9aa" text-anchor="middle">E₄</text>
+  <text x="360" y="152" font-size="10.5" fill="#c0392b" font-weight="700">collapse ✗  (entropy → 0, not seen)</text>
+  <line x1="360" y1="222" x2="500" y2="222" stroke="#c9c9d4"/>
+  <rect x="372" y="154" width="24" height="68" fill="#c0392b"/><rect x="404" y="216" width="24" height="6" fill="#d9a7a0"/><rect x="436" y="216" width="24" height="6" fill="#d9a7a0"/><rect x="468" y="217" width="24" height="5" fill="#d9a7a0"/>
+  <text x="384" y="234" font-size="8.5" fill="#9aa" text-anchor="middle">E₁</text><text x="416" y="234" font-size="8.5" fill="#9aa" text-anchor="middle">E₂</text><text x="448" y="234" font-size="8.5" fill="#9aa" text-anchor="middle">E₃</text><text x="480" y="234" font-size="8.5" fill="#9aa" text-anchor="middle">E₄</text>
+</svg></div>
+<figcaption><b>Figure 5. The go/no-go: routing survives, without collapse.</b> Left: the synthetic
+probe — one row-band is made phase-coherent and the router must send it to that band's expert.
+Right: the health check is the per-expert load. The <span style="color:#3f7a3f">observed</span>
+load stays spread across all four experts (entropy near its maximum \(\ln 4\)); a
+<span style="color:#c0392b">collapsed</span> router (one always-on expert, entropy \(\to0\)) is
+what the design risks but is <em>not</em> seen — the straight-through gate keeps training through
+the wave rollout.</figcaption>
+</figure>
+
+<p>The same non-collapse holds on <em>real</em> data, which is the go/no-go that matters. Training
+the expert bank end-to-end on FashionMNIST (§3.3), the gate entropy settles at \(1.60\) of a
+\(1.95\) maximum with all seven experts used — no expert dies during actual learning. Routing
+survives the wave substrate in both the controlled probe and the wild.</p>
 
 <h3>3.2 Decode check: is the stamped bind recoverable?</h3>
 <table>
