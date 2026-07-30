@@ -294,18 +294,23 @@ backward pass. Together these are <code>moe_gate</code> (routing plus the straig
 and <code>update_moe_bias</code> (the out-of-graph balancing controller) in the
 implementation.</p>
 
-<p>In symbols, each expert summarises its patch with a mask-pooled complex <em>read</em>, turns
-the read magnitude into a routing score, and those scores drive a straight-through top-1
+<p>In symbols, each expert summarises its patch with a mask-pooled <em>read</em> and turns it into
+a real routing score. Because information here lives in <em>phase</em>, not amplitude — and reading
+raw potentials would need an implausible "mega-neuron" tapping sub-neuron state — the read is a VSA
+<strong>unbind-by-key</strong>: the expert unbinds its patch by a learned per-site key \(\psi_e\)
+and takes the real part, a phase-domain "<em>is this my key?</em>" match (the read-side dual of the
+write-side bind, key/value \(=\psi_e/\varphi_e\); taking \(\mathrm{Re}\) not \(|\cdot|\) makes it
+signed, so the anti-phase pattern is suppressed). Those scores drive a straight-through top-1
 selection whose <em>load</em> — not a loss — balances the experts:</p>
 \[
 \begin{aligned}
-r_e &amp;= \tfrac{1}{|P_e|}\!\sum_{x\in P_e} z_x, &amp; \ell &amp;= W_r\,|r| &amp;&amp; \text{(read}\to\text{logits)}\\[2pt]
+\rho_e &amp;= \tfrac{1}{|P_e|}\!\sum_{x\in P_e} e^{-i\pi\psi_{e,x}}\,z_x, &amp; \ell &amp;= W_r\,\mathrm{Re}\,\rho &amp;&amp; \text{(unbind-by-key}\to\text{logits)}\\[2pt]
 \mathrm{sel} &amp;= \mathrm{onehot}\!\big(\arg\max_e(\ell_e + b_e)\big), &amp; \mathrm{soft} &amp;= \mathrm{softmax}(\ell/\tau) &amp;&amp; \text{(select}\;\cdot\;\text{soften)}\\[2pt]
 g &amp;= \mathrm{sel} + \big(\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\big), &amp; b_e &amp;\leftarrow b_e + \eta\,\mathrm{sign}\!\big(\tfrac1E-\bar\ell_e\big) &amp;&amp; \text{(STE gate}\;\cdot\;\text{loss-free balance)}
 \end{aligned}
 \]
-<p>where \(P_e\) is expert \(e\)'s patch, \(\mathrm{sg}\) is the stop-gradient, and
-\(\bar\ell_e=\langle g_e\rangle\) its mean gate load over the batch. The two ideas above appear
+<p>where \(P_e\) is expert \(e\)'s patch, \(\psi_e\) its learned key, \(\mathrm{sg}\) the
+stop-gradient, and \(\bar\ell_e=\langle g_e\rangle\) its mean gate load over the batch. The two ideas above appear
 directly in this algebra. First, the straight-through
 estimator gives \(g=\mathrm{sel}\) (a hard one-hot route) in the forward pass but
 \(\partial g/\partial\ell=\partial\,\mathrm{soft}/\partial\ell\) in the backward pass — a smooth
@@ -325,8 +330,8 @@ and the bias update runs entirely outside the gradient tape.</p>
   <!-- Box A: read + logits -->
   <rect x="15" y="114" width="182" height="74" rx="8" fill="#f2f4f8" stroke="#c9c9d4" stroke-width="1.5"/>
   <text x="106" y="136" font-size="12" fill="#3a5ba0" text-anchor="middle" font-weight="700">read → logits</text>
-  <text x="106" y="158" font-size="12" fill="#26324a" text-anchor="middle">r_e = mean over P_e of z</text>
-  <text x="106" y="177" font-size="12" fill="#26324a" text-anchor="middle">ℓ = W_r · |r|</text>
+  <text x="106" y="158" font-size="12" fill="#26324a" text-anchor="middle">ρ_e = unbind P_e by key ψ_e</text>
+  <text x="106" y="177" font-size="12" fill="#26324a" text-anchor="middle">ℓ = W_r · Re(ρ)</text>
   <!-- Box B: select (dashed, no grad) -->
   <rect x="238" y="30" width="258" height="66" rx="8" fill="#fbf1e6" stroke="#c98a3a" stroke-width="1.5" stroke-dasharray="5 4"/>
   <text x="367" y="50" font-size="11.5" fill="#9c6a24" text-anchor="middle" font-weight="700">select — forward only, no gradient</text>
@@ -351,8 +356,8 @@ and the bias update runs entirely outside the gradient tape.</p>
   <text x="472" y="11" font-size="10.5" fill="#9c6a24" text-anchor="middle">out-of-graph balance:  b_e += η·sign(1/E − load_e)</text>
 </svg>
 </div>
-<figcaption><b>Figure 3. The router: two paths through one score.</b> A patch read \(r_e\) becomes
-a logit \(\ell_e=(W_r|r|)_e\), which forks. The <span style="color:#9c6a24">selection</span> path
+<figcaption><b>Figure 3. The router: two paths through one score.</b> A keyed patch read \(\rho_e\)
+(unbind by \(\psi_e\)) becomes a logit \(\ell_e=(W_r\,\mathrm{Re}\,\rho)_e\), which forks. The <span style="color:#9c6a24">selection</span> path
 adds the load-balancing bias and takes an \(\arg\max\) — hard, and carries no gradient. The
 <span style="color:#3f7a3f">gradient</span> path softens the <em>unbiased</em> logits. The
 straight-through gate \(g=\mathrm{sel}+\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\) (\(\mathrm{sg}\)
@@ -360,6 +365,17 @@ straight-through gate \(g=\mathrm{sel}+\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\
 the bias from each expert's realised load, entirely outside the gradient tape — so balancing the
 load never perturbs the task gradient.</figcaption>
 </figure>
+
+<p>The routing scalar is thus a <em>phase comparison</em>, so it stays compatible with the
+resonate-and-fire readout — one phase-tuned neuron per expert, not a potential-reading oracle —
+and pooling the raw (non-unit-normalised) field lets amplitude act as confidence (a good key
+match is usually also a strong-signal site). Three feature modes are exposed as
+<code>route_feature</code>: <code>:matched</code> (the keyed read above), <code>:dispersion</code>
+(\(1-\) the order parameter of the unit phasors — phase <em>diversity</em>), and
+<code>:coherence</code> (the magnitude \(|r_e|\) of the plain pooled read — an amplitude-weighted
+coherence). <code>:coherence</code> is the original default and the baseline in §3.4; the
+specialisation ladder (§3.5) routes with <code>:matched</code>.
+<span class="small">[<code>route_feature</code> in <code>src/wave.jl</code>; <code>test_wave_route_features</code>]</span></p>
 
 <h3>2.3 Two routing regimes</h3>
 <p>A selective SSM stays parallel-scan-trainable if and only if its coefficients can be computed
@@ -445,27 +461,6 @@ sequences <span class="small">[Keller &amp; Welling 2023; Keller et&nbsp;al. 202
 toroidal re-entry of the wave has a 1-D analogue in recurrent-depth / looped transformers
 <span class="small">[Geiping et&nbsp;al. 2025]</span>.</p>
 
-<h3>2.5 Reading the patch in the phase domain</h3>
-<p>The router of §2.2 pools the complex patch and reads its <em>magnitude</em> — which sits
-awkwardly with the architecture's own thesis that information rides on <em>phase</em>, not
-amplitude, and which, read literally, would need an implausible "mega-neuron" tapping raw
-sub-neuron potentials. The gate can instead be a genuinely phase-domain operation: each expert
-<strong>unbinds its patch by a learned per-site key</strong> and takes the real part,</p>
-\[ \rho_e = \frac{1}{|P_e|}\sum_{x\in P_e} e^{-i\pi\psi_{e,x}}\,z_x,\qquad \mathrm{score}_e = \mathrm{Re}\,\rho_e, \]
-<p>a VSA "<em>is this my key?</em>" similarity — the read-side dual of the write-side bind, with
-key \(\psi_e\) and value \(\varphi_e\) a key/value pair. The score is large only when the patch's
-phase pattern matches \(\psi_e\); taking \(\mathrm{Re}\,\rho_e\) (not \(|\rho_e|\)) makes it
-signed, so the anti-phase pattern is <em>suppressed</em> rather than also firing. Three feature
-modes are exposed as <code>route_feature</code>: <code>:coherence</code> (the legacy
-\(|\text{pooled}|\), an amplitude-weighted phase coherence), <code>:dispersion</code> (\(1-\) the
-order parameter of the unit phasors — "a patch carrying a variety of phases holds more
-information"), and <code>:matched</code> (the keyed read above). The routing scalar is thus a
-<em>phase comparison</em>, so it stays compatible with the resonate-and-fire readout: one
-phase-tuned neuron per expert, not a potential-reading oracle. The read pools the raw
-(non-unit-normalised) field, so amplitude acts as confidence — a good key match is usually also a
-strong-signal site. <span class="small">[<code>route_feature</code> in <code>src/wave.jl</code>;
-<code>test_wave_route_features</code>]</span></p>
-
 
 <h2 id="results">3. Empirical results</h2>
 
@@ -504,7 +499,7 @@ wave/expert layer is a near-free spatial-mixing adjunct on top of a head-dominat
 not a stand-alone learner.</p>
 
 <h3>3.4 Phase-domain routing: the keys are load-bearing</h3>
-<p>Two results establish that the matched-key gate (§2.5) genuinely routes on phase. First, on the
+<p>Two results establish that the matched-key gate (§2.2) genuinely routes on phase. First, on the
 go/no-go it does not merely avoid collapse — it reaches <strong>maximal</strong> load balance
 (load-entropy \(\approx\ln 4\), a uniform \(\sim0.25\) per expert) where the amplitude
 <code>:coherence</code> gate leaves one expert carrying \(\sim0.5\). Second, and decisively,
