@@ -91,6 +91,9 @@ than asserted. Cross-references point to the source docs
   <li><a href="#spike">Computing the spike sheet in parallel: the DEQ fixed point</a></li>
   <li><a href="#results">Verification: dispersion &amp; equivalence</a></li>
   <li><a href="#open">Limitations &amp; open questions</a></li>
+  <li><a href="#reservoir">Reservoir computing: XOR in a bucket of spikes</a></li>
+  <li><a href="#transport">Directed transport: breaking isotropy</a></li>
+  <li><a href="#conclusion">Conclusion &amp; commentary</a></li>
   <li><a href="#refs">References</a></li>
 </ol>
 </div>
@@ -709,21 +712,219 @@ formalism (they agree in phase, differing only in the sub-cycle leak magnitude).
 
 <!-- ===================================================================== -->
 <h2 id="open">8. Limitations &amp; open questions</h2>
+<p>Each of these is a direct consequence of the design, stated plainly so the claims elsewhere
+are not over-read.</p>
 <ul>
-<li><strong>The readable channel is coherence-limited.</strong> Interference intensity lives in
-\(|z|^2\), a square law that a purely linear \((\mathrm{Re},\mathrm{Im})\) readout cannot
-recover; the phase channel is linearly readable but needs carrier coherence (§4.5). This is
-wave physics, not a fixable artifact.</li>
-<li><strong>Criticality \(\ne\) linear SSM.</strong> Genuine avalanche/branching criticality
-needs the nonlinear threshold-and-reset (ODE-only); the trainable path is near-critical
-<em>linear</em>. Traveling <em>bumps</em> (amplitude packets) need symmetry-breaking the
-isotropic sheet lacks.</li>
-<li><strong>Delay-as-phase is exact only on the carrier</strong>, approximate for broadband;
-patchy (non-translation-invariant) connectivity forfeits the closed-form dispersion.</li>
+
+<li><strong>The readable channel is coherence-limited — reading phase needs a reference.</strong>
+The sheet carries two kinds of signal with different readout requirements. The <em>intensity</em>
+of interference (how strongly waves reinforce) is \(|z|^2=\mathrm{Re}^2+\mathrm{Im}^2\), a
+<em>square law</em>: a readout that is linear in \((\mathrm{Re},\mathrm{Im})\) cannot compute
+it, so extracting interference strength needs a nonlinear (square-law) detector. The
+<em>phase</em> is linearly readable, but phase is only defined <em>relative to a reference</em> —
+either a coherent carrier (all sites share \(\omega\), so relative phases are well-posed) or an
+explicit reference signal to unbind against. On an incoherent field the pooled phasor sums to
+\(\approx 0\) and there is no phase to read. (Exactly what the decode experiments show: a
+"blind" phase read works only on a coherent carrier, while a "differential" read against a
+bind-free reference is robust.) So this is wave physics, not a fixable artifact: to read phase you
+must supply a reference, to read intensity you must square.</li>
+
+<li><strong>"Criticality" here is the linear stability edge, not avalanche criticality.</strong>
+The criticality of §4.2 is the linear spectral-radius edge \(\rho=\max_q|M(q)|\to 1\) — the
+marginal point between a decaying and a diverging <em>linear</em> sheet, and the point we tune and
+train at. That is <em>not</em> the self-organised, power-law <em>avalanche</em> criticality of
+cortex <span class="small">[Beggs &amp; Plenz 2003]</span>, which is a nonlinear cascade
+phenomenon requiring a hard threshold-and-reset (a neuron fires and resets, seeding a branching
+cascade). That discontinuity lives only in the ODE demo mode, not in the smooth, trainable
+discrete path — so we may sit at the linear edge but should not claim genuine avalanche
+statistics. Relatedly, the isotropic sheet supports traveling <em>waves</em> (phase fronts) but
+not a self-sustaining traveling <em>bump</em> — a localised amplitude packet that moves while
+holding together, as in continuous-attractor networks. A symmetric, isotropic kernel has no
+preferred direction, so a symmetric bump merely spreads; making one <em>travel</em> requires
+breaking the symmetry (anisotropic coupling or adaptation), which the shipped isotropic sheet
+lacks.</li>
+
+<li><strong>The delay-as-phase trick is narrowband, and the dispersion needs the symmetry.</strong>
+Two consequences of the modelling choices. First, turning a conduction delay \(\tau\) into a
+phase factor \(e^{-i\omega\tau}\) (§3.1) is <em>exact only at the carrier</em> \(\omega\): a
+real signal occupies a band around \(\omega\), and a true delay acts as \(e^{-i\Omega\tau}\)
+frequency-by-frequency, so collapsing it to the single carrier value is excellent for narrowband
+content but only approximate as the bandwidth grows. Second, the entire closed-form dispersion of
+§4 rests on translation invariance — that is what lets the FFT diagonalise the coupling into
+\(M(q)\). The moment the connectivity is made <em>patchy</em> or spatially-varying
+(non-translation-invariant) — which is precisely what selective computation demands (§10) — the
+operator is no longer a convolution, does not diagonalise under the FFT, and the closed-form
+dispersion and spectral-radius criticality are lost. Such a sheet can still be simulated and
+trained; what is forfeited is the analytic handle, not the dynamics.</li>
+
 </ul>
 
 <!-- ===================================================================== -->
-<h2 id="refs">9. References</h2>
+<h2 id="reservoir">9. Reservoir computing: XOR in a bucket of spikes</h2>
+
+<p>The conclusion below argues the sheet is a <em>medium</em>, not a selective transformer. There is a classic way to compute with exactly such a medium: <strong>reservoir computing</strong>. A fixed, high-dimensional nonlinear dynamical system &#8212; the <em>reservoir</em> &#8212; projects an input into a rich transient state, and <em>only a linear readout is trained</em> <span class="small">[Jaeger 2001; Maass, Natschl&#228;ger &amp; Markram 2002]</span>. The medium supplies the nonlinearity for free; the learning is a linear map on its state.</p>
+
+<p>The canonical physical demonstration is Fernando &amp; Sojakka's <em>"Pattern Recognition in a Bucket"</em> <span class="small">[2003]</span>: ripples on a literal bucket of water, filmed by a camera, compute <strong>XOR</strong> &#8212; a function no linear classifier can compute on the raw inputs &#8212; because the water's wave interference is the nonlinear expansion and the camera's brightness (an <em>intensity</em>) is read off by a simple linear classifier. Our sheet is the same experiment with <strong>spiking waves instead of water</strong>. We treat the R&amp;F sheet as a <em>fixed</em> reservoir (its coupling is <em>not</em> trained): the two bits \(a,b\) are injected as phase-encoded drives at two sites (bit \(\mapsto\) phasor \(e^{i\pi\,\text{bit}}\)); the spiking waves propagate and interfere across the sheet; and a linear (ridge) readout on the interference intensity \(|z|^2\) computes XOR.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 412 206" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif"><rect x="20" y="26" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="26" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="26" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="26" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="26" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="26" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="26" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="26" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="26" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="26" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="39" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="39" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="39" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="39" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="39" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="39" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="39" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="39" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="39" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="39" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="39" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="39" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="33" y="52" width="13" height="13" fill="rgb(63,50,117)"/><rect x="46" y="52" width="13" height="13" fill="rgb(68,5,87)"/><rect x="59" y="52" width="13" height="13" fill="rgb(66,19,96)"/><rect x="72" y="52" width="13" height="13" fill="rgb(70,179,115)"/><rect x="85" y="52" width="13" height="13" fill="rgb(209,223,54)"/><rect x="98" y="52" width="13" height="13" fill="rgb(70,179,115)"/><rect x="111" y="52" width="13" height="13" fill="rgb(66,19,96)"/><rect x="124" y="52" width="13" height="13" fill="rgb(68,5,87)"/><rect x="137" y="52" width="13" height="13" fill="rgb(63,50,117)"/><rect x="150" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="163" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="20" y="65" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="65" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="65" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="65" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="65" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="65" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="65" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="65" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="65" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="65" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="65" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="65" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="78" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="78" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="78" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="78" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="78" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="78" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="78" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="78" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="78" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="78" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="78" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="78" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="91" width="13" height="13" fill="rgb(59,82,139)"/><rect x="33" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="46" y="91" width="13" height="13" fill="rgb(65,31,104)"/><rect x="59" y="91" width="13" height="13" fill="rgb(67,14,93)"/><rect x="72" y="91" width="13" height="13" fill="rgb(60,74,134)"/><rect x="85" y="91" width="13" height="13" fill="rgb(45,115,140)"/><rect x="98" y="91" width="13" height="13" fill="rgb(60,74,134)"/><rect x="111" y="91" width="13" height="13" fill="rgb(67,14,93)"/><rect x="124" y="91" width="13" height="13" fill="rgb(65,31,104)"/><rect x="137" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="150" y="91" width="13" height="13" fill="rgb(59,82,139)"/><rect x="163" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="20" y="104" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="104" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="104" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="104" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="104" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="104" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="104" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="104" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="104" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="104" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="104" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="104" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="117" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="117" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="117" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="117" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="117" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="117" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="117" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="117" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="117" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="117" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="117" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="117" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="33" y="130" width="13" height="13" fill="rgb(63,50,117)"/><rect x="46" y="130" width="13" height="13" fill="rgb(68,5,87)"/><rect x="59" y="130" width="13" height="13" fill="rgb(66,19,96)"/><rect x="72" y="130" width="13" height="13" fill="rgb(70,179,115)"/><rect x="85" y="130" width="13" height="13" fill="rgb(209,223,54)"/><rect x="98" y="130" width="13" height="13" fill="rgb(70,179,115)"/><rect x="111" y="130" width="13" height="13" fill="rgb(66,19,96)"/><rect x="124" y="130" width="13" height="13" fill="rgb(68,5,87)"/><rect x="137" y="130" width="13" height="13" fill="rgb(63,50,117)"/><rect x="150" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="163" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="20" y="143" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="143" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="143" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="143" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="143" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="143" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="143" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="143" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="143" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="143" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="156" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="156" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="156" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="156" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="156" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="156" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="156" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="156" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="156" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="156" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="156" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="156" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="169" width="13" height="13" fill="rgb(59,82,139)"/><rect x="33" y="169" width="13" height="13" fill="rgb(60,77,136)"/><rect x="46" y="169" width="13" height="13" fill="rgb(65,31,104)"/><rect x="59" y="169" width="13" height="13" fill="rgb(67,14,93)"/><rect x="72" y="169" width="13" height="13" fill="rgb(60,74,134)"/><rect x="85" y="169" width="13" height="13" fill="rgb(45,115,140)"/><rect x="98" y="169" width="13" height="13" fill="rgb(60,74,134)"/><rect x="111" y="169" width="13" height="13" fill="rgb(67,14,93)"/><rect x="124" y="169" width="13" height="13" fill="rgb(65,31,104)"/><rect x="137" y="169" width="13" height="13" fill="rgb(60,77,136)"/><rect x="150" y="169" width="13" height="13" fill="rgb(59,82,139)"/><rect x="163" y="169" width="13" height="13" fill="rgb(60,77,136)"/><circle cx="91.5" cy="58.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="91.5" cy="136.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><text x="98.0" y="18" text-anchor="middle" font-size="12" fill="#26324a">a = b</text><text x="98.0" y="198" text-anchor="middle" font-size="11" fill="#5b5b66">constructive &#8594; bright &#8594; XOR 0</text><rect x="236" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="249" y="26" width="13" height="13" fill="rgb(67,9,89)"/><rect x="262" y="26" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="26" width="13" height="13" fill="rgb(65,32,105)"/><rect x="288" y="26" width="13" height="13" fill="rgb(64,38,109)"/><rect x="301" y="26" width="13" height="13" fill="rgb(64,34,106)"/><rect x="314" y="26" width="13" height="13" fill="rgb(65,28,102)"/><rect x="327" y="26" width="13" height="13" fill="rgb(66,17,95)"/><rect x="340" y="26" width="13" height="13" fill="rgb(67,6,87)"/><rect x="353" y="26" width="13" height="13" fill="rgb(67,6,88)"/><rect x="366" y="26" width="13" height="13" fill="rgb(65,24,100)"/><rect x="379" y="26" width="13" height="13" fill="rgb(64,35,107)"/><rect x="236" y="39" width="13" height="13" fill="rgb(57,87,139)"/><rect x="249" y="39" width="13" height="13" fill="rgb(67,8,89)"/><rect x="262" y="39" width="13" height="13" fill="rgb(67,9,90)"/><rect x="275" y="39" width="13" height="13" fill="rgb(59,81,138)"/><rect x="288" y="39" width="13" height="13" fill="rgb(64,173,119)"/><rect x="301" y="39" width="13" height="13" fill="rgb(77,186,110)"/><rect x="314" y="39" width="13" height="13" fill="rgb(62,171,120)"/><rect x="327" y="39" width="13" height="13" fill="rgb(60,74,134)"/><rect x="340" y="39" width="13" height="13" fill="rgb(67,7,88)"/><rect x="353" y="39" width="13" height="13" fill="rgb(67,11,91)"/><rect x="366" y="39" width="13" height="13" fill="rgb(55,91,139)"/><rect x="379" y="39" width="13" height="13" fill="rgb(40,129,140)"/><rect x="236" y="52" width="13" height="13" fill="rgb(42,124,140)"/><rect x="249" y="52" width="13" height="13" fill="rgb(66,21,98)"/><rect x="262" y="52" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="52" width="13" height="13" fill="rgb(48,109,139)"/><rect x="288" y="52" width="13" height="13" fill="rgb(183,218,64)"/><rect x="301" y="52" width="13" height="13" fill="rgb(242,229,41)"/><rect x="314" y="52" width="13" height="13" fill="rgb(191,219,61)"/><rect x="327" y="52" width="13" height="13" fill="rgb(47,112,139)"/><rect x="340" y="52" width="13" height="13" fill="rgb(66,18,96)"/><rect x="353" y="52" width="13" height="13" fill="rgb(66,23,99)"/><rect x="366" y="52" width="13" height="13" fill="rgb(41,126,140)"/><rect x="379" y="52" width="13" height="13" fill="rgb(66,175,117)"/><rect x="236" y="65" width="13" height="13" fill="rgb(46,115,140)"/><rect x="249" y="65" width="13" height="13" fill="rgb(64,34,106)"/><rect x="262" y="65" width="13" height="13" fill="rgb(65,27,102)"/><rect x="275" y="65" width="13" height="13" fill="rgb(50,103,139)"/><rect x="288" y="65" width="13" height="13" fill="rgb(152,212,76)"/><rect x="301" y="65" width="13" height="13" fill="rgb(207,222,55)"/><rect x="314" y="65" width="13" height="13" fill="rgb(162,214,72)"/><rect x="327" y="65" width="13" height="13" fill="rgb(49,106,139)"/><rect x="340" y="65" width="13" height="13" fill="rgb(65,26,101)"/><rect x="353" y="65" width="13" height="13" fill="rgb(65,32,105)"/><rect x="366" y="65" width="13" height="13" fill="rgb(45,115,140)"/><rect x="379" y="65" width="13" height="13" fill="rgb(45,156,132)"/><rect x="236" y="78" width="13" height="13" fill="rgb(60,69,130)"/><rect x="249" y="78" width="13" height="13" fill="rgb(64,39,110)"/><rect x="262" y="78" width="13" height="13" fill="rgb(64,33,106)"/><rect x="275" y="78" width="13" height="13" fill="rgb(62,59,123)"/><rect x="288" y="78" width="13" height="13" fill="rgb(57,88,139)"/><rect x="301" y="78" width="13" height="13" fill="rgb(52,99,139)"/><rect x="314" y="78" width="13" height="13" fill="rgb(55,91,139)"/><rect x="327" y="78" width="13" height="13" fill="rgb(62,57,122)"/><rect x="340" y="78" width="13" height="13" fill="rgb(65,24,100)"/><rect x="353" y="78" width="13" height="13" fill="rgb(65,32,105)"/><rect x="366" y="78" width="13" height="13" fill="rgb(61,68,129)"/><rect x="379" y="78" width="13" height="13" fill="rgb(57,87,139)"/><rect x="236" y="91" width="13" height="13" fill="rgb(66,20,97)"/><rect x="249" y="91" width="13" height="13" fill="rgb(65,27,102)"/><rect x="262" y="91" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="288" y="91" width="13" height="13" fill="rgb(67,9,89)"/><rect x="301" y="91" width="13" height="13" fill="rgb(67,7,88)"/><rect x="314" y="91" width="13" height="13" fill="rgb(67,7,88)"/><rect x="327" y="91" width="13" height="13" fill="rgb(67,10,90)"/><rect x="340" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="353" y="91" width="13" height="13" fill="rgb(66,20,97)"/><rect x="366" y="91" width="13" height="13" fill="rgb(66,17,95)"/><rect x="379" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="236" y="104" width="13" height="13" fill="rgb(65,28,102)"/><rect x="249" y="104" width="13" height="13" fill="rgb(67,12,92)"/><rect x="262" y="104" width="13" height="13" fill="rgb(66,15,94)"/><rect x="275" y="104" width="13" height="13" fill="rgb(65,27,102)"/><rect x="288" y="104" width="13" height="13" fill="rgb(65,32,105)"/><rect x="301" y="104" width="13" height="13" fill="rgb(65,30,103)"/><rect x="314" y="104" width="13" height="13" fill="rgb(65,27,102)"/><rect x="327" y="104" width="13" height="13" fill="rgb(66,20,97)"/><rect x="340" y="104" width="13" height="13" fill="rgb(67,9,89)"/><rect x="353" y="104" width="13" height="13" fill="rgb(67,7,88)"/><rect x="366" y="104" width="13" height="13" fill="rgb(65,24,100)"/><rect x="379" y="104" width="13" height="13" fill="rgb(64,39,109)"/><rect x="236" y="117" width="13" height="13" fill="rgb(56,89,139)"/><rect x="249" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="262" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="275" y="117" width="13" height="13" fill="rgb(59,80,138)"/><rect x="288" y="117" width="13" height="13" fill="rgb(65,174,118)"/><rect x="301" y="117" width="13" height="13" fill="rgb(80,188,108)"/><rect x="314" y="117" width="13" height="13" fill="rgb(65,175,118)"/><rect x="327" y="117" width="13" height="13" fill="rgb(59,80,137)"/><rect x="340" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="353" y="117" width="13" height="13" fill="rgb(67,8,89)"/><rect x="366" y="117" width="13" height="13" fill="rgb(57,87,139)"/><rect x="379" y="117" width="13" height="13" fill="rgb(40,129,140)"/><rect x="236" y="130" width="13" height="13" fill="rgb(42,123,140)"/><rect x="249" y="130" width="13" height="13" fill="rgb(66,20,97)"/><rect x="262" y="130" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="130" width="13" height="13" fill="rgb(47,111,139)"/><rect x="288" y="130" width="13" height="13" fill="rgb(195,220,59)"/><rect x="301" y="130" width="13" height="13" fill="rgb(253,231,37)"/><rect x="314" y="130" width="13" height="13" fill="rgb(201,221,57)"/><rect x="327" y="130" width="13" height="13" fill="rgb(45,115,140)"/><rect x="340" y="130" width="13" height="13" fill="rgb(66,18,96)"/><rect x="353" y="130" width="13" height="13" fill="rgb(66,20,97)"/><rect x="366" y="130" width="13" height="13" fill="rgb(42,123,140)"/><rect x="379" y="130" width="13" height="13" fill="rgb(65,175,118)"/><rect x="236" y="143" width="13" height="13" fill="rgb(45,116,140)"/><rect x="249" y="143" width="13" height="13" fill="rgb(64,34,106)"/><rect x="262" y="143" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="143" width="13" height="13" fill="rgb(50,103,139)"/><rect x="288" y="143" width="13" height="13" fill="rgb(156,213,74)"/><rect x="301" y="143" width="13" height="13" fill="rgb(213,223,52)"/><rect x="314" y="143" width="13" height="13" fill="rgb(173,216,68)"/><rect x="327" y="143" width="13" height="13" fill="rgb(47,111,139)"/><rect x="340" y="143" width="13" height="13" fill="rgb(65,27,101)"/><rect x="353" y="143" width="13" height="13" fill="rgb(65,28,102)"/><rect x="366" y="143" width="13" height="13" fill="rgb(46,112,139)"/><rect x="379" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="236" y="156" width="13" height="13" fill="rgb(60,71,131)"/><rect x="249" y="156" width="13" height="13" fill="rgb(64,38,109)"/><rect x="262" y="156" width="13" height="13" fill="rgb(65,31,104)"/><rect x="275" y="156" width="13" height="13" fill="rgb(62,56,121)"/><rect x="288" y="156" width="13" height="13" fill="rgb(58,85,139)"/><rect x="301" y="156" width="13" height="13" fill="rgb(53,97,139)"/><rect x="314" y="156" width="13" height="13" fill="rgb(54,94,139)"/><rect x="327" y="156" width="13" height="13" fill="rgb(61,65,127)"/><rect x="340" y="156" width="13" height="13" fill="rgb(65,26,101)"/><rect x="353" y="156" width="13" height="13" fill="rgb(65,26,101)"/><rect x="366" y="156" width="13" height="13" fill="rgb(61,63,126)"/><rect x="379" y="156" width="13" height="13" fill="rgb(57,86,139)"/><rect x="236" y="169" width="13" height="13" fill="rgb(66,17,95)"/><rect x="249" y="169" width="13" height="13" fill="rgb(65,25,100)"/><rect x="262" y="169" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="169" width="13" height="13" fill="rgb(66,18,96)"/><rect x="288" y="169" width="13" height="13" fill="rgb(67,11,91)"/><rect x="301" y="169" width="13" height="13" fill="rgb(67,9,89)"/><rect x="314" y="169" width="13" height="13" fill="rgb(67,10,90)"/><rect x="327" y="169" width="13" height="13" fill="rgb(67,13,92)"/><rect x="340" y="169" width="13" height="13" fill="rgb(66,15,94)"/><rect x="353" y="169" width="13" height="13" fill="rgb(66,15,94)"/><rect x="366" y="169" width="13" height="13" fill="rgb(67,13,92)"/><rect x="379" y="169" width="13" height="13" fill="rgb(67,12,92)"/><circle cx="307.5" cy="58.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="307.5" cy="136.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><text x="314.0" y="18" text-anchor="middle" font-size="12" fill="#26324a">a &#8800; b</text><text x="314.0" y="198" text-anchor="middle" font-size="11" fill="#5b5b66">destructive &#8594; dark &#8594; XOR 1</text></svg></div>
+<figcaption><b>Figure 10.</b> The reservoir's "photograph": time-summed interference intensity \(\sum_n|z|^2\) on the \(12\times12\) spiking sheet (viridis; white rings mark the two input sites), for equal bits (left) versus unequal bits (right). Same-phase inputs interfere constructively (a bright band between the sources), opposite-phase inputs destructively &#8212; so the intensity field, though produced by a fixed medium, separates XOR. A linear readout on these pixels reaches 100%.</figcaption></figure>
+
+<table>
+<tr><th>Linear (ridge) readout trained on&#8230;</th><th class="n">XOR accuracy</th></tr>
+<tr><td>the raw input bits \([a,b]\)</td><td class="n">0.74</td></tr>
+<tr><td>the field intensity at \(L=1\) (before the waves meet)</td><td class="n">0.49</td></tr>
+<tr><td>the reservoir field \((\mathrm{Re},\mathrm{Im})\), \(L=8\)</td><td class="n">0.54</td></tr>
+<tr><td>the reservoir intensity \(|z|^2\), \(L=8\)</td><td class="n"><strong>1.00</strong></td></tr>
+</table>
+<p class="small">Fixed spiking wave sheet, \(12\times12\), \(L=8\); <code>demos/wave_xor_reservoir.jl</code>.</p>
+
+<p>The controls isolate what is doing the work. XOR is <em>not</em> linearly separable in the input, so a linear readout on the raw bits saturates near 0.74 (three of four cases). Before the waves meet (\(L=1\)) the injected field is unit-magnitude everywhere and the two inputs never overlap, so there is no interference and nothing to read (0.49, chance). The separable feature appears only after <em>propagation</em>, and it lives specifically in the <em>intensity</em>: a linear readout on \(|z|^2\) reaches 100%, while a linear readout on the raw \((\mathrm{Re},\mathrm{Im})\) field manages only 0.54. That gap is the square-law readout limitation of §8 made concrete &#8212; encoding a bit as phase \(0\) or \(\pi\), equal bits interfere constructively and unequal bits destructively, so \(|z|^2\) carries the parity (Fig. 10) while the linear field does not.</p>
+
+<p>This is genuine computation <em>in</em> the medium, in the reservoir sense: the sheet performs a fixed nonlinear expansion (wave interference) and the only trained parameters are the linear readout&#8217;s. It is also, deliberately, <em>not</em> selective &#8212; the sheet does the same homogeneous mixing for every input, and it is the readout that extracts the task. That is exactly the substrate's strength and its boundary, which the conclusion draws out next.</p>
+
+<!-- ===================================================================== -->
+<h2 id="transport">10. Directed transport: breaking isotropy</h2>
+
+<p>§8 and the reservoir study leave the sheet as a <em>medium</em>, not a selective
+transformer: the isotropic difference-of-Gaussians is reflection-symmetric,
+\(W(\mathbf d)=W(-\mathbf d)\), so \(\hat W(\mathbf q)\) is even, the band \(\Omega(\mathbf q)\)
+is even, and the group velocity \(v_g=-\partial_q\Omega\) is <em>odd</em> — every rightward
+mode has an equal leftward twin. A perturbation spreads symmetrically with zero net
+velocity: information cannot be handed from one region to the next, so a spatial
+<em>sequence</em> of processors is impossible. This section is the constructive follow-up —
+adding directed transport, and deriving what it costs.</p>
+
+<h3>10.1 The cure: advection breaks reflection symmetry</h3>
+<p>Net transport requires an <strong>odd</strong> term in the coupling. A real, antisymmetric
+stencil — advection — is the minimal one:</p>
+\[ \hat W_{\text{adv}}(\mathbf q) = -i\big(\beta_h\sin q_h + \beta_w\sin q_w\big),\qquad
+   v_{\text{drift}} = g\,\boldsymbol\beta . \]
+<p>It is purely imaginary and odd in \(\mathbf q\), so it adds a <em>uniform</em> group
+velocity \(g\boldsymbol\beta\) to the whole band (a drifting packet) rather than merely
+relocating it — a directional <em>delay</em> or an <em>offset</em> kernel only shift
+\(\hat W(\mathbf q\!-\!\mathbf b)\) and leave the \(\pm q\) twins counter-propagating, so
+neither transports. Because the stencil is still a function of the displacement \(\mathbf d\)
+alone, the coupling stays translation-invariant and FFT-diagonal — the parallel-scan/DEQ
+training of §5–6 is untouched. This is <code>coupling = :aniso</code> in <code>src/wave.jl</code>
+(two extra scalars \(\beta_h,\beta_w\)); at \(\boldsymbol\beta=0\) it reduces exactly to
+<code>:dog</code>.</p>
+
+<h3>10.2 Two spreading mechanisms, and which one bites</h3>
+<p>Directed drift is necessary but not sufficient — a packet also <em>spreads</em>, by two
+distinct routes. (i) <strong>Gain narrowing</strong>: the band-pass gain \(\Gamma(\mathbf q)\)
+is peaked at \(q_*\), so a broadband packet is reshaped toward the \(q_*\) ring and
+delocalises (rate \(\sim g\,|\Gamma''(q_*)|\)). (ii) <strong>Group-velocity dispersion
+(GVD)</strong>: curvature of the phase band, \(\beta_2=\Omega''(q_*)\), so components drift
+at different speeds. The diagnostics <code>dispersion_diagnostics</code>/<code>zero_gvd_speed</code>
+read \(\Gamma,\Omega,v_g,\beta_2\) straight off the coupling (potential map \(M=A+g\hat W\)
+and the spike Kuramoto generator \(\Lambda\)), and they localise the problem: <strong>GVD is
+curable</strong> — there is a zero-dispersion conduction speed (\(c\!\approx\!2\) px/period)
+where \(\beta_2(q_*)=0\) with the drift intact — whereas <strong>gain narrowing is the real
+obstruction</strong> (\(|\Gamma''(q_*)|\approx2.2\) there), which is exactly why a seeded bump
+reshapes into the band-pass pattern and stalls.</p>
+
+<h3>10.3 The low-dispersion regime</h3>
+<p>A sharp spatial-frequency filter is <em>necessarily</em> dispersive — the same gain
+curvature that makes the sheet selective spreads packets. The resolution is to run the sheet
+as a <strong>near-neutral advective medium</strong>: a gentle Mexican hat at marginality
+(\(\Gamma(q_*)\!\approx\!0\)), operated at the <strong>DC carrier</strong> \(q_*=0\), where GVD
+vanishes for free (\(g\beta\sin 0=0\)) and \(\beta\) is a dispersion-free drift knob. A search
+over \((\sigma_E,\sigma_I,B_I,g)\) with the diagnostics finds this point and flattens the gain
+\(\sim60\times\):</p>
+<table>
+<tr><th>regime</th><th class="n">\(v_g^*\)</th><th class="n">\(\beta_2^*\)</th><th class="n">\(|\Gamma''(q_*)|\)</th></tr>
+<tr><td>sharp hat (selective)</td><td class="n">0.13</td><td class="n">0.71</td><td class="n">2.19</td></tr>
+<tr><td>gentle hat, DC carrier (searched)</td><td class="n">0.09</td><td class="n">\(\approx0\)</td><td class="n"><strong>0.035</strong></td></tr>
+</table>
+<p>A seeded bump in the searched regime drifts with its width essentially fixed (spread
+\(2.1\!\to\!2.2\) over 24 steps); the sharp-hat regime stalls at sheet-centre and more than
+doubles its spread — same substrate, opposite behaviour, predicted analytically.</p>
+
+<h3>10.4 The drift–dispersion trade-off (an honest limit)</h3>
+<p>Pushing the drift exposes a fundamental tension. Drift is \(g\beta\), but <em>both</em> low
+dispersion and stability push \(g\to0\) (a central-difference advection is only the leading term
+of a true shift, and its imaginary contribution raises the spectral radius). So ballistic,
+coherent transport reaches only <strong>\(\sim2\) bands</strong> before the packet spreads: a
+sheet cannot be at once a sharp spatial filter <em>and</em> a deep conveyor. Reaching more
+stages needs a <strong>shift-like</strong> advection (a full directional tap,
+\(\hat W\!\approx\!e^{-iqs}\): unit gain, linear phase, zero GVD by construction) — the natural
+next substrate step.</p>
+
+<h3>10.5 A wave-programmed serial pipeline</h3>
+<p>On the searched conveyor a two-stage pipeline works: a smooth payload injected at the top
+band drifts through two expert bands, each stamping a VSA bind \(V_e\) as the packet passes, and
+the composition \(\sum_e V_e\) is recovered by a differential unbind (bound run minus a no-bind
+control cancels the propagation phase).</p>
+<table>
+<tr><th>check</th><th>result</th></tr>
+<tr><td>band-visit order</td><td>\(1\to2\) (directed path)</td></tr>
+<tr><td>composition recovery \(\{1,2\},\{1\},\{2\}\)</td><td><strong>exact</strong> (\(|\text{err}|=0.000\))</td></tr>
+<tr><td>causal (drop expert \(e\))</td><td>removes exactly \(V_e\)</td></tr>
+<tr><td>isotropic <code>:dog</code> sheet</td><td>stalls in band 1 — <strong>cannot pipeline</strong></td></tr>
+</table>
+<p class="small"><code>demos/wave_experts_pipeline.jl</code>. This turns the isotropy limitation of §8
+into a constructive result: directed serial composition on the anisotropic sheet, provably
+impossible on the isotropic one.</p>
+
+<!-- ===================================================================== -->
+<h2 id="conclusion">11. Conclusion &amp; commentary</h2>
+
+<p>The PhasorWaveSheet turns the phasor SSM into a genuine wave medium. Making the coupling a
+translation-invariant, delayed difference-of-Gaussians converts a stack of feed-forward layers
+into a single recurrent sheet on a torus, and three facts keep it both tractable and GPU-native:
+conduction delays become complex weights on the shared carrier (§3.1); the coupling diagonalises
+under the spatial FFT into \(H\times W\) independent Bloch modes with per-mode multiplier
+\(M(q)=A+g\hat W(q)\) (§3.2); and spike transmission makes the medium self-limiting (§3.3).
+From that one multiplier the entire physics reads off in closed form — growth band, oscillation
+band, group velocity, and a criticality knob \(\rho=\max_q|M(q)|\) (§4) — exactly for the
+linear (potential) sheet and, by linearising about a coherent state, approximately for the
+nonlinear (spike) sheet. And because the whole object is a diagonal SSM, it trains on the
+discrete recurrence — a parallel scan for the linear sheet (§5), a deep-equilibrium fixed point
+for the spike sheet (§6) — with no ODE adjoint.</p>
+
+<p><strong>What the sheet is — and, precisely, what it is not.</strong> All of the above says the
+sheet is an excellent <em>medium</em>: it transmits information as phase, propagates it with a
+speed and dispersion we can compute and tune, and can be biased to select and carry a particular
+eigenmode. It is worth being blunt about the other side. The sheet is <em>not</em> a selective
+medium for <em>transforming</em> information — it cannot apply one operation here and a different
+operation there, nor condition its action on the relative phases of particular neurons — and this
+is not incidental. It is the <em>direct consequence of the very translation invariance that made
+the sheet analysable.</em></p>
+
+<p>The argument is short. Translation invariance means the coupling depends only on displacement,
+\(W(x-y)\) — equivalently, the operator commutes with every spatial shift. A shift-invariant
+operator is a convolution, and a convolution applies the <em>same</em> rule at every location.
+That is exactly why it diagonalises in the plane-wave basis (§3.2) — and it is exactly why it
+cannot be spatially selective: an operation that treated one patch differently from another, or
+fired only when certain neurons' phases aligned, would depend on absolute position or on content,
+and would therefore break the symmetry. The single kernel carries only a handful of global knobs
+(the DoG widths and amplitudes, the gain, the decay); it can shape <em>which spatial
+frequencies</em> survive and how fast they travel, but it does the same thing to every site. It
+is <strong>spectrally selective, not spatially or content selective</strong>.</p>
+
+<p>Two clarifications keep this honest. First, the sheet does mix neighbouring phases — that is
+what propagation and interference <em>are</em> — so it certainly transforms the field; but it
+transforms it <em>homogeneously</em>, by one fixed rule, not <em>selectively</em>. Second,
+nonlinearity does not rescue selectivity: spike transmission adds a self-limiting,
+amplitude-gating nonlinearity, but it remains translation-invariant, hence still homogeneous. A
+content-conditioned, location-specific transformation needs more than nonlinearity — it needs the
+symmetry to be broken.</p>
+
+<p>This is the crux, and it frames what comes next. There is a real tension between the two things
+one wants: the invariance that yields a closed-form dispersion and a cheap diagonal trainer is the
+same invariance that leaves the medium computationally inert as a <em>selective transformer</em> — even though, as a fixed reservoir, it already computes (§9).
+To compute selectively on the sheet one must deliberately break the translation symmetry —
+introduce spatially-localised, content-gated modules that read a patch, decide, and stamp a
+transformation back into the passing wave. That is exactly the subject of the companion extension
+(<a href="wavesheet_experts_report.html"><em>Sparse VSA experts on the PhasorWaveSheet</em></a>),
+and the price of the symmetry-breaking is already written into the limitations above: patchy,
+gated connectivity forfeits the closed-form dispersion (§8). The wave sheet, in short, is the
+<em>substrate</em> — an analysable, tunable medium for moving phase around; turning it into a
+<em>computer</em> is the work of the overlays that break its symmetry where, and only where,
+selectivity is needed.</p>
+
+<!-- ===================================================================== -->
+<h2 id="refs">12. References</h2>
 <ol class="refs">
 <li><span class="rid">Izhikevich (2001).</span> Resonate-and-fire neurons. <em>Neural Networks</em> 14(6–7).</li>
 <li><span class="rid">Muller, Chavane, Reynolds &amp; Sejnowski (2018).</span> Cortical travelling waves. <em>Nat. Rev. Neurosci.</em> 19. <a href="https://www.nature.com/articles/s41583-018-0038-8">link</a></li>
@@ -737,6 +938,9 @@ patchy (non-translation-invariant) connectivity forfeits the closed-form dispers
 <li><span class="rid">Chen et&nbsp;al. (2018).</span> Neural ODEs (adjoint sensitivity). <a href="https://arxiv.org/abs/1806.07366">arXiv:1806.07366</a></li>
 <li><span class="rid">Bai, Kolter &amp; Koltun (2019).</span> Deep Equilibrium Models. <a href="https://arxiv.org/abs/1909.01377">arXiv:1909.01377</a></li>
 <li><span class="rid">Kerr, Ashwin &amp; Wedgwood (2025).</span> Resonance, wave speed and ISI locking in R&amp;F lattices. <a href="https://arxiv.org/abs/2511.05232">arXiv:2511.05232</a></li>
+<li><span class="rid">Jaeger (2001).</span> The &#8220;echo state&#8221; approach to recurrent neural networks. GMD Report 148.</li>
+<li><span class="rid">Maass, Natschl&#228;ger &amp; Markram (2002).</span> Real-time computing without stable states (liquid state machines). <em>Neural Computation</em> 14(11).</li>
+<li><span class="rid">Fernando &amp; Sojakka (2003).</span> Pattern recognition in a bucket. <em>ECAL 2003</em>.</li>
 </ol>
 
 <hr>

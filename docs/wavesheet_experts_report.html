@@ -95,63 +95,338 @@ patch, (2) gate themselves on or off, and (3) re-bind their output into the wave
 reconciles three literatures inside one substrate.</p>
 
 <div class="bio">
-<h4>Biological motivation (and an honest caveat)</h4>
+<h4>Biological motivation</h4>
 <p>The columnar organisation of neocortex <span class="small">[Mountcastle 1997]</span> — a
 large folded sheet of repeated, locally-computing columns — motivates a repeated,
-patch-local "expert" unit. The stronger Thousand-Brains claims (every column carries a
-grid-cell reference frame; a single column learns a complete object model
-<span class="small">[Hawkins et&nbsp;al. 2019]</span>) are attractive but remain
-<em>hypothesis</em>, not established fact — an adversarial fact-check of these two specific
-claims did not sustain them. We therefore ground the repeated-expert unit on Mountcastle
-columnar repetition and travelling-wave phenomenology only, and treat the reference-frame
-story as inspiration, not evidence.</p>
+patch-local "expert" unit, and the travelling-wave phenomenology of cortex motivates coupling
+those units through a propagating field rather than point-to-point wiring. That is the whole
+of the biological claim we lean on: a local unit repeated across a sheet, communicating by
+waves.</p>
 </div>
 
-<h3>2.1 The bind is a diagonal SSM insert</h3>
-<p>An expert's re-bind \(z_P \mapsto z_P \odot (g\,\varphi_e)\) is a per-site diagonal multiply
-\(D_e=\mathrm{diag}(g\,\varphi_e)\) — the <em>same kind of object</em> as the SSM transition
-\(M\). An expert step is thus an input-/state-dependent diagonal transition spliced into the
-recurrence: the module never leaves the SSM algebra, it merely makes the transition
-<strong>selective</strong>, exactly the generalisation Mamba <span class="small">[Gu &amp; Dao
-2023]</span> makes to diagonal SSMs. Two subtleties matter for the derivation. First,
-because a diagonal bind commutes with the diagonal self-propagator \(A\), the
-<em>sub-cycle placement</em> of the bind is a gauge the per-cycle step absorbs exactly:
-\(e^{k(T-t_b)}\,D_e\,e^{kt_b}=D_e\,e^{kT}=D_e A\). Second, a <em>spatially local</em> bind is
-diagonal in the <em>site</em> basis while transport \(M(q)\) is diagonal in the <em>Fourier</em>
-basis — they do not co-diagonalise, so a bind spliced into the state <em>transition</em> is
-not a scalar scan; the scan stays scalar only when the selectivity modulates the
-<em>input injection</em> (or is spatially global).</p>
+<h3>2.1 The bind is a diagonal insert into the recurrence</h3>
+
+<p><strong>What "the recurrence" is.</strong> Everything in this section modifies one object:
+the wavesheet's own per-cycle update from the main report. In the site basis, advancing the
+whole sheet by one carrier period \(T\) is</p>
+\[ z[n{+}1] \;=\; A\,z[n] \;+\; g\,(W \circledast s)[n] \;+\; u[n], \qquad A=e^{kT},\;\; k=\lambda+i\omega, \]
+<p>or, diagonalised by the spatial FFT, the \(H\times W\) decoupled scalar recurrences
+\(\hat z_q[n{+}1]=M(q)\,\hat z_q[n]+\hat u_q[n]\) with \(M(q)=A+g\hat W(q)\) (main report §3–4).
+This — not a fresh block — is what an expert splices into. Because we set \(\omega=2\pi/T\) so
+the carrier turns through exactly one revolution per step, \(e^{i\omega T}=1\) and the
+self-multiplier collapses to a pure per-cycle decay \(A=e^{\lambda T}\in\mathbb R\): between
+events a phase-per-cycle step advances <em>no net angle</em> on its own.</p>
+
+<p><strong>How the insert changes the formula.</strong> An expert owning patch \(P\) re-binds
+its output onto the sites of \(P\): \(z_P \mapsto (g\,\varphi_e)\odot z_P\), where
+\(\varphi_e=e^{i\pi\theta_e}\) is the expert's unit-phasor code (phase \(\theta_e\in[-1,1]\))
+and \(g\) a gain. Collect it into a diagonal operator \(D_e=\mathrm{diag}(d_x)\) with
+\(d_x=g\varphi_e\) for \(x\in P\) and \(d_x=1\) elsewhere. Splicing \(D_e\) into the per-cycle
+transition left-multiplies the update on the patch,</p>
+\[ z[n{+}1] \;=\; D_e\big(A\,z[n]+g(W\circledast s)[n]+u[n]\big), \]
+<p>so that on a patch site the per-cycle multiplier changes</p>
+\[ A=e^{\lambda T} \quad\longrightarrow\quad (g\varphi_e)\,A \;=\; g\,e^{\lambda T}\,e^{i\pi\theta_e}: \]
+<p>the update acquires a fixed phase advance \(\pi\theta_e\) and a gain \(g\) on that patch, and
+is untouched off-patch. \(D_e\) is the <em>same kind of object</em> as \(A\) — a diagonal
+per-site multiplier — so the module never leaves the SSM algebra; it merely makes the
+transition <strong>selective</strong>, the generalisation Mamba
+<span class="small">[Gu &amp; Dao 2023]</span> makes to diagonal SSMs. (In the implementation
+the equivalent input-injection form \(u\mapsto u\odot\big(1+\sum_e \mathrm{mask}_e\,
+g_e(\varphi_e-1)\big)\) modulates the injected drive rather than the state — regime 1 of §2.3
+— which keeps the whole augmented sheet one parallel scan; with \(g=1\) the patch factor is
+exactly \(\varphi_e\).)</p>
+
+<figure class="fig">
+<div class="figframe">
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <text x="30" y="26" font-size="13" fill="#5b5b66">Within one carrier period the bind D<tspan baseline-shift="sub" font-size="9">e</tspan> may fire at any instant t<tspan baseline-shift="sub" font-size="9">b</tspan> — the per-cycle operator is the same.</text>
+  <!-- Row 1: early -->
+  <text x="24" y="99" font-size="12" fill="#5b5b66">early</text>
+  <line x1="70" y1="95" x2="380" y2="95" stroke="#c9c9d4" stroke-width="2"/>
+  <line x1="70" y1="88" x2="70" y2="102" stroke="#9a9aa6" stroke-width="2"/>
+  <line x1="380" y1="88" x2="380" y2="102" stroke="#9a9aa6" stroke-width="2"/>
+  <text x="66" y="118" font-size="11" fill="#5b5b66">0</text>
+  <text x="376" y="118" font-size="11" fill="#5b5b66">T</text>
+  <line x1="150" y1="79" x2="150" y2="111" stroke="#3a5ba0" stroke-width="2.5"/>
+  <circle cx="150" cy="95" r="4.5" fill="#3a5ba0"/>
+  <text x="150" y="73" font-size="13" fill="#3a5ba0" text-anchor="middle" font-weight="700">D<tspan baseline-shift="sub" font-size="9">e</tspan></text>
+  <text x="110" y="91" font-size="11" fill="#26324a" text-anchor="middle">e^(k·t_b)</text>
+  <text x="266" y="91" font-size="11" fill="#26324a" text-anchor="middle">e^(k·(T−t_b))</text>
+  <!-- Row 2: late -->
+  <text x="24" y="209" font-size="12" fill="#5b5b66">late</text>
+  <line x1="70" y1="205" x2="380" y2="205" stroke="#c9c9d4" stroke-width="2"/>
+  <line x1="70" y1="198" x2="70" y2="212" stroke="#9a9aa6" stroke-width="2"/>
+  <line x1="380" y1="198" x2="380" y2="212" stroke="#9a9aa6" stroke-width="2"/>
+  <text x="66" y="228" font-size="11" fill="#5b5b66">0</text>
+  <text x="376" y="228" font-size="11" fill="#5b5b66">T</text>
+  <line x1="320" y1="189" x2="320" y2="221" stroke="#3a5ba0" stroke-width="2.5"/>
+  <circle cx="320" cy="205" r="4.5" fill="#3a5ba0"/>
+  <text x="320" y="183" font-size="13" fill="#3a5ba0" text-anchor="middle" font-weight="700">D<tspan baseline-shift="sub" font-size="9">e</tspan></text>
+  <text x="195" y="201" font-size="11" fill="#26324a" text-anchor="middle">e^(k·t_b)</text>
+  <text x="352" y="201" font-size="11" fill="#26324a" text-anchor="middle">e^(k·(T−t_b))</text>
+  <!-- arrows to result -->
+  <path d="M 388 95 C 440 95, 452 140, 492 150" fill="none" stroke="#9a9aa6" stroke-width="1.5"/>
+  <path d="M 388 205 C 440 205, 452 160, 492 150" fill="none" stroke="#9a9aa6" stroke-width="1.5"/>
+  <text x="474" y="156" font-size="20" fill="#5b5b66" text-anchor="middle">=</text>
+  <!-- result box -->
+  <rect x="500" y="120" width="140" height="60" rx="8" fill="#eef2fb" stroke="#3a5ba0" stroke-width="1.5"/>
+  <text x="570" y="147" font-size="15" fill="#26324a" text-anchor="middle" font-weight="700">D<tspan baseline-shift="sub" font-size="10">e</tspan> · A</text>
+  <text x="570" y="167" font-size="10.5" fill="#5b5b66" text-anchor="middle">independent of t_b</text>
+</svg>
+</div>
+<figcaption><b>Figure 1. Sub-cycle placement is a gauge.</b> A bind fired early (top) or late
+(bottom) within the same period composes with the free rotation to the <em>same</em> per-cycle
+operator \(D_eA\), because the diagonal phase-and-gain \(D_e\) commutes with the diagonal
+propagator \(e^{kt}\): \(e^{k(T-t_b)}D_e e^{kt_b}=D_e e^{kT}=D_eA\). The within-cycle instant
+\(t_b\) never enters the update — which is exactly what lets the sheet and its experts be
+trained on one phase per neuron per cycle (main report §5), with no need for the sub-cycle
+continuous potential.</figcaption>
+</figure>
+
+<p><strong>Sub-cycle placement.</strong> "Sub-cycle placement" is the instant \(t_b\in[0,T]\)
+<em>within</em> a period at which the bind physically fires: the free field rotates for \(t_b\),
+the stamp lands, then the field rotates for the remainder \(T-t_b\). Because \(D_e\) (a diagonal
+phase-and-gain) commutes with the diagonal free propagator \(e^{kt}\),
+\(e^{k(T-t_b)}\,D_e\,e^{kt_b}=D_e\,e^{kT}=D_e A\) — the per-cycle operator is \(D_e A\)
+<em>regardless of \(t_b\)</em> (Figure 1). The exact moment inside the cycle is a gauge the
+per-cycle step absorbs, which is why one phase per neuron per cycle is a complete state and the
+sub-cycle potential is never required.</p>
+
+<p><strong>Are we introducing a new frequency?</strong> No — provided the bind stays an
+<em>event</em>. Frequency is phase advance per unit time, \(\omega=d\phi/dt\), a property of the
+generator \(k=\lambda+i\omega\); the bind does not touch \(k\). Applied as a sparse, gated
+stamp, \(D_e\) is a one-off <em>phase offset</em>: it re-labels the phasor's angle by
+\(\pi\theta_e\) and rescales it by \(g\), a jump in the <em>state</em>, leaving the slope
+\(d\phi/dt=\omega\) (and the decay \(\lambda\)) unchanged on either side of the event
+(Figure 2). The caveat sharpens the point. If the <em>same</em> bind were applied on
+<em>every</em> cycle, the constant per-cycle increment \(\pi\theta_e\) would accumulate linearly
+in time — a genuine frequency offset \(\delta\omega=\pi\theta_e/T\) — and the repeated gain
+would shift the decay to \(\lambda+\ln g/T\); the bind would fold into the eigenvalue and give
+that patch its own carrier, breaking the shared-\(\omega\) phase-locking the whole architecture
+rests on. Sparsity is therefore not merely an efficiency choice: keeping the bind occasional is
+what preserves it as a phase <em>offset</em> rather than a new frequency.</p>
+
+<figure class="fig">
+<div class="figframe">
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- axes -->
+  <line x1="70" y1="250" x2="610" y2="250" stroke="#9a9aa6" stroke-width="1.5"/>
+  <line x1="70" y1="250" x2="70" y2="45" stroke="#9a9aa6" stroke-width="1.5"/>
+  <text x="614" y="254" font-size="12" fill="#5b5b66">time</text>
+  <text x="42" y="52" font-size="13" fill="#5b5b66" text-anchor="middle">φ</text>
+  <!-- event tick -->
+  <line x1="250" y1="246" x2="250" y2="254" stroke="#9a9aa6" stroke-width="1.5"/>
+  <text x="250" y="270" font-size="11" fill="#5b5b66" text-anchor="middle">t_b (bind event)</text>
+  <!-- free (dashed) -->
+  <line x1="70" y1="250" x2="590" y2="90" stroke="#9a9aa6" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="470" y="152" font-size="11.5" fill="#5b5b66" transform="rotate(-17 470 152)">free carrier — slope = ω</text>
+  <!-- bound (solid): coincide then jump then parallel -->
+  <line x1="70" y1="250" x2="250" y2="195" stroke="#3a5ba0" stroke-width="2.5"/>
+  <line x1="250" y1="155" x2="590" y2="50" stroke="#3a5ba0" stroke-width="2.5"/>
+  <text x="420" y="92" font-size="11.5" fill="#3a5ba0" transform="rotate(-17 420 92)">bound — same slope ω</text>
+  <!-- jump bracket -->
+  <line x1="250" y1="195" x2="250" y2="155" stroke="#c98a3a" stroke-width="2"/>
+  <line x1="246" y1="195" x2="254" y2="195" stroke="#c98a3a" stroke-width="2"/>
+  <line x1="246" y1="155" x2="254" y2="155" stroke="#c98a3a" stroke-width="2"/>
+  <text x="262" y="180" font-size="12" fill="#9c6a24">offset π·θ_e</text>
+</svg>
+</div>
+<figcaption><b>Figure 2. The bind is an offset, not a frequency.</b> Accumulated phase versus
+time. Before the event the bound trace (blue) tracks the free carrier (dashed); at the gated
+instant the bind adds a fixed phase \(\pi\theta_e\) — a vertical jump — after which the trace
+runs <em>parallel</em> to the free carrier. Frequency is the slope \(d\phi/dt=\omega\); the jump
+moves the intercept, not the slope, so no new carrier frequency appears. Repeating the jump
+<em>every</em> cycle would instead tilt the slope by \(\delta\omega=\pi\theta_e/T\) — a real
+frequency shift — which is precisely why the bind must remain a sparse event.</figcaption>
+</figure>
+
+<p><strong>A basis conflict carried into §2.3.</strong> One structural subtlety follows the
+insert downstream: a spatially local bind is diagonal in the <em>site</em> basis, while
+transport \(M(q)\) is diagonal in the <em>Fourier</em> basis. They do not co-diagonalise, so a
+bind spliced into the state <em>transition</em> is not a scalar scan; the scan stays scalar only
+when the selectivity modulates the <em>input injection</em> (regime 1 below) or is spatially
+global.</p>
 
 <h3>2.2 Routing: sparsely-gated mixture-of-experts</h3>
-<p>The gate is a top-1 router in the mould of sparsely-gated MoE
-<span class="small">[Shazeer et&nbsp;al. 2017]</span>, with two ingredients from recent
-practice. Fine-grained expert segmentation <span class="small">[DeepSeekMoE 2024]</span>
-gives combinatorial routing flexibility and drives experts toward non-overlapping
-specialisation. Crucially, load balancing uses the <strong>auxiliary-loss-free</strong> scheme
-<span class="small">[DeepSeek 2024]</span>: a per-expert bias is added to the routing scores
-<em>before</em> the top-\(k\) selection and nudged by each expert's recent load, so utilisation
-is balanced <em>without</em> injecting the interference gradients that an auxiliary loss
-would. The discrete choice is made differentiable by a straight-through / Gumbel-softmax
-estimator <span class="small">[Jang et&nbsp;al. 2016]</span> — hard one-hot in the forward
-pass, softmax gradient in the backward pass. This is <code>moe_gate</code> /
-<code>update_moe_bias</code> in the implementation.</p>
+<p>A <strong>mixture of experts</strong> (MoE) replaces one monolithic module with a bank of
+\(E\) parallel <em>experts</em> and a small <em>router</em> that, for each input, scores the
+experts and lets only a few of them act. When the router keeps just the top-scoring expert
+(<em>top-1</em>) — or, more generally, the top \(k\) — the layer is <strong>sparsely
+gated</strong> <span class="small">[Shazeer et&nbsp;al. 2017]</span>: most experts sit idle on
+any given input, so the layer's <em>capacity</em> (its total parameter count) can grow with
+\(E\) while the <em>compute</em> per input stays fixed at whatever the \(k\) active experts
+cost. Our router is top-1, and each expert owns a patch of the sheet, so here "which expert"
+means "which patch gets transformed."</p>
+
+<p>Two refinements from recent large-scale MoE practice carry over, and it is worth spelling out
+what each buys. The first is <strong>fine-grained experts</strong>
+<span class="small">[DeepSeekMoE 2024]</span>: instead of a few large experts, use many small
+ones and activate a subset. This is the source of what we earlier called
+<em>combinatorial routing flexibility</em> — with \(E\) experts and \(k\) active, the number of
+distinct active <em>combinations</em> the router can form is \(\binom{E}{k}\), which grows
+combinatorially as the experts are split finer. A fixed active-compute budget therefore buys far
+more distinct "mixtures," which both raises representational capacity and pressures each small
+expert toward a narrow, non-overlapping speciality rather than a blurry average. (Our prototype
+is top-1, where \(\binom{E}{1}=E\), so it inherits the <em>specialisation pressure</em> more
+than the literal combinatorics; the combinatorial pay-off is what a top-\(k\) extension would
+unlock.)</p>
+
+<p>The second refinement is how the router is kept from <strong>collapsing</strong>. Left to
+itself, a router tends to favour a few experts, which then receive most of the gradient and
+improve fastest, which makes the router favour them still more — a rich-get-richer spiral that
+leaves the rest of the bank dead. The classical fix adds an <em>auxiliary load-balancing
+loss</em> to the training objective, rewarding uniform usage. It works, but it also feeds
+gradients into the router that serve <em>balance</em> rather than the <em>task</em> —
+"interference gradients" that pull against the loss you actually care about. The
+<strong>auxiliary-loss-free</strong> scheme <span class="small">[DeepSeek 2024]</span> drops
+that extra loss term entirely. In its place sits a <strong>per-expert bias</strong>: one extra
+scalar \(b_e\) per expert, added to that expert's routing score just before the top-\(k\)
+selection. A small control loop nudges \(b_e\) <em>up</em> for under-used experts and
+<em>down</em> for over-used ones according to each expert's recent load — and crucially this
+nudge is applied <em>outside</em> gradient descent, so it changes <em>which</em> expert wins the
+selection without contributing any gradient to the loss. Load is balanced by a side-channel
+controller rather than a competing objective; that is precisely what "loss-free" means here.</p>
+
+<p>One piece remains: the top-1 pick is a discrete \(\arg\max\), which has no useful gradient. A
+straight-through / Gumbel-softmax estimator <span class="small">[Jang et&nbsp;al. 2016]</span>
+bridges it — a hard one-hot route in the forward pass, the smooth softmax gradient in the
+backward pass. Together these are <code>moe_gate</code> (routing plus the straight-through gate)
+and <code>update_moe_bias</code> (the out-of-graph balancing controller) in the
+implementation.</p>
+
+<p>In symbols, each expert summarises its patch with a mask-pooled complex <em>read</em>, turns
+the read magnitude into a routing score, and those scores drive a straight-through top-1
+selection whose <em>load</em> — not a loss — balances the experts:</p>
+\[
+\begin{aligned}
+r_e &= \tfrac{1}{|P_e|}\!\sum_{x\in P_e} z_x, & \ell &= W_r\,|r| && \text{(read}\to\text{logits)}\\[2pt]
+\mathrm{sel} &= \mathrm{onehot}\!\big(\arg\max_e(\ell_e + b_e)\big), & \mathrm{soft} &= \mathrm{softmax}(\ell/\tau) && \text{(select}\;\cdot\;\text{soften)}\\[2pt]
+g &= \mathrm{sel} + \big(\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\big), & b_e &\leftarrow b_e + \eta\,\mathrm{sign}\!\big(\tfrac1E-\bar\ell_e\big) && \text{(STE gate}\;\cdot\;\text{loss-free balance)}
+\end{aligned}
+\]
+<p>where \(P_e\) is expert \(e\)'s patch, \(\mathrm{sg}\) is the stop-gradient, and
+\(\bar\ell_e=\langle g_e\rangle\) its mean gate load over the batch. The two ideas above appear
+directly in this algebra. First, the straight-through
+estimator gives \(g=\mathrm{sel}\) (a hard one-hot route) in the forward pass but
+\(\partial g/\partial\ell=\partial\,\mathrm{soft}/\partial\ell\) in the backward pass — a smooth
+gradient through a discrete choice. Second, the balancing bias \(b_e\) enters <em>only</em> the
+\(\arg\max\) that picks the expert, never the \(\mathrm{soft}\) whose gradient trains the
+router; balancing the load therefore never injects interference gradients into the task loss,
+and the bias update runs entirely outside the gradient tape.</p>
+
+<figure class="fig">
+<div class="figframe">
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ah3" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#9a9aa6"/>
+    </marker>
+  </defs>
+  <!-- Box A: read + logits -->
+  <rect x="15" y="114" width="182" height="74" rx="8" fill="#f2f4f8" stroke="#c9c9d4" stroke-width="1.5"/>
+  <text x="106" y="136" font-size="12" fill="#3a5ba0" text-anchor="middle" font-weight="700">read → logits</text>
+  <text x="106" y="158" font-size="12" fill="#26324a" text-anchor="middle">r_e = mean over P_e of z</text>
+  <text x="106" y="177" font-size="12" fill="#26324a" text-anchor="middle">ℓ = W_r · |r|</text>
+  <!-- Box B: select (dashed, no grad) -->
+  <rect x="238" y="30" width="258" height="66" rx="8" fill="#fbf1e6" stroke="#c98a3a" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="367" y="50" font-size="11.5" fill="#9c6a24" text-anchor="middle" font-weight="700">select — forward only, no gradient</text>
+  <text x="367" y="70" font-size="12" fill="#26324a" text-anchor="middle">e* = argmax_e (ℓ_e + b_e)</text>
+  <text x="367" y="88" font-size="12" fill="#26324a" text-anchor="middle">sel = onehot(e*)</text>
+  <!-- Box C: soften (gradient) -->
+  <rect x="238" y="204" width="258" height="58" rx="8" fill="#eef6ee" stroke="#5a9a5a" stroke-width="1.5"/>
+  <text x="367" y="225" font-size="11.5" fill="#3f7a3f" text-anchor="middle" font-weight="700">soften — gradient path</text>
+  <text x="367" y="246" font-size="12" fill="#26324a" text-anchor="middle">soft = softmax(ℓ / τ)</text>
+  <!-- Box D: gate STE -->
+  <rect x="515" y="114" width="130" height="74" rx="8" fill="#eef2fb" stroke="#3a5ba0" stroke-width="1.5"/>
+  <text x="580" y="136" font-size="12" fill="#3a5ba0" text-anchor="middle" font-weight="700">gate (STE)</text>
+  <text x="580" y="158" font-size="12" fill="#26324a" text-anchor="middle">g = sel +</text>
+  <text x="580" y="176" font-size="12" fill="#26324a" text-anchor="middle">soft − sg(soft)</text>
+  <!-- connectors -->
+  <line x1="197" y1="138" x2="238" y2="66" stroke="#9a9aa6" stroke-width="1.6" marker-end="url(#ah3)"/>
+  <line x1="197" y1="164" x2="238" y2="230" stroke="#9a9aa6" stroke-width="1.6" marker-end="url(#ah3)"/>
+  <line x1="496" y1="66" x2="515" y2="138" stroke="#9a9aa6" stroke-width="1.6" marker-end="url(#ah3)"/>
+  <line x1="496" y1="230" x2="515" y2="164" stroke="#9a9aa6" stroke-width="1.6" marker-end="url(#ah3)"/>
+  <!-- bias feedback loop (out of graph) -->
+  <path d="M 580 114 L 580 16 L 367 16 L 367 30" fill="none" stroke="#c98a3a" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah3)"/>
+  <text x="472" y="11" font-size="10.5" fill="#9c6a24" text-anchor="middle">out-of-graph balance:  b_e += η·sign(1/E − load_e)</text>
+</svg>
+</div>
+<figcaption><b>Figure 3. The router: two paths through one score.</b> A patch read \(r_e\) becomes
+a logit \(\ell_e=(W_r|r|)_e\), which forks. The <span style="color:#9c6a24">selection</span> path
+adds the load-balancing bias and takes an \(\arg\max\) — hard, and carries no gradient. The
+<span style="color:#3f7a3f">gradient</span> path softens the <em>unbiased</em> logits. The
+straight-through gate \(g=\mathrm{sel}+\mathrm{soft}-\mathrm{sg}(\mathrm{soft})\) (\(\mathrm{sg}\)
+= stop-gradient) is the hard route in value, the soft route in gradient. The dashed loop nudges
+the bias from each expert's realised load, entirely outside the gradient tape — so balancing the
+load never perturbs the task gradient.</figcaption>
+</figure>
 
 <h3>2.3 Two routing regimes</h3>
-<p>A selective SSM stays parallel-scan-trainable iff its coefficients can be computed before
-the scan.</p>
-<ul>
-<li><strong>Input-conditioned</strong> (regime 1): the gate/bind read the input drive, so the
-modulated drive is precomputed and the whole augmented sheet is one parallel scan (or spike
-DEQ). Implemented as a drive modulation
-\(\text{drive}\odot(1+\sum_e \text{mask}_e\,g_e(\varphi_e-1))\).</li>
-<li><strong>State-conditioned</strong> (regime 2): the gate reads the <em>live wave</em> — the
-literal "modify a wave as it passes by." Coefficient↔state feedback breaks the global scan,
-so we use <strong>event-based operator splitting</strong>: run the linear sheet as a parallel
-scan <em>within</em> chunks and apply the read→gate→bind event at chunk boundaries. With an
-identity event this equals the full scan exactly (linear transport composes across
-boundaries), so the sequential cost is only the number of events — which is small precisely
-because the experts are sparse.</li>
-</ul>
+<p>A selective SSM stays parallel-scan-trainable if and only if its coefficients can be computed
+<em>before</em> the scan. Whether the gate reads the fixed input or the evolving state decides
+which side of that line an expert falls on.</p>
+
+<p><strong>Regime 1 — input-conditioned.</strong> The gate and bind read the input drive
+\(u\), so the modulated drive is a pure function of the input and can be formed <em>before</em>
+any propagation:</p>
+\[ u'[n] \;=\; u[n]\odot\Big(1+\textstyle\sum_e \mathrm{mask}_e\,g_e(\varphi_e-1)\Big),\qquad z \;=\; \mathrm{scan}_M\big(u'\big). \]
+<p>The gate coefficients \(g_e\) never depend on \(z\), so nothing serialises: the whole
+augmented sheet is one parallel scan (or, in spike mode, one DEQ sweep-set). This is the path
+the <code>WaveExpertSheet</code> prototype trains.</p>
+
+<p><strong>Regime 2 — state-conditioned.</strong> Here the gate reads the <em>live wave</em> —
+the literal "modify a wave as it passes by" — so the coefficients depend on the state and the
+single global scan breaks. We recover parallelism with <strong>event-based operator
+splitting</strong>: partition the \(L\) cycles into chunks of length \(\ell_c\), run the linear
+sheet as one parallel scan <em>within</em> a chunk, and apply the read→gate→bind event only at
+the \(\lceil L/\ell_c\rceil-1\) chunk boundaries:</p>
+\[ \tilde z \;=\; D_e\!\big(g(z)\big)\,z \quad\text{(boundary event)},\qquad z' \;=\; \mathrm{scan}_M(\tilde z)\quad\text{(next chunk)}, \]
+<p>with the first chunk propagating the initial field unmodified — an event needs a wave to act
+on. Because linear transport composes across boundaries,
+\(M(q)^{\ell_1}M(q)^{\ell_2}=M(q)^{\ell_1+\ell_2}\), an <em>identity</em> event reproduces the
+full scan exactly; the only serial cost is the number of events, which is small precisely
+because the experts are sparse.</p>
+
+<figure class="fig">
+<div class="figframe">
+<svg viewBox="0 0 660 290" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- Regime 1 -->
+  <text x="14" y="90" font-size="12" fill="#5b5b66" font-weight="700">regime 1</text>
+  <text x="14" y="106" font-size="11" fill="#5b5b66">input-cond.</text>
+  <text x="385" y="62" font-size="11" fill="#5b5b66" text-anchor="middle">gate &amp; bind read input u  ⇒  drive precomputed</text>
+  <rect x="150" y="74" width="470" height="38" rx="6" fill="#eef6ee" stroke="#5a9a5a" stroke-width="1.6"/>
+  <text x="385" y="98" font-size="12.5" fill="#26324a" text-anchor="middle">one parallel scan   (spike mode: one DEQ sweep-set)</text>
+  <text x="150" y="128" font-size="11" fill="#5b5b66" text-anchor="middle">0</text>
+  <text x="620" y="128" font-size="11" fill="#5b5b66" text-anchor="middle">L</text>
+
+  <!-- Regime 2 -->
+  <text x="14" y="212" font-size="12" fill="#5b5b66" font-weight="700">regime 2</text>
+  <text x="14" y="228" font-size="11" fill="#5b5b66">state-cond.</text>
+  <text x="385" y="180" font-size="11" fill="#5b5b66" text-anchor="middle">chunk boundaries: read → gate → bind  (sequential events)</text>
+  <!-- chunk bars -->
+  <rect x="150" y="196" width="130" height="38" rx="6" fill="#eef2fb" stroke="#3a5ba0" stroke-width="1.6"/>
+  <text x="215" y="220" font-size="12" fill="#26324a" text-anchor="middle">scan</text>
+  <rect x="312" y="196" width="130" height="38" rx="6" fill="#eef2fb" stroke="#3a5ba0" stroke-width="1.6"/>
+  <text x="377" y="220" font-size="12" fill="#26324a" text-anchor="middle">scan</text>
+  <rect x="474" y="196" width="146" height="38" rx="6" fill="#eef2fb" stroke="#3a5ba0" stroke-width="1.6"/>
+  <text x="547" y="220" font-size="12" fill="#26324a" text-anchor="middle">scan</text>
+  <!-- event diamonds at boundaries -->
+  <polygon points="296,205 306,215 296,225 286,215" fill="#c98a3a"/>
+  <polygon points="458,205 468,215 458,225 448,215" fill="#c98a3a"/>
+  <text x="215" y="252" font-size="10.5" fill="#5b5b66" text-anchor="middle">wave forms (no event)</text>
+  <text x="150" y="252" font-size="11" fill="#5b5b66" text-anchor="middle" opacity="0"> </text>
+  <text x="150" y="272" font-size="11" fill="#5b5b66" text-anchor="middle">0</text>
+  <text x="620" y="272" font-size="11" fill="#5b5b66" text-anchor="middle">L</text>
+</svg>
+</div>
+<figcaption><b>Figure 4. Two regimes, two schedules over the \(L\) cycles.</b> <span style="color:#3f7a3f">Regime 1</span>
+computes the gate from the fixed input, folds the bind into the drive, and runs the entire
+rollout as a <em>single</em> parallel scan. <span style="color:#9c6a24">Regime 2</span> lets the
+gate read the live wave, so it splits time into chunks — each an internal parallel scan — with a
+read→gate→bind event (diamonds) at the boundaries; the serial cost is just the number of events.
+An identity event makes the two schedules numerically identical, since linear transport composes
+across chunk boundaries.</figcaption>
+</figure>
 
 <h3>2.4 Recovering the bind: VSA unbinding and resonators</h3>
 <p>Because the stamp is a VSA bind, it is recoverable by unbinding — the same algebra that VSA
@@ -240,7 +515,6 @@ characterised.</li>
 <li><span class="rid">Keller &amp; Welling (2023).</span> Neural Wave Machine. <em>ICML</em>. Keller et&nbsp;al. (2024). Wave-RNN. <a href="https://arxiv.org/abs/2309.08045">arXiv:2309.08045</a></li>
 <li><span class="rid">Geiping et&nbsp;al. (2025).</span> Scaling test-time compute with latent reasoning (recurrent depth). <a href="https://arxiv.org/abs/2502.05171">arXiv:2502.05171</a></li>
 <li><span class="rid">Mountcastle (1997).</span> The columnar organization of the neocortex. <em>Brain</em> 120.</li>
-<li><span class="rid">Hawkins, Lewis, Klukas, Purdy &amp; Ahmad (2019).</span> A framework for intelligence and cortical function based on grid cells. <em>Front. Neural Circuits</em> 12. <a href="https://www.frontiersin.org/articles/10.3389/fncir.2018.00121/full">link</a> <span class="small">(hypothesis; see §2 caveat)</span></li>
 </ol>
 
 <hr>
