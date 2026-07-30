@@ -30,6 +30,7 @@ function wave_tests()
         test_wave_expert_decode()
         test_wave_route_features()
         test_wave_aniso_coupling()
+        test_wave_shift_coupling()
         # ---- Tier 2: continuous ODE mode (needs the ODE stack from runtests.jl)
         test_wave_continuous_dispersion()
         test_wave_ode_equivalence()
@@ -947,5 +948,56 @@ function test_wave_aniso_coupling()
 
         # (5) constructor rejects bad coupling.
         @test_throws ArgumentError PhasorWaveSheet(H, W; coupling = :bogus)
+    end
+end
+
+# ---- Shift coupling: ballistic dispersion-free transport (:shift) -----
+#
+# A pure shift ramp Ŵ_shift(q)=e^{−i q·s} is a translation: unit gain (no gain
+# narrowing), linear phase (constant v_g=s), zero GVD by construction. With a
+# strong leak (A≈0) the sheet is a ballistic conveyor that carries a packet at any
+# depth, breaking the drift↔dispersion trade-off of :aniso. Checks: flat, non-
+# dispersive dispersion (v_g≈s, β₂≈0, gain_curv≈0, marginal); a bump translates
+# with ~constant spread; the shift vector is trainable.
+
+function test_wave_shift_coupling()
+    @testset "shift coupling: ballistic transport (:shift)" begin
+        H = W = 24
+        l = PhasorWaveSheet(H, W; coupling = :shift, transmit = :potential,
+                            init_shift_h = 1.0, init_shift_w = 0.0,
+                            init_log_neg_lambda = log(5.0), init_log_g = log(0.99))
+        p, s = Lux.setup(Xoshiro(1), l)
+        @test haskey(p, :shift_h) && haskey(p, :shift_w)
+
+        # (1) dispersion: unit-gain, linear-phase, zero-GVD, marginal.
+        d = dispersion_diagnostics(l, p, s; mode = :potential)
+        @test 0.8 < d.v_g_star < 1.15          # v_g ≈ shift = 1
+        @test abs(d.gvd_star) < 0.05           # zero GVD
+        @test abs(d.gain_curv_star) < 0.1      # flat gain (no narrowing)
+        @test abs(d.growth_star) < 0.05        # marginal / stable
+
+        # (2) ballistic rollout: a bump translates ~1 row/step with ~constant spread.
+        crow(z) = (w = abs2.(z); sum((1:H) .* vec(sum(w; dims = 2))) / (sum(w) + 1f-12))
+        spread(z) = (w = abs2.(z); m = crow(z);
+                     sqrt(sum(((1:H) .- m) .^ 2 .* vec(sum(w; dims = 2))) / (sum(w) + 1f-12)))
+        z0 = ComplexF32[exp(-((i - 4)^2 + (j - 12)^2) / 8f0) for i in 1:H, j in 1:W]
+        Y = PhasorNetworks._wave_rollout(l, p, s, reshape(z0, H, W, 1), nothing, 12)
+        c1 = crow(Y[:, :, 1, 1]); c2 = crow(Y[:, :, end, 1])
+        @test c2 - c1 > 9                       # ballistic drift ≈ 11 rows over 12 steps
+        @test abs(spread(Y[:, :, end, 1]) - spread(Y[:, :, 1, 1])) < 0.4   # spread ~constant
+
+        # (3) shift is trainable; forward on Phase input is finite.
+        x = Phase.(2f0 .* rand(Xoshiro(2), Float32, H * W, 4, 2) .- 1f0)
+        y, _ = l(x, p, s)
+        @test size(y) == (H * W, 4, 2) && all(isfinite, Float32.(y))
+        vv, gg = Zygote.withgradient(pp -> sum(abs2, Float32.(first(l(x, pp, s)))), p)
+        @test isfinite(vv) && abs(gg[1].shift_h[1]) > 0
+
+        # (4) shift=0 ⇒ no transport (frozen packet).
+        l0 = PhasorWaveSheet(H, W; coupling = :shift, transmit = :potential,
+                             init_shift_h = 0.0, init_log_neg_lambda = log(5.0), init_log_g = log(0.99))
+        p0, s0 = Lux.setup(Xoshiro(1), l0)
+        Y0 = PhasorNetworks._wave_rollout(l0, p0, s0, reshape(z0, H, W, 1), nothing, 12)
+        @test abs(crow(Y0[:, :, end, 1]) - crow(Y0[:, :, 1, 1])) < 0.5     # no drift
     end
 end

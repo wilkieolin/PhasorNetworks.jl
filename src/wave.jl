@@ -131,6 +131,8 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     init_log_delta_a::Float32
     init_beta_h::Float32       # advection drift along axis-1 (rows); used when coupling=:aniso
     init_beta_w::Float32       # advection drift along axis-2 (cols); used when coupling=:aniso
+    init_shift_h::Float32      # directed shift (sites/period) along axis-1; used when coupling=:shift
+    init_shift_w::Float32      # directed shift along axis-2; used when coupling=:shift
     spk_args::SpikingArgs
 end
 
@@ -151,9 +153,11 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          init_log_delta_a::Real = log(0.2),
                          init_beta_h::Real = 0.5,
                          init_beta_w::Real = 0.0,
+                         init_shift_h::Real = 1.0,
+                         init_shift_w::Real = 0.0,
                          spk_args::SpikingArgs = SpikingArgs())
-    coupling in (:dog, :stencil, :aniso) ||
-        throw(ArgumentError("coupling must be :dog, :stencil or :aniso, got :$coupling"))
+    coupling in (:dog, :stencil, :aniso, :shift) ||
+        throw(ArgumentError("coupling must be :dog, :stencil, :aniso or :shift, got :$coupling"))
     transmit in (:potential, :spike) ||
         throw(ArgumentError("transmit must be :potential or :spike, got :$transmit"))
     coupling === :stencil && (2 * stencil_radius + 1 > min(H, W)) &&
@@ -166,6 +170,7 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                            Float32(init_log_speed),
                            Float32(init_log_rho_a), Float32(init_log_delta_a),
                            Float32(init_beta_h), Float32(init_beta_w),
+                           Float32(init_shift_h), Float32(init_shift_w),
                            spk_args)
 end
 
@@ -224,6 +229,9 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorWaveSheet)
     if l.coupling === :stencil
         sre, sim = _dog_stencil_init(l)
         base = merge(base, (stencil_re = sre, stencil_im = sim))
+    elseif l.coupling === :shift    # pure directed shift (conveyor): trainable shift vector
+        base = merge(base, (shift_h = Float32[l.init_shift_h],
+                            shift_w = Float32[l.init_shift_w]))
     else  # :dog / :aniso — parametric difference-of-Gaussians
         base = merge(base, (A_exc         = Float32[l.init_A_exc],
                             log_sigma_exc = Float32[l.init_log_sigma_exc],
@@ -271,6 +279,12 @@ function Lux.initialstates(::AbstractRNG, l::PhasorWaveSheet)
         sin_qh = reshape(Float32.(sin.(2f0 .* Float32(pi) .* (0:H-1) ./ H)), H, 1)
         sin_qw = reshape(Float32.(sin.(2f0 .* Float32(pi) .* (0:W-1) ./ W)), 1, W)
         st = merge(st, (sin_qh = sin_qh, sin_qw = sin_qw))
+    elseif l.coupling === :shift
+        # Full FFT frequency grids for the shift ramp Ŵ_shift(q) = e^{−i(s_h q_h + s_w q_w)}.
+        H, W = l.grid_h, l.grid_w
+        qh = reshape(Float32.(2f0 .* Float32(pi) .* (0:H-1) ./ H), H, 1)
+        qw = reshape(Float32.(2f0 .* Float32(pi) .* (0:W-1) ./ W), 1, W)
+        st = merge(st, (qh = qh, qw = qw))
     end
     return st
 end
@@ -289,7 +303,11 @@ needs, all on the parameter device and fully differentiable:
 - `W_hat :: (H,W)` complex — the spatial FFT of the coupling kernel, so a
   circular convolution is `ifft2(W_hat ⊙ fft2(z))`.
 
-Three coupling parameterizations (`l.coupling`):
+Four coupling parameterizations (`l.coupling`):
+- `:shift` — a pure directed shift `Ŵ_shift(q) = e^{−i(s_h q_h + s_w q_w)}` (circular
+  translation by the trainable vector `(s_h,s_w)`). Unit gain, linear phase ⇒ constant
+  group velocity `s` and zero dispersion; with a strong leak (`A≈0`) the sheet is a
+  ballistic conveyor at any depth. Two scalars `shift_h, shift_w`.
 - `:dog` — the delayed difference-of-Gaussians `A_exc·G(r;σ_E) −
   B_inh·G(r;σ_I)` × `e^{-iω·r/c}` (≈9 interpretable scalars); self term
   (`r=0`) zeroed. Reflection-symmetric ⇒ waves spread symmetrically (no net
@@ -317,6 +335,14 @@ function _build_coupling(l::PhasorWaveSheet, ps, st, ω)
         sv = reshape(ComplexF32.(ps.stencil_re) .+ 1im .* ComplexF32.(ps.stencil_im), :)  # (K,)
         W_full = reshape(st.place * sv, H, W)         # (H,W) differentiable linear scatter
         return A_step, g, fft(W_full)
+    elseif l.coupling === :shift
+        # Pure directed shift (conveyor): Ŵ_shift(q) = e^{−i(s_h q_h + s_w q_w)} — a phase
+        # ramp = circular translation by the (trainable) shift vector (s_h,s_w). Unit gain
+        # |Ŵ|=1, linear phase ⇒ constant group velocity s and ZERO dispersion; with a strong
+        # leak (A≈0, log_neg_lambda large) the sheet is a ballistic delay-line that carries a
+        # packet coherently at any depth — breaking the drift↔dispersion trade-off of :aniso.
+        W_hat = exp.((-1im) .* (ps.shift_h .* st.qh .+ ps.shift_w .* st.qw))   # (H,W)
+        return A_step, g, W_hat
     else  # :dog / :aniso
         rgrid = st.rgrid
         σe = exp.(ps.log_sigma_exc)                   # (1,)

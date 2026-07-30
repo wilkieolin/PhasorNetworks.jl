@@ -845,26 +845,40 @@ doubles its spread — same substrate, opposite behaviour, predicted analyticall
 dispersion and stability push \(g\to0\) (a central-difference advection is only the leading term
 of a true shift, and its imaginary contribution raises the spectral radius). So ballistic,
 coherent transport reaches only <strong>\(\sim2\) bands</strong> before the packet spreads: a
-sheet cannot be at once a sharp spatial filter <em>and</em> a deep conveyor. Reaching more
-stages needs a <strong>shift-like</strong> advection (a full directional tap,
-\(\hat W\!\approx\!e^{-iqs}\): unit gain, linear phase, zero GVD by construction) — the natural
-next substrate step.</p>
+diffusive sheet cannot be at once a sharp spatial filter <em>and</em> a deep conveyor. The way
+out is to stop using a diffusive coupling for transport and use a <strong>shift</strong>
+(§10.5).</p>
 
-<h3>10.5 A wave-programmed serial pipeline</h3>
-<p>On the searched conveyor a two-stage pipeline works: a smooth payload injected at the top
-band drifts through two expert bands, each stamping a VSA bind \(V_e\) as the packet passes, and
-the composition \(\sum_e V_e\) is recovered by a differential unbind (bound run minus a no-bind
-control cancels the propagation phase).</p>
+<h3>10.5 The shift conveyor: dispersion-free transport at any depth</h3>
+<p>A pure directed shift breaks the trade-off by construction. A translation by \(\mathbf s\) is
+the Fourier ramp</p>
+\[ \hat W_{\text{shift}}(\mathbf q) = e^{-i(s_h q_h + s_w q_w)},\qquad |\hat W|=1,\ \ \arg=-\mathbf s\!\cdot\!\mathbf q, \]
+<p>so the gain is <em>flat</em> (no narrowing), the phase is <em>linear</em> (constant group
+velocity \(\mathbf v_g=\mathbf s\)), and the GVD is <em>exactly zero</em> — a translation
+preserves the packet shape. Run with a strong leak (\(A=e^{kT}\!\approx\!0\)) so the shift
+dominates the self term, and the sheet becomes a <strong>ballistic delay-line</strong>: the
+diagnostics give \(v_g^*\!\approx\!s\), \(\beta_2^*\!\approx\!0\), \(|\Gamma''(q_*)|\!\approx\!0.02\)
+at marginality, and a seeded bump translates at \(s\) sites/period with its width fixed (spread
+\(1.38\!\to\!1.39\)) clear across the sheet. The price is honest: with \(A\approx0\) the sheet
+carries phase but has no resonant self-memory — it is a directed conveyor, not a diffusive wave.
+This is <code>coupling = :shift</code> (trainable shift vector \(s_h,s_w\)).</p>
+
+<p>On this conveyor the wave-programmed pipeline runs at depth. A smooth payload injected at the
+top drifts through <em>all</em> \(E\) expert bands; each active expert stamps a VSA bind \(V_e\)
+as the packet passes; the composition \(\sum_e V_e\) is recovered by a differential unbind
+(bound run minus a transport-off control cancels the propagation phase):</p>
 <table>
-<tr><th>check</th><th>result</th></tr>
-<tr><td>band-visit order</td><td>\(1\to2\) (directed path)</td></tr>
-<tr><td>composition recovery \(\{1,2\},\{1\},\{2\}\)</td><td><strong>exact</strong> (\(|\text{err}|=0.000\))</td></tr>
-<tr><td>causal (drop expert \(e\))</td><td>removes exactly \(V_e\)</td></tr>
-<tr><td>isotropic <code>:dog</code> sheet</td><td>stalls in band 1 — <strong>cannot pipeline</strong></td></tr>
+<tr><th>check (\(E=4\) bands)</th><th>result</th></tr>
+<tr><td>band-visit order</td><td>\(1\to2\to3\to4\) (directed path)</td></tr>
+<tr><td>composition recovery (5 programs)</td><td><strong>near-exact</strong> (\(|\text{err}|\le0.002\))</td></tr>
+<tr><td>causal (drop expert \(e\))</td><td>removes exactly \(V_e\) (\(|\text{err}|\le0.001\))</td></tr>
+<tr><td>transport off (\(\mathbf s=0\))</td><td>packet frozen in band 1 — <strong>cannot pipeline</strong></td></tr>
 </table>
-<p class="small"><code>demos/wave_experts_pipeline.jl</code>. This turns the isotropy limitation of §8
-into a constructive result: directed serial composition on the anisotropic sheet, provably
-impossible on the isotropic one.</p>
+<p class="small"><code>demos/wave_experts_pipeline.jl</code>. This turns the isotropy limitation of
+§8 into a constructive result: deep directed serial composition on the shift conveyor, provably
+impossible without directed transport (\(\mathbf s=0\)). The diffusive <code>:aniso</code>
+conveyor of §10.1–10.4 reaches the same result but only to \(\sim2\) stages; the shift removes
+that ceiling at the cost of the sheet's resonant self-memory.</p>
 
 <!-- ===================================================================== -->
 <h2 id="conclusion">11. Conclusion &amp; commentary</h2>
