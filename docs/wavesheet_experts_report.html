@@ -445,6 +445,27 @@ sequences <span class="small">[Keller &amp; Welling 2023; Keller et&nbsp;al. 202
 toroidal re-entry of the wave has a 1-D analogue in recurrent-depth / looped transformers
 <span class="small">[Geiping et&nbsp;al. 2025]</span>.</p>
 
+<h3>2.5 Reading the patch in the phase domain</h3>
+<p>The router of §2.2 pools the complex patch and reads its <em>magnitude</em> — which sits
+awkwardly with the architecture's own thesis that information rides on <em>phase</em>, not
+amplitude, and which, read literally, would need an implausible "mega-neuron" tapping raw
+sub-neuron potentials. The gate can instead be a genuinely phase-domain operation: each expert
+<strong>unbinds its patch by a learned per-site key</strong> and takes the real part,</p>
+\[ \rho_e = \frac{1}{|P_e|}\sum_{x\in P_e} e^{-i\pi\psi_{e,x}}\,z_x,\qquad \mathrm{score}_e = \mathrm{Re}\,\rho_e, \]
+<p>a VSA "<em>is this my key?</em>" similarity — the read-side dual of the write-side bind, with
+key \(\psi_e\) and value \(\varphi_e\) a key/value pair. The score is large only when the patch's
+phase pattern matches \(\psi_e\); taking \(\mathrm{Re}\,\rho_e\) (not \(|\rho_e|\)) makes it
+signed, so the anti-phase pattern is <em>suppressed</em> rather than also firing. Three feature
+modes are exposed as <code>route_feature</code>: <code>:coherence</code> (the legacy
+\(|\text{pooled}|\), an amplitude-weighted phase coherence), <code>:dispersion</code> (\(1-\) the
+order parameter of the unit phasors — "a patch carrying a variety of phases holds more
+information"), and <code>:matched</code> (the keyed read above). The routing scalar is thus a
+<em>phase comparison</em>, so it stays compatible with the resonate-and-fire readout: one
+phase-tuned neuron per expert, not a potential-reading oracle. The read pools the raw
+(non-unit-normalised) field, so amplitude acts as confidence — a good key match is usually also a
+strong-signal site. <span class="small">[<code>route_feature</code> in <code>src/wave.jl</code>;
+<code>test_wave_route_features</code>]</span></p>
+
 
 <h2 id="results">3. Empirical results</h2>
 
@@ -482,6 +503,67 @@ max, all experts used). Consistent with an attribution study on the plain sheet:
 wave/expert layer is a near-free spatial-mixing adjunct on top of a head-dominated pipeline,
 not a stand-alone learner.</p>
 
+<h3>3.4 Phase-domain routing: the keys are load-bearing</h3>
+<p>Two results establish that the matched-key gate (§2.5) genuinely routes on phase. First, on the
+go/no-go it does not merely avoid collapse — it reaches <strong>maximal</strong> load balance
+(load-entropy \(\approx\ln 4\), a uniform \(\sim0.25\) per expert) where the amplitude
+<code>:coherence</code> gate leaves one expert carrying \(\sim0.5\). Second, and decisively,
+<strong>zeroing the keys collapses routing to chance</strong> (\(1/E\)): the matched features, not
+the router mixing matrix, carry the routing. On FashionMNIST the matched and coherence gates tie
+(\(0.766\) vs \(0.770\)) — the thin phase-encoded image offers little phase <em>pattern</em> for
+keys to specialise on, so per-site keys add parameters without accuracy. Matched routing pays off
+where the input carries real phase structure, which the ladder below supplies.
+<span class="small">[<code>test_wave_route_features</code>; <code>WAVE_RF</code> in <code>demos/wave_experts_fashionmnist.jl</code>]</span></p>
+
+<h3>3.5 Forcing specialisation: a demonstrator ladder</h3>
+<p>FashionMNIST-10 <em>underdetermines</em> the expert claim: one homogeneous objective gives no
+incentive to specialise, the thin phase field offers nothing to route on, and with a single task
+specialisation is unmeasurable (there is no per-task ablation). Three tasks were built to
+<em>force</em> and <em>measure</em> it, with routing kept <strong>emergent</strong> (keys start
+random) and then verified.</p>
+<p><strong>Rung 1 — keyed associative transform (synthetic).</strong> Every band carries a fresh
+random phase field; one band is overwritten with its codebook address \(A_e\); the target is that
+band rotated by the expert's value \(V_e\). Because all bands carry signal, "which patch has
+energy" is useless — only a key matching \(A_e\) can single out the active expert. Result: an
+emergent routing <em>permutation</em> (bijection), \(100\%\) routing accuracy, reconstruction
+\(\approx0\), learned value \(\approx V_e\), key coherence \(0.97\), and — the load-bearing check —
+<strong>zeroing the keys drops routing to chance</strong>. Causal ablation is clean: disabling
+expert \(e\) damages <em>only</em> address \(e\). <span class="small">[<code>demos/wave_experts_keyed.jl</code>]</span></p>
+<p><strong>Rung 2 — multi-task FashionMNIST (real data).</strong> Each image gets \(K=4\) different
+binary labels depending on a <strong>phase task-tag</strong> broadcast into a strip of columns;
+the classifier head reads <em>only</em> the image columns (tag sliced off), so task information
+reaches it <em>only</em> through the expert bank — routing must work and each expert must mark its
+task. Result: an emergent <strong>4-way routing bijection at \(100\%\)</strong>, mean per-task
+accuracy \(0.92\), and <strong>all four tasks causally localised</strong> (dropping expert \(e\)
+degrades only task \(e\)). The failure modes were instructive and are now documented: tasks must be
+<em>disjoint</em> (correlated tasks get merged onto one expert and another dies), each needs a
+<em>distinctive anchor</em> class (a near-baseline task barely uses its mark, so its ablation looks
+weak), and they must be <em>balanced</em> (a \(\sim\)10%-positive task starves its route of
+gradient). <span class="small">[<code>demos/wave_experts_multitask.jl</code>]</span></p>
+
+<h3>3.6 Serial composition on a conveyor — and its orthogonality to routing</h3>
+<p>The read→gate→bind reaches its fullest form when the wave <em>transports</em>: a payload drifts
+through a spatial <em>sequence</em> of experts, each binding as it passes, and the composition is
+recovered downstream by unbinding. This needs <strong>directed transport</strong> — impossible on
+the isotropic sheet, whose reflection symmetry spreads a perturbation every way at once. The
+substrate report (<a href="wavesheet_report.html#transport">§10</a>) derives the fix: an
+anisotropic advection term, and — to carry a packet coherently at depth — a pure <em>shift</em>
+coupling (unit gain, linear phase, zero dispersion). On that shift conveyor the pipeline runs at
+depth \(E=4\): band-visit order \(1\!\to\!2\!\to\!3\!\to\!4\), composition recovery near-exact
+(\(|\text{err}|\le0.002\)) across programs, causal (dropping expert \(e\) removes exactly \(V_e\)),
+and with transport off (\(s=0\)) the packet is frozen in band 1 and cannot pipeline.
+<span class="small">[<code>demos/wave_experts_pipeline.jl</code>]</span></p>
+<div class="box">
+<p><strong>Routing and transport are orthogonal axes.</strong> The router is input-conditioned — it
+reads the drive <em>before</em> any propagation — so it never touches the coupling: given the same
+keys and input, <code>route_stats</code> is <em>identical</em> across <code>:dog</code>,
+<code>:aniso</code> and <code>:shift</code> (difference \(0\)). Rungs 1–2 therefore run unchanged
+on the ballistic substrate, and the conveyor adds transport (rung 3) <em>without</em> altering
+routing or specialisation. The two capabilities are separate: <em>which</em> expert fires and
+<em>what</em> it binds (rungs 1–2, coupling-independent) versus <em>moving</em> information across
+experts (rung 3, coupling-specific).</p>
+</div>
+
 
 <h2 id="open">4. Open questions</h2>
 <ul>
@@ -497,6 +579,18 @@ as chunks shrink (finer state feedback) is open.</li>
 <li><strong>Load signal on a torus.</strong> The DeepSeek per-expert bias balances token-style
 load; the right signal for spatially-localised patch occupancy on a 2-D torus is not yet
 characterised.</li>
+<li><strong>Depth vs. resonant self-memory.</strong> The shift conveyor that unlocks the deep
+pipeline runs with a near-zero self term (\(A\approx0\)) — a directed delay-line, not a diffusive
+wave (substrate report §10.5). Recovering resonant dynamics <em>and</em> deep transport together
+(a shift + difference-of-Gaussians hybrid) is open, and hard because a non-negligible \(A\) fights
+the shift.</li>
+<li><strong>Phase-tag routing on richer inputs.</strong> Matched routing ties the amplitude gate
+on FashionMNIST because the input lacks phase <em>pattern</em>; how it fares when inputs carry
+genuine phase structure (audio, VSA-encoded symbols) — where the per-site keys should earn their
+parameters — is untested.</li>
+<li><strong>Non-commutative / ordered composition.</strong> The pipeline composes binds
+<em>commutatively</em> (phase addition), so it records <em>which</em> transforms fired, not their
+order. A genuinely order-dependent program would need a non-commutative operation along the path.</li>
 </ul>
 
 <h2 id="refs">5. References</h2>
