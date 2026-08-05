@@ -176,6 +176,95 @@ fact recurs throughout the report: conduction delays (§3.1), the transformation
 the read-out phase shift (§4.5) are all instances of a unit-phasor multiply on the shared
 carrier.</p>
 
+<h3>2.4 A travelling wave is a moving VSA symbol</h3>
+<p>Before building the sheet it helps to fix what a "symbol" <em>is</em> in each setting, because
+that is the object whose fate the whole report tracks. In an ordinary feed-forward phasor
+network the carrier of meaning is a <strong>layer's activation</strong>: a vector of phases —
+an FHRR hypervector (§2.3). Inject a symbol into a layer and, by the SSM of §2.2, every channel
+resonates at its driven phase and relaxes with time constant \(1/|\lambda|\). The symbol is
+held <em>in place</em> and then forgotten; it does not go anywhere.</p>
+
+<p>The wave sheet keeps the same substrate — resonate-and-fire units, one shared carrier, the
+FHRR algebra — but changes what a symbol looks like. Here the natural carrier of a hypervector
+is a <strong>localised wave</strong>: a compact patch of phase-locked spiking activity whose
+per-site phases <em>are</em> the components of the vector. Because the sheet is recurrent (§3),
+such a patch does not simply decay where it was placed — it drives its neighbours and the
+pattern <em>moves</em>. The sheet's analogue of "a layer's symbol" is therefore a
+<strong>symbol in transit</strong>. That is the whole promise of the medium, and also the whole
+difficulty: a moving symbol can be reshaped by the medium it moves through.</p>
+
+<div class="box">
+<p><strong>A caution about "the wave pushes forward."</strong> It is tempting to picture transport
+as neurons <em>ahead</em> of the wave being excited while those <em>behind</em> are inhibited — a
+marching front. The <em>isotropic</em> sheet does no such thing. Its difference-of-Gaussians
+coupling is reflection-symmetric (\(W(d)=W(-d)\), §3), so its lateral inhibition is a
+<em>symmetric surround</em>: a compact excitation spreads outward as a ring and settles into a
+standing, interfering pattern, with no preferred direction and <em>no net transport</em>. A
+genuine front-excited / rear-inhibited wave requires <em>breaking</em> that symmetry — either an
+adaptation current that leaves a refractory wake, or an anisotropic (advective) coupling — which
+is the subject of §10. Until then, read "transport" as symmetric spreading plus interference,
+not a directed front.</p>
+</div>
+
+<p>This reframing fixes the properties we want from the substrate, and the order in which the
+rest of the report establishes them:</p>
+<ol>
+<li><strong>Hold a symbol.</strong> A patch of phases is a valid FHRR hypervector, read by
+interference — §2.3, and the routing/binding reads of the companion experts report.</li>
+<li><strong>Move it.</strong> Recurrent, translation-invariant coupling turns the patch into a
+propagating wave — §3.</li>
+<li><strong>Control where it goes and how faithfully.</strong> Which wavelengths survive, how
+fast they travel, and how much the symbol distorts in transit are all fixed by the dispersion
+relation acting on the symbol's <em>own</em> spatial-frequency content — §4, and especially
+§4.6.</li>
+<li><strong>Stay stable and trainable.</strong> The same per-mode analysis gives criticality as
+a one-line spectral-radius condition (§4.3), and the sheet reduces to a diagonal SSM that trains
+with ordinary reverse-mode AD (§5).</li>
+</ol>
+<p>The remainder of the report is, in effect, the quantitative theory of items 2–3: what the
+connectivity does to a symbol as the wave carries it.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 520 180" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <defs><marker id="wsym" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto"><path d="M0,0 L5.5,3 L0,6 Z" fill="#3a5ba0"/></marker></defs>
+ <text x="20" y="18" font-size="11.5" fill="#26324a"><tspan font-weight="bold">feed-forward layer</tspan> — symbol resonates in place, then decays</text>
+ <!-- injected column (strong) -->
+ <circle cx="60" cy="48" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="60" y1="48" x2="67.8" y2="43.5" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="60" cy="78" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="60" y1="78" x2="55.5" y2="70.2" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="60" cy="108" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="60" y1="108" x2="52.2" y2="112.5" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="60" cy="138" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="60" y1="138" x2="64.5" y2="145.8" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <!-- decayed copy (faded, shorter) -->
+ <g opacity="0.32">
+ <circle cx="120" cy="48" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="120" y1="48" x2="124.3" y2="45.5" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="120" cy="78" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="120" y1="78" x2="117.5" y2="73.7" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="120" cy="108" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="120" y1="108" x2="115.7" y2="110.5" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ <circle cx="120" cy="138" r="11" fill="#eef1f8" stroke="#c3c7d4"/><line x1="120" y1="138" x2="122.5" y2="142.3" stroke="#3a5ba0" stroke-width="2" marker-end="url(#wsym)"/>
+ </g>
+ <line x1="78" y1="93" x2="103" y2="93" stroke="#8891a8" stroke-width="1.6" marker-end="url(#wsym)"/>
+ <text x="90" y="171" text-anchor="middle" font-size="10" fill="#8891a8">time → decays (\(1/|\lambda|\))</text>
+ <line x1="250" y1="24" x2="250" y2="156" stroke="#e3e6ee"/>
+ <text x="290" y="18" font-size="11.5" fill="#26324a"><tspan font-weight="bold">wave sheet</tspan> — same symbol, now in transit</text>
+ <!-- lattice -->
+ <g>
+ <!-- rows y=55,90,125 ; cols x=300..480 step 30 -->
+ <g fill="#d6dae6">
+ <circle cx="300" cy="55" r="4"/><circle cx="330" cy="55" r="4"/><circle cx="360" cy="55" r="4"/><circle cx="390" cy="55" r="4"/><circle cx="420" cy="55" r="4"/><circle cx="450" cy="55" r="4"/><circle cx="480" cy="55" r="4"/>
+ <circle cx="300" cy="90" r="4"/><circle cx="330" cy="90" r="4"/><circle cx="360" cy="90" r="4"/><circle cx="390" cy="90" r="4"/><circle cx="420" cy="90" r="4"/><circle cx="450" cy="90" r="4"/><circle cx="480" cy="90" r="4"/>
+ <circle cx="300" cy="125" r="4"/><circle cx="330" cy="125" r="4"/><circle cx="360" cy="125" r="4"/><circle cx="390" cy="125" r="4"/><circle cx="420" cy="125" r="4"/><circle cx="450" cy="125" r="4"/><circle cx="480" cy="125" r="4"/>
+ </g>
+ <!-- symbol patch (left) -->
+ <g fill="#3a5ba0">
+ <circle cx="300" cy="72" r="6"/><circle cx="330" cy="72" r="6"/><circle cx="300" cy="108" r="6"/><circle cx="330" cy="108" r="6"/>
+ </g>
+ <!-- translated patch (right, ghost) -->
+ <g fill="#3a5ba0" opacity="0.34">
+ <circle cx="450" cy="72" r="6"/><circle cx="480" cy="72" r="6"/><circle cx="450" cy="108" r="6"/><circle cx="480" cy="108" r="6"/>
+ </g>
+ <line x1="345" y1="90" x2="438" y2="90" stroke="#c9a15a" stroke-width="2" marker-end="url(#wsym)"/>
+ <text x="392" y="152" text-anchor="middle" font-size="10" fill="#b8862f">propagation → carries the symbol</text>
+ </g>
+</svg></div>
+<figcaption><b>Schematic.</b> The same FHRR symbol in two substrates. <b>Left:</b> a feed-forward layer holds it as a column of resonating phasors that decay in place. <b>Right:</b> the wave sheet holds it as a compact patch of phase-locked activity that the recurrent coupling carries to a new location — a symbol in transit. The rest of the report is about what the medium does to the symbol along that arrow.</figcaption></figure>
+
 <!-- ===================================================================== -->
 <h2 id="sheet">3. From a feed-forward SSM to a recurrent wave sheet</h2>
 
@@ -455,6 +544,19 @@ how fast a disturbance travels, which wavelengths grow, and whether the sheet is
 follows in closed form.</p>
 
 <div class="box">
+<p><strong>The through-line of this section.</strong> One object controls everything the sheet
+does to a symbol: the per-mode map \(M(q)=A+g\hat W(q)\) — equivalently the dispersion rate
+\(\kappa(q)=\Gamma(q)+i\Omega(q)\) — <em>acting on the symbol's own spatial-frequency content</em>
+\(\hat c(q)\). Its <em>magnitude</em> says which wavelengths survive (\(\Gamma\), §4.1) and whether
+the sheet is stable (\(\rho\), §4.3); its <em>phase</em> says where the content goes (\(\Omega\)
+and the group velocity, §4.2); its <em>curvature</em> says how much a packet distorts in transit
+(§4.6, §10). Directed transport (§10) and the routing/binding fidelity of the companion experts
+report are corollaries of this one relationship. Read the section as: <em>the coupling defines
+\(\kappa(q)\); the symbol defines \(\hat c(q)\); the wave that arrives is \(\kappa\) applied to
+\(\hat c\).</em></p>
+</div>
+
+<div class="box">
 <p><strong>Two transmission modes — the distinction this section turns on.</strong> The sheet's
 coupling can carry one of two things between neurons, and the choice is what separates
 <em>exact</em> from <em>linearised</em> everywhere below.</p>
@@ -625,6 +727,84 @@ recover (§8).</p>
 </svg></div>
 <figcaption><b>Figure 9.</b> Read-out phase shift \(\Delta\phi(d)\) versus propagation distance \(d\), from the sheet&#8217;s Green function (blue) against its linear fit (grey): the read-out phase advances essentially linearly with distance, at a slope set by the dominant propagating wavevector &#8212; the sheet is a phase-delay line.</figcaption></figure>
 
+<h3>4.6 The symbol's spectrum sets its transport</h3>
+<p>Sections 4.1–4.3 characterised the medium one mode at a time. But a symbol is not a single
+mode — it is a spatial pattern, and how it travels depends on <em>which</em> modes it is built
+from. Decompose the injected code \(c(x)\) into the sheet's Bloch modes by the spatial FFT; the
+weight it places on mode \(q\) is its <strong>spectral occupancy</strong> \(\hat c(q)\). Because
+the coupling is diagonal in that basis (§3.2), the wave that arrives after propagation is, mode
+by mode, \(M(q)\,\hat c(q)\): the dispersion relation of §4.1 applied to the symbol's own
+spectrum. Everything the sheet does to the symbol is contained in that product.</p>
+
+<p>The decisive fact is <strong>Fourier's uncertainty principle</strong>: a spatially
+<em>concentrated</em> code has a <em>broad</em> spectrum, and a spatially <em>extended</em> code a
+<em>narrow</em> one. This links the informational content of the symbol — how it is spread across
+the patch — directly to how many and which modes carry it, and therefore to its fate in transit.
+Two regimes bracket the behaviour (Fig. 10).</p>
+
+<p><strong>A concentrated code is broadband — and it disperses.</strong> Packing a symbol into a
+few sites (the natural encoding of "one symbol at one place") gives a \(\hat c(q)\) that spans the
+whole axis (Fig. 10, left). It therefore samples the entire dispersion curve at once, and two
+damaging things follow. First, \(\Gamma(q)\) is not flat, so different components are attenuated
+differently — the band-pass medium <em>reshapes</em> the code toward its selected wavelength
+\(q^\ast\) and discards the rest. Second, and worse, the components travel at different group
+velocities: across this code the real dispersion of a default sheet spreads \(v_g\) over
+\([-3.8,\,3.8]\) sites/period, so the packet immediately smears and dephases. Its VSA content is
+corrupted fastest.</p>
+
+<p><strong>An extended, tuned code is narrowband — and it survives.</strong> A smooth patch
+modulated at the amplified wavevector \(q^\ast\) — a Gabor packet — has a \(\hat c(q)\) that is a
+thin peak sitting on the gain maximum (Fig. 10, right). Now \(\Gamma(q)\) is nearly uniform across
+the occupied band (little differential attenuation) and the group-velocity spread collapses by
+roughly \(7\times\) (here \(v_g\in[-0.96,\,0.07]\)): the packet translates almost rigidly,
+carrying its symbol intact.</p>
+
+<figure class="fig"><div class="figframe"><svg viewBox="0 0 520 212" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+ <text x="48" y="13" font-size="11" fill="#26324a"><tspan font-weight="bold">concentrated code</tspan> → broadband</text>
+ <text x="300" y="13" font-size="11" fill="#26324a"><tspan font-weight="bold">extended patch tuned to q*</tspan> → narrowband</text>
+ <line x1="48" y1="165" x2="238" y2="165" stroke="#e3e6ee"/>
+ <line x1="300" y1="165" x2="490" y2="165" stroke="#e3e6ee"/>
+ <!-- q* gain-peak markers -->
+ <line x1="120.4" y1="26" x2="120.4" y2="165" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="0.8" opacity="0.7"/>
+ <line x1="162.6" y1="26" x2="162.6" y2="165" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="0.8" opacity="0.7"/>
+ <line x1="372.4" y1="26" x2="372.4" y2="165" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="0.8" opacity="0.7"/>
+ <line x1="414.6" y1="26" x2="414.6" y2="165" stroke="#d0693f" stroke-dasharray="4 3" stroke-width="0.8" opacity="0.7"/>
+ <text x="162.6" y="24" text-anchor="middle" font-size="9.5" fill="#d0693f">±q*</text>
+ <text x="414.6" y="24" text-anchor="middle" font-size="9.5" fill="#d0693f">±q*</text>
+ <!-- code spectra (blue fill) -->
+ <polygon points="48.0,165 48.0,160.0 51.0,159.9 54.0,159.5 57.0,158.8 60.1,157.8 63.1,156.5 66.1,154.9 69.1,152.9 72.1,150.5 75.1,147.7 78.2,144.5 81.2,140.8 84.2,136.6 87.2,132.0 90.2,126.9 93.2,121.3 96.3,115.3 99.3,108.9 102.3,102.2 105.3,95.2 108.3,88.0 111.3,80.8 114.3,73.6 117.4,66.6 120.4,59.8 123.4,53.5 126.4,47.7 129.4,42.6 132.4,38.2 135.5,34.7 138.5,32.1 141.5,30.5 144.5,30.0 147.5,30.5 150.5,32.1 153.6,34.7 156.6,38.2 159.6,42.6 162.6,47.7 165.6,53.5 168.6,59.8 171.7,66.6 174.7,73.6 177.7,80.8 180.7,88.0 183.7,95.2 186.7,102.2 189.7,108.9 192.8,115.3 195.8,121.3 198.8,126.9 201.8,132.0 204.8,136.6 207.8,140.8 210.9,144.5 213.9,147.7 216.9,150.5 219.9,152.9 222.9,154.9 225.9,156.5 229.0,157.8 232.0,158.8 235.0,159.5 238.0,159.9 238.0,165" fill="#3a5ba0" fill-opacity="0.15" stroke="#3a5ba0" stroke-width="1.8"/>
+ <polygon points="300.0,165 300.0,165.0 363.3,164.8 366.3,160.9 369.4,136.7 372.4,73.5 375.4,30.0 378.4,73.5 381.4,136.7 384.4,160.9 387.5,164.8 405.6,164.8 408.6,160.9 411.6,136.7 414.6,73.5 417.6,30.0 420.6,73.5 423.7,136.7 426.7,160.9 429.7,164.8 490.0,165.0 490.0,165" fill="#3a5ba0" fill-opacity="0.15" stroke="#3a5ba0" stroke-width="1.8"/>
+ <!-- gain curves (grey) -->
+ <polyline points="48.0,164.9 51.0,164.4 54.0,163.6 57.0,162.4 60.1,160.7 63.1,158.4 66.1,155.3 69.1,151.5 72.1,146.9 75.1,141.4 78.2,135.1 81.2,127.9 84.2,119.9 87.2,111.2 90.2,102.0 93.2,92.5 96.3,82.8 99.3,73.4 102.3,64.3 105.3,55.8 108.3,48.1 111.3,41.4 114.3,35.9 117.4,32.0 120.4,30.0 123.4,30.4 126.4,33.6 129.4,39.6 132.4,46.5 135.5,49.4 138.5,47.5 141.5,46.0 144.5,47.5 147.5,49.4 150.5,46.5 153.6,39.6 156.6,33.6 159.6,30.4 162.6,30.0 165.6,32.0 168.6,35.9 171.7,41.4 174.7,48.1 177.7,55.8 180.7,64.3 183.7,73.4 186.7,82.8 189.7,92.5 192.8,102.0 195.8,111.2 198.8,119.9 201.8,127.9 204.8,135.1 207.8,141.4 210.9,146.9 213.9,151.5 216.9,155.3 219.9,158.4 222.9,160.7 225.9,162.4 229.0,163.6 232.0,164.4 235.0,164.9 238.0,165.0" fill="none" stroke="#9aa3b5" stroke-width="1.6"/>
+ <polyline points="300.0,164.9 303.0,164.4 306.0,163.6 309.0,162.4 312.1,160.7 315.1,158.4 318.1,155.3 321.1,151.5 324.1,146.9 327.1,141.4 330.2,135.1 333.2,127.9 336.2,119.9 339.2,111.2 342.2,102.0 345.2,92.5 348.3,82.8 351.3,73.4 354.3,64.3 357.3,55.8 360.3,48.1 363.3,41.4 366.3,35.9 369.4,32.0 372.4,30.0 375.4,30.4 378.4,33.6 381.4,39.6 384.4,46.5 387.5,49.4 390.5,47.5 393.5,46.0 396.5,47.5 399.5,49.4 402.5,46.5 405.6,39.6 408.6,33.6 411.6,30.4 414.6,30.0 417.6,32.0 420.6,35.9 423.7,41.4 426.7,48.1 429.7,55.8 432.7,64.3 435.7,73.4 438.7,82.8 441.7,92.5 444.8,102.0 447.8,111.2 450.8,119.9 453.8,127.9 456.8,135.1 459.8,141.4 462.9,146.9 465.9,151.5 468.9,155.3 471.9,158.4 474.9,160.7 477.9,162.4 481.0,163.6 484.0,164.4 487.0,164.9 490.0,165.0" fill="none" stroke="#9aa3b5" stroke-width="1.6"/>
+ <text x="48" y="181" font-size="10" fill="#5b5b66">wavevector q  (−π … π)</text>
+ <text x="300" y="181" font-size="10" fill="#5b5b66">wavevector q  (−π … π)</text>
+ <text x="48" y="196" font-size="10" fill="#3a5ba0">samples the whole band · v_g ∈ [−3.8, 3.8] → smears</text>
+ <text x="300" y="196" font-size="10" fill="#3a5ba0">sits on the gain peak · v_g spread ~7× tighter → coherent</text>
+ <line x1="360" y1="207" x2="378" y2="207" stroke="#9aa3b5" stroke-width="1.6"/><text x="382" y="210" font-size="9.5" fill="#5b5b66">Γ(q) gain</text>
+ <rect x="440" y="203" width="14" height="7" fill="#3a5ba0" fill-opacity="0.3" stroke="#3a5ba0" stroke-width="1"/><text x="457" y="210" font-size="9.5" fill="#5b5b66">ĉ(q)</text>
+</svg></div>
+<figcaption><b>Figure 10.</b> A symbol's spatial-frequency content decides how it travels, computed
+from the real dispersion of a default difference-of-Gaussians sheet (\(q^\ast\approx0.69\)). Grey:
+the gain band \(\Gamma(q)\), peaking at \(\pm q^\ast\). Blue: the code's spectral occupancy
+\(\hat c(q)\). <b>Left:</b> a code concentrated in a few sites is broadband — it covers the whole
+band, so it is reshaped by the uneven gain and its components spread over group velocities
+\(v_g\in[-3.8,3.8]\) sites/period; the packet disperses. <b>Right:</b> an extended patch modulated
+at \(q^\ast\) is narrowband — its \(\hat c(q)\) sits on the gain peaks, the gain it sees is nearly
+uniform, and its group-velocity spread is ~7× smaller (\([-0.96,0.07]\)); it translates almost
+rigidly, carrying the symbol intact.</figcaption></figure>
+
+<p>So the <strong>transport fidelity</strong> of a wave is set by the overlap of the symbol's
+spectral footprint with the <em>flat</em> regions of the dispersion relation — flat gain
+\(\Gamma\) and flat (linear) phase \(\Omega\). This one criterion explains results scattered
+across the report and its companion: it is why a naïvely point-injected symbol disperses (§10.2),
+why faithful <em>directed</em> transport demanded a flat-gain, linear-phase regime — the shift
+conveyor of §10.5 — and why moving a symbol through the dispersive DoG medium required a
+differential control to subtract the propagation phase (the serial pipeline of the experts
+report). It also names a lever we have not yet pulled: instead of reshaping the medium to fit the
+code, one can reshape the code to fit the medium — <em>spectral pre-conditioning</em> of VSA
+symbols (§8).</p>
+
 <h2 id="training">5. Training on the discrete SSM (not the ODE)</h2>
 
 <p>The sheet has two evaluation tiers. <strong>Tier&nbsp;2</strong> is the continuous ODE
@@ -757,6 +937,19 @@ operator is no longer a convolution, does not diagonalise under the FFT, and the
 dispersion and spectral-radius criticality are lost. Such a sheet can still be simulated and
 trained; what is forfeited is the analytic handle, not the dynamics.</li>
 
+<li><strong>Transport fidelity is a code-design problem, not only a medium-design problem
+(open direction).</strong> §4.6 showed that a symbol travels well exactly when its spectral
+occupancy \(\hat c(q)\) lands on the <em>flat</em> regions of the dispersion relation, and badly
+when it is broadband. Every transport result so far has attacked this from the medium side —
+flattening the gain, linearising the phase, or switching to a shift conveyor (§10). The dual
+lever is untouched: <em>shape the code to fit the medium</em>. A symbol pre-conditioned into a
+narrow band around the amplified \(q^\ast\) — an extended, \(q^\ast\)-modulated patch rather than
+a point injection — should propagate coherently through the <em>ordinary</em> resonant DoG sheet,
+without sacrificing the self-memory that the shift conveyor gives up. This <em>spectral
+pre-conditioning</em> of VSA symbols (choosing the encoding to match \(\kappa(q)\)) is, as far as
+we can tell, the cheapest route to faithful transport with memory intact, and it is the natural
+next experiment.</li>
+
 </ul>
 
 <!-- ===================================================================== -->
@@ -767,7 +960,7 @@ trained; what is forfeited is the analytic handle, not the dynamics.</li>
 <p>The canonical physical demonstration is Fernando &amp; Sojakka's <em>"Pattern Recognition in a Bucket"</em> <span class="small">[2003]</span>: ripples on a literal bucket of water, filmed by a camera, compute <strong>XOR</strong> &#8212; a function no linear classifier can compute on the raw inputs &#8212; because the water's wave interference is the nonlinear expansion and the camera's brightness (an <em>intensity</em>) is read off by a simple linear classifier. Our sheet is the same experiment with <strong>spiking waves instead of water</strong>. We treat the R&amp;F sheet as a <em>fixed</em> reservoir (its coupling is <em>not</em> trained): the two bits \(a,b\) are injected as phase-encoded drives at two sites (bit \(\mapsto\) phasor \(e^{i\pi\,\text{bit}}\)); the spiking waves propagate and interfere across the sheet; and a linear (ridge) readout on the interference intensity \(|z|^2\) computes XOR.</p>
 
 <figure class="fig"><div class="figframe"><svg viewBox="0 0 412 206" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif"><rect x="20" y="26" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="26" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="26" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="26" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="26" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="26" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="26" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="26" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="26" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="26" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="39" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="39" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="39" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="39" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="39" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="39" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="39" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="39" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="39" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="39" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="39" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="39" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="33" y="52" width="13" height="13" fill="rgb(63,50,117)"/><rect x="46" y="52" width="13" height="13" fill="rgb(68,5,87)"/><rect x="59" y="52" width="13" height="13" fill="rgb(66,19,96)"/><rect x="72" y="52" width="13" height="13" fill="rgb(70,179,115)"/><rect x="85" y="52" width="13" height="13" fill="rgb(209,223,54)"/><rect x="98" y="52" width="13" height="13" fill="rgb(70,179,115)"/><rect x="111" y="52" width="13" height="13" fill="rgb(66,19,96)"/><rect x="124" y="52" width="13" height="13" fill="rgb(68,5,87)"/><rect x="137" y="52" width="13" height="13" fill="rgb(63,50,117)"/><rect x="150" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="163" y="52" width="13" height="13" fill="rgb(60,71,132)"/><rect x="20" y="65" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="65" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="65" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="65" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="65" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="65" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="65" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="65" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="65" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="65" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="65" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="65" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="78" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="78" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="78" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="78" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="78" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="78" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="78" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="78" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="78" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="78" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="78" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="78" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="91" width="13" height="13" fill="rgb(59,82,139)"/><rect x="33" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="46" y="91" width="13" height="13" fill="rgb(65,31,104)"/><rect x="59" y="91" width="13" height="13" fill="rgb(67,14,93)"/><rect x="72" y="91" width="13" height="13" fill="rgb(60,74,134)"/><rect x="85" y="91" width="13" height="13" fill="rgb(45,115,140)"/><rect x="98" y="91" width="13" height="13" fill="rgb(60,74,134)"/><rect x="111" y="91" width="13" height="13" fill="rgb(67,14,93)"/><rect x="124" y="91" width="13" height="13" fill="rgb(65,31,104)"/><rect x="137" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="150" y="91" width="13" height="13" fill="rgb(59,82,139)"/><rect x="163" y="91" width="13" height="13" fill="rgb(60,77,136)"/><rect x="20" y="104" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="104" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="104" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="104" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="104" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="104" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="104" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="104" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="104" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="104" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="104" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="104" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="117" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="117" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="117" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="117" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="117" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="117" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="117" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="117" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="117" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="117" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="117" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="117" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="33" y="130" width="13" height="13" fill="rgb(63,50,117)"/><rect x="46" y="130" width="13" height="13" fill="rgb(68,5,87)"/><rect x="59" y="130" width="13" height="13" fill="rgb(66,19,96)"/><rect x="72" y="130" width="13" height="13" fill="rgb(70,179,115)"/><rect x="85" y="130" width="13" height="13" fill="rgb(209,223,54)"/><rect x="98" y="130" width="13" height="13" fill="rgb(70,179,115)"/><rect x="111" y="130" width="13" height="13" fill="rgb(66,19,96)"/><rect x="124" y="130" width="13" height="13" fill="rgb(68,5,87)"/><rect x="137" y="130" width="13" height="13" fill="rgb(63,50,117)"/><rect x="150" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="163" y="130" width="13" height="13" fill="rgb(60,71,132)"/><rect x="20" y="143" width="13" height="13" fill="rgb(60,74,133)"/><rect x="33" y="143" width="13" height="13" fill="rgb(62,56,121)"/><rect x="46" y="143" width="13" height="13" fill="rgb(67,9,89)"/><rect x="59" y="143" width="13" height="13" fill="rgb(67,13,92)"/><rect x="72" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="85" y="143" width="13" height="13" fill="rgb(135,209,82)"/><rect x="98" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="111" y="143" width="13" height="13" fill="rgb(67,13,92)"/><rect x="124" y="143" width="13" height="13" fill="rgb(67,9,89)"/><rect x="137" y="143" width="13" height="13" fill="rgb(62,56,121)"/><rect x="150" y="143" width="13" height="13" fill="rgb(60,74,133)"/><rect x="163" y="143" width="13" height="13" fill="rgb(60,73,133)"/><rect x="20" y="156" width="13" height="13" fill="rgb(59,80,137)"/><rect x="33" y="156" width="13" height="13" fill="rgb(60,69,131)"/><rect x="46" y="156" width="13" height="13" fill="rgb(66,22,98)"/><rect x="59" y="156" width="13" height="13" fill="rgb(67,12,91)"/><rect x="72" y="156" width="13" height="13" fill="rgb(59,83,139)"/><rect x="85" y="156" width="13" height="13" fill="rgb(40,128,140)"/><rect x="98" y="156" width="13" height="13" fill="rgb(59,83,139)"/><rect x="111" y="156" width="13" height="13" fill="rgb(67,12,91)"/><rect x="124" y="156" width="13" height="13" fill="rgb(66,22,98)"/><rect x="137" y="156" width="13" height="13" fill="rgb(60,69,131)"/><rect x="150" y="156" width="13" height="13" fill="rgb(59,80,137)"/><rect x="163" y="156" width="13" height="13" fill="rgb(60,76,135)"/><rect x="20" y="169" width="13" height="13" fill="rgb(59,82,139)"/><rect x="33" y="169" width="13" height="13" fill="rgb(60,77,136)"/><rect x="46" y="169" width="13" height="13" fill="rgb(65,31,104)"/><rect x="59" y="169" width="13" height="13" fill="rgb(67,14,93)"/><rect x="72" y="169" width="13" height="13" fill="rgb(60,74,134)"/><rect x="85" y="169" width="13" height="13" fill="rgb(45,115,140)"/><rect x="98" y="169" width="13" height="13" fill="rgb(60,74,134)"/><rect x="111" y="169" width="13" height="13" fill="rgb(67,14,93)"/><rect x="124" y="169" width="13" height="13" fill="rgb(65,31,104)"/><rect x="137" y="169" width="13" height="13" fill="rgb(60,77,136)"/><rect x="150" y="169" width="13" height="13" fill="rgb(59,82,139)"/><rect x="163" y="169" width="13" height="13" fill="rgb(60,77,136)"/><circle cx="91.5" cy="58.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="91.5" cy="136.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><text x="98.0" y="18" text-anchor="middle" font-size="12" fill="#26324a">a = b</text><text x="98.0" y="198" text-anchor="middle" font-size="11" fill="#5b5b66">constructive &#8594; bright &#8594; XOR 0</text><rect x="236" y="26" width="13" height="13" fill="rgb(66,22,98)"/><rect x="249" y="26" width="13" height="13" fill="rgb(67,9,89)"/><rect x="262" y="26" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="26" width="13" height="13" fill="rgb(65,32,105)"/><rect x="288" y="26" width="13" height="13" fill="rgb(64,38,109)"/><rect x="301" y="26" width="13" height="13" fill="rgb(64,34,106)"/><rect x="314" y="26" width="13" height="13" fill="rgb(65,28,102)"/><rect x="327" y="26" width="13" height="13" fill="rgb(66,17,95)"/><rect x="340" y="26" width="13" height="13" fill="rgb(67,6,87)"/><rect x="353" y="26" width="13" height="13" fill="rgb(67,6,88)"/><rect x="366" y="26" width="13" height="13" fill="rgb(65,24,100)"/><rect x="379" y="26" width="13" height="13" fill="rgb(64,35,107)"/><rect x="236" y="39" width="13" height="13" fill="rgb(57,87,139)"/><rect x="249" y="39" width="13" height="13" fill="rgb(67,8,89)"/><rect x="262" y="39" width="13" height="13" fill="rgb(67,9,90)"/><rect x="275" y="39" width="13" height="13" fill="rgb(59,81,138)"/><rect x="288" y="39" width="13" height="13" fill="rgb(64,173,119)"/><rect x="301" y="39" width="13" height="13" fill="rgb(77,186,110)"/><rect x="314" y="39" width="13" height="13" fill="rgb(62,171,120)"/><rect x="327" y="39" width="13" height="13" fill="rgb(60,74,134)"/><rect x="340" y="39" width="13" height="13" fill="rgb(67,7,88)"/><rect x="353" y="39" width="13" height="13" fill="rgb(67,11,91)"/><rect x="366" y="39" width="13" height="13" fill="rgb(55,91,139)"/><rect x="379" y="39" width="13" height="13" fill="rgb(40,129,140)"/><rect x="236" y="52" width="13" height="13" fill="rgb(42,124,140)"/><rect x="249" y="52" width="13" height="13" fill="rgb(66,21,98)"/><rect x="262" y="52" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="52" width="13" height="13" fill="rgb(48,109,139)"/><rect x="288" y="52" width="13" height="13" fill="rgb(183,218,64)"/><rect x="301" y="52" width="13" height="13" fill="rgb(242,229,41)"/><rect x="314" y="52" width="13" height="13" fill="rgb(191,219,61)"/><rect x="327" y="52" width="13" height="13" fill="rgb(47,112,139)"/><rect x="340" y="52" width="13" height="13" fill="rgb(66,18,96)"/><rect x="353" y="52" width="13" height="13" fill="rgb(66,23,99)"/><rect x="366" y="52" width="13" height="13" fill="rgb(41,126,140)"/><rect x="379" y="52" width="13" height="13" fill="rgb(66,175,117)"/><rect x="236" y="65" width="13" height="13" fill="rgb(46,115,140)"/><rect x="249" y="65" width="13" height="13" fill="rgb(64,34,106)"/><rect x="262" y="65" width="13" height="13" fill="rgb(65,27,102)"/><rect x="275" y="65" width="13" height="13" fill="rgb(50,103,139)"/><rect x="288" y="65" width="13" height="13" fill="rgb(152,212,76)"/><rect x="301" y="65" width="13" height="13" fill="rgb(207,222,55)"/><rect x="314" y="65" width="13" height="13" fill="rgb(162,214,72)"/><rect x="327" y="65" width="13" height="13" fill="rgb(49,106,139)"/><rect x="340" y="65" width="13" height="13" fill="rgb(65,26,101)"/><rect x="353" y="65" width="13" height="13" fill="rgb(65,32,105)"/><rect x="366" y="65" width="13" height="13" fill="rgb(45,115,140)"/><rect x="379" y="65" width="13" height="13" fill="rgb(45,156,132)"/><rect x="236" y="78" width="13" height="13" fill="rgb(60,69,130)"/><rect x="249" y="78" width="13" height="13" fill="rgb(64,39,110)"/><rect x="262" y="78" width="13" height="13" fill="rgb(64,33,106)"/><rect x="275" y="78" width="13" height="13" fill="rgb(62,59,123)"/><rect x="288" y="78" width="13" height="13" fill="rgb(57,88,139)"/><rect x="301" y="78" width="13" height="13" fill="rgb(52,99,139)"/><rect x="314" y="78" width="13" height="13" fill="rgb(55,91,139)"/><rect x="327" y="78" width="13" height="13" fill="rgb(62,57,122)"/><rect x="340" y="78" width="13" height="13" fill="rgb(65,24,100)"/><rect x="353" y="78" width="13" height="13" fill="rgb(65,32,105)"/><rect x="366" y="78" width="13" height="13" fill="rgb(61,68,129)"/><rect x="379" y="78" width="13" height="13" fill="rgb(57,87,139)"/><rect x="236" y="91" width="13" height="13" fill="rgb(66,20,97)"/><rect x="249" y="91" width="13" height="13" fill="rgb(65,27,102)"/><rect x="262" y="91" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="288" y="91" width="13" height="13" fill="rgb(67,9,89)"/><rect x="301" y="91" width="13" height="13" fill="rgb(67,7,88)"/><rect x="314" y="91" width="13" height="13" fill="rgb(67,7,88)"/><rect x="327" y="91" width="13" height="13" fill="rgb(67,10,90)"/><rect x="340" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="353" y="91" width="13" height="13" fill="rgb(66,20,97)"/><rect x="366" y="91" width="13" height="13" fill="rgb(66,17,95)"/><rect x="379" y="91" width="13" height="13" fill="rgb(66,16,94)"/><rect x="236" y="104" width="13" height="13" fill="rgb(65,28,102)"/><rect x="249" y="104" width="13" height="13" fill="rgb(67,12,92)"/><rect x="262" y="104" width="13" height="13" fill="rgb(66,15,94)"/><rect x="275" y="104" width="13" height="13" fill="rgb(65,27,102)"/><rect x="288" y="104" width="13" height="13" fill="rgb(65,32,105)"/><rect x="301" y="104" width="13" height="13" fill="rgb(65,30,103)"/><rect x="314" y="104" width="13" height="13" fill="rgb(65,27,102)"/><rect x="327" y="104" width="13" height="13" fill="rgb(66,20,97)"/><rect x="340" y="104" width="13" height="13" fill="rgb(67,9,89)"/><rect x="353" y="104" width="13" height="13" fill="rgb(67,7,88)"/><rect x="366" y="104" width="13" height="13" fill="rgb(65,24,100)"/><rect x="379" y="104" width="13" height="13" fill="rgb(64,39,109)"/><rect x="236" y="117" width="13" height="13" fill="rgb(56,89,139)"/><rect x="249" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="262" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="275" y="117" width="13" height="13" fill="rgb(59,80,138)"/><rect x="288" y="117" width="13" height="13" fill="rgb(65,174,118)"/><rect x="301" y="117" width="13" height="13" fill="rgb(80,188,108)"/><rect x="314" y="117" width="13" height="13" fill="rgb(65,175,118)"/><rect x="327" y="117" width="13" height="13" fill="rgb(59,80,137)"/><rect x="340" y="117" width="13" height="13" fill="rgb(67,9,90)"/><rect x="353" y="117" width="13" height="13" fill="rgb(67,8,89)"/><rect x="366" y="117" width="13" height="13" fill="rgb(57,87,139)"/><rect x="379" y="117" width="13" height="13" fill="rgb(40,129,140)"/><rect x="236" y="130" width="13" height="13" fill="rgb(42,123,140)"/><rect x="249" y="130" width="13" height="13" fill="rgb(66,20,97)"/><rect x="262" y="130" width="13" height="13" fill="rgb(66,16,94)"/><rect x="275" y="130" width="13" height="13" fill="rgb(47,111,139)"/><rect x="288" y="130" width="13" height="13" fill="rgb(195,220,59)"/><rect x="301" y="130" width="13" height="13" fill="rgb(253,231,37)"/><rect x="314" y="130" width="13" height="13" fill="rgb(201,221,57)"/><rect x="327" y="130" width="13" height="13" fill="rgb(45,115,140)"/><rect x="340" y="130" width="13" height="13" fill="rgb(66,18,96)"/><rect x="353" y="130" width="13" height="13" fill="rgb(66,20,97)"/><rect x="366" y="130" width="13" height="13" fill="rgb(42,123,140)"/><rect x="379" y="130" width="13" height="13" fill="rgb(65,175,118)"/><rect x="236" y="143" width="13" height="13" fill="rgb(45,116,140)"/><rect x="249" y="143" width="13" height="13" fill="rgb(64,34,106)"/><rect x="262" y="143" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="143" width="13" height="13" fill="rgb(50,103,139)"/><rect x="288" y="143" width="13" height="13" fill="rgb(156,213,74)"/><rect x="301" y="143" width="13" height="13" fill="rgb(213,223,52)"/><rect x="314" y="143" width="13" height="13" fill="rgb(173,216,68)"/><rect x="327" y="143" width="13" height="13" fill="rgb(47,111,139)"/><rect x="340" y="143" width="13" height="13" fill="rgb(65,27,101)"/><rect x="353" y="143" width="13" height="13" fill="rgb(65,28,102)"/><rect x="366" y="143" width="13" height="13" fill="rgb(46,112,139)"/><rect x="379" y="143" width="13" height="13" fill="rgb(46,157,131)"/><rect x="236" y="156" width="13" height="13" fill="rgb(60,71,131)"/><rect x="249" y="156" width="13" height="13" fill="rgb(64,38,109)"/><rect x="262" y="156" width="13" height="13" fill="rgb(65,31,104)"/><rect x="275" y="156" width="13" height="13" fill="rgb(62,56,121)"/><rect x="288" y="156" width="13" height="13" fill="rgb(58,85,139)"/><rect x="301" y="156" width="13" height="13" fill="rgb(53,97,139)"/><rect x="314" y="156" width="13" height="13" fill="rgb(54,94,139)"/><rect x="327" y="156" width="13" height="13" fill="rgb(61,65,127)"/><rect x="340" y="156" width="13" height="13" fill="rgb(65,26,101)"/><rect x="353" y="156" width="13" height="13" fill="rgb(65,26,101)"/><rect x="366" y="156" width="13" height="13" fill="rgb(61,63,126)"/><rect x="379" y="156" width="13" height="13" fill="rgb(57,86,139)"/><rect x="236" y="169" width="13" height="13" fill="rgb(66,17,95)"/><rect x="249" y="169" width="13" height="13" fill="rgb(65,25,100)"/><rect x="262" y="169" width="13" height="13" fill="rgb(65,26,101)"/><rect x="275" y="169" width="13" height="13" fill="rgb(66,18,96)"/><rect x="288" y="169" width="13" height="13" fill="rgb(67,11,91)"/><rect x="301" y="169" width="13" height="13" fill="rgb(67,9,89)"/><rect x="314" y="169" width="13" height="13" fill="rgb(67,10,90)"/><rect x="327" y="169" width="13" height="13" fill="rgb(67,13,92)"/><rect x="340" y="169" width="13" height="13" fill="rgb(66,15,94)"/><rect x="353" y="169" width="13" height="13" fill="rgb(66,15,94)"/><rect x="366" y="169" width="13" height="13" fill="rgb(67,13,92)"/><rect x="379" y="169" width="13" height="13" fill="rgb(67,12,92)"/><circle cx="307.5" cy="58.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="307.5" cy="136.5" r="4" fill="none" stroke="#fff" stroke-width="1.6"/><text x="314.0" y="18" text-anchor="middle" font-size="12" fill="#26324a">a &#8800; b</text><text x="314.0" y="198" text-anchor="middle" font-size="11" fill="#5b5b66">destructive &#8594; dark &#8594; XOR 1</text></svg></div>
-<figcaption><b>Figure 10.</b> The reservoir's "photograph": time-summed interference intensity \(\sum_n|z|^2\) on the \(12\times12\) spiking sheet (viridis; white rings mark the two input sites), for equal bits (left) versus unequal bits (right). Same-phase inputs interfere constructively (a bright band between the sources), opposite-phase inputs destructively &#8212; so the intensity field, though produced by a fixed medium, separates XOR. A linear readout on these pixels reaches 100%.</figcaption></figure>
+<figcaption><b>Figure 11.</b> The reservoir's "photograph": time-summed interference intensity \(\sum_n|z|^2\) on the \(12\times12\) spiking sheet (viridis; white rings mark the two input sites), for equal bits (left) versus unequal bits (right). Same-phase inputs interfere constructively (a bright band between the sources), opposite-phase inputs destructively &#8212; so the intensity field, though produced by a fixed medium, separates XOR. A linear readout on these pixels reaches 100%.</figcaption></figure>
 
 <table>
 <tr><th>Linear (ridge) readout trained on&#8230;</th><th class="n">XOR accuracy</th></tr>
@@ -778,7 +971,7 @@ trained; what is forfeited is the analytic handle, not the dynamics.</li>
 </table>
 <p class="small">Fixed spiking wave sheet, \(12\times12\), \(L=8\); <code>demos/wave_xor_reservoir.jl</code>.</p>
 
-<p>The controls isolate what is doing the work. XOR is <em>not</em> linearly separable in the input, so a linear readout on the raw bits saturates near 0.74 (three of four cases). Before the waves meet (\(L=1\)) the injected field is unit-magnitude everywhere and the two inputs never overlap, so there is no interference and nothing to read (0.49, chance). The separable feature appears only after <em>propagation</em>, and it lives specifically in the <em>intensity</em>: a linear readout on \(|z|^2\) reaches 100%, while a linear readout on the raw \((\mathrm{Re},\mathrm{Im})\) field manages only 0.54. That gap is the square-law readout limitation of §8 made concrete &#8212; encoding a bit as phase \(0\) or \(\pi\), equal bits interfere constructively and unequal bits destructively, so \(|z|^2\) carries the parity (Fig. 10) while the linear field does not.</p>
+<p>The controls isolate what is doing the work. XOR is <em>not</em> linearly separable in the input, so a linear readout on the raw bits saturates near 0.74 (three of four cases). Before the waves meet (\(L=1\)) the injected field is unit-magnitude everywhere and the two inputs never overlap, so there is no interference and nothing to read (0.49, chance). The separable feature appears only after <em>propagation</em>, and it lives specifically in the <em>intensity</em>: a linear readout on \(|z|^2\) reaches 100%, while a linear readout on the raw \((\mathrm{Re},\mathrm{Im})\) field manages only 0.54. That gap is the square-law readout limitation of §8 made concrete &#8212; encoding a bit as phase \(0\) or \(\pi\), equal bits interfere constructively and unequal bits destructively, so \(|z|^2\) carries the parity (Fig. 11) while the linear field does not.</p>
 
 <p>This is genuine computation <em>in</em> the medium, in the reservoir sense: the sheet performs a fixed nonlinear expansion (wave interference) and the only trained parameters are the linear readout&#8217;s. It is also, deliberately, <em>not</em> selective &#8212; the sheet does the same homogeneous mixing for every input, and it is the readout that extracts the task. That is exactly the substrate's strength and its boundary, which the conclusion draws out next.</p>
 
@@ -851,7 +1044,7 @@ in <code>src/wave.jl</code> (the two extra numbers \(\beta_h,\beta_w\)); with
   <text x="562" y="132" font-size="11" fill="#c0392b">drift</text>
   <text x="495" y="243" text-anchor="middle" font-size="11" fill="#5b5b66">travels one way — stages act in sequence</text>
 </svg></div>
-<figcaption><b>Figure 11. Why isotropy blocks staged processing.</b> On the isotropic sheet (left)
+<figcaption><b>Figure 12. Why isotropy blocks staged processing.</b> On the isotropic sheet (left)
 a disturbance spreads outward in all directions at once — a stone in a pond — so there is no
 downstream and no way to line up a sequence of processors. Breaking the left–right symmetry of the
 coupling adds a directed current (right): the disturbance now <em>travels</em> one way, so experts
@@ -860,7 +1053,7 @@ placed along its path can act on it in turn.</figcaption>
 
 <h3>10.2 The catch: a travelling packet blurs</h3>
 <p>A current makes the packet move, but not necessarily hold together. As it travels it also
-<em>disperses</em> — blurs — and there are two distinct causes, both worth naming (Figure 12).
+<em>disperses</em> — blurs — and there are two distinct causes, both worth naming (Figure 13).
 The first is <strong>gain narrowing</strong>. The Mexican-hat coupling is a <em>band-pass
 filter</em> (§4): it amplifies one wavelength — the peak \(q_*\) of the growth curve
 \(\Gamma(q)\) — and damps the rest. A compact blob is built from many wavelengths, so the sheet
@@ -890,7 +1083,7 @@ the coupling (<code>dispersion_diagnostics</code> / <code>zero_gvd_speed</code> 
   <text x="505" y="112" font-size="9.5" fill="#5b5b66">slow</text><text x="612" y="112" font-size="9.5" fill="#5b5b66" text-anchor="end">fast</text>
   <text x="495" y="200" text-anchor="middle" font-size="11" fill="#5b5b66">wavelengths travel at different speeds → it stretches</text>
 </svg></div>
-<figcaption><b>Figure 12. Two ways a travelling packet blurs.</b> Even with a current, a compact
+<figcaption><b>Figure 13. Two ways a travelling packet blurs.</b> Even with a current, a compact
 packet does not stay compact. <em>Gain narrowing</em> (left): the band-pass coupling amplifies one
 wavelength and damps the others, reshaping any blob into that ripple and spreading it out.
 <em>Group-velocity dispersion</em> (right): different wavelengths drift at slightly different
@@ -964,7 +1157,7 @@ the sheet. This is <code>coupling = :shift</code> (a trainable shift vector \(s_
   <ellipse cx="490" cy="135" rx="52" ry="46" fill="#3a5ba0" opacity="0.14"/><ellipse cx="490" cy="135" rx="30" ry="26" fill="#3a5ba0" opacity="0.2"/><circle cx="490" cy="135" r="9" fill="#3a5ba0" opacity="0.4"/>
   <text x="490" y="245" text-anchor="middle" font-size="10.5" fill="#5b5b66">smears + stalls (~2 stages)</text>
 </svg></div>
-<figcaption><b>Figure 13. The shift conveyor runs a deep pipeline.</b> A pure shift translates the
+<figcaption><b>Figure 14. The shift conveyor runs a deep pipeline.</b> A pure shift translates the
 whole field one step at a time — a conveyor belt — so a payload packet passes each expert band in
 turn (E₁→E₄) keeping its shape, and each active expert stamps its transform \(V_e\) as the packet
 goes by; the readout recovers the composition by unbinding. A diffusive conveyor (right) instead
