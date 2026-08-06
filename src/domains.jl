@@ -1366,12 +1366,27 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
         u = u .+ bias
     end
 
-    #determine the ending time of each cycle
+    T = spk_args.t_period
+    #a channel carries a real phase only if its potential is above threshold
     spiking = abs.(u) .> spk_args.threshold
-    
-    #convert the phase represented by that potential to a spike time
-    tms = potential_to_time(u, times, spk_args = spk_args)
-    
+
+    # Decode each cycle-end potential to a phase in the STATIC phase frame
+    # (matching potential_to_phase / unrotate_solution / reconstruct_from_current),
+    # then place its spike with the canonical phase_to_time convention that
+    # train_to_phase / reconstruct_from_current decode with. The previous
+    # potential_to_time path referenced a fixed R&F spiking-angle (π/2) — a
+    # constant quarter-cycle (0.5 in the [-1,1] phase convention) offset from this
+    # frame; the ±1 phase wrap turned that constant offset into apparent
+    # decorrelation, so spiking-decoded phases matched the static/Dirac SSM path
+    # at ~0 correlation. For the input layer (offset=0, times[l]=l·T) this now
+    # produces output identical to the verified `ssm_phases_to_train`.
+    # See julia_parity/benchmark_spiking_champion.jl in phasor_torch.
+    phases = potential_to_phase(u, times, spk_args = spk_args, offset = offset)  # (…, L) static frame
+    within = phase_to_time(Float32.(phases), T)                                  # (…, L) in [0, T)
+    # start of the period each cycle sample closes: times[l] - T
+    period_starts = reshape(Float32.(times) .- T, ntuple(_ -> 1, ndims(u) - 1)..., :)
+    tms = within .+ period_starts
+
     if on_gpu(tms)
         gpu = true
         spiking = spiking |> cdev
@@ -1385,7 +1400,10 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
     inds = findall(spiking)
     tms = tms[inds]
     inds = cut_index.(inds)
-    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset + spiking_offset(spk_args))
+    # Canonical phase_to_time placement already carries the full spike phase, so
+    # the train offset is just the caller's frame offset (no extra spiking_offset;
+    # the old +T/4 compensated potential_to_time's π/2 reference, now removed).
+    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset)
 
     if gpu
         train = SpikeTrainGPU(train)
