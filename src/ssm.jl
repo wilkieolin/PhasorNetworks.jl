@@ -40,16 +40,29 @@ Output: (n_classes × B) Float32  (averaged similarity logits)
 # Arguments
 - `hidden_dims => n_classes` — Hidden dimension (must match SSM output) and
   number of classification targets.
-- `readout_frac` — Fraction of final time steps to average over. Default 0.25.
+- `readout_frac` — Fraction of final time steps to average over (`:mean`
+  pooling only). Default 0.25.
+- `pool` — Temporal pooling mode. `:mean` (default) averages the cosine
+  similarity over the last `readout_frac` window. `:logsumexp` takes a smooth
+  max over the **whole clip** — `(1/κ)·(logsumexp_t(κ·s) − log L)` — the
+  keyword-spotting readout ("is the class present at *any* timestep"). Ports the
+  PyTorch Tier-1 readout `phasor_torch/layers/ssm_readout.py:83`.
+- `lse_kappa` — Sharpness κ for `:logsumexp` (→ max as κ→∞, → mean as κ→0).
+  Default 10.0. Ignored for `:mean`.
 """
 struct SSMReadout <: Lux.AbstractLuxLayer
     hidden_dims::Int
     n_classes::Int
     readout_frac::Float32
+    pool::Symbol
+    lse_kappa::Float32
 end
 
-function SSMReadout(dims::Pair{Int,Int}; readout_frac::Float32=0.25f0)
-    return SSMReadout(dims.first, dims.second, readout_frac)
+function SSMReadout(dims::Pair{Int,Int}; readout_frac::Float32=0.25f0,
+                    pool::Symbol=:mean, lse_kappa::Float32=10.0f0)
+    pool in (:mean, :logsumexp) ||
+        throw(ArgumentError("pool must be :mean or :logsumexp, got :$pool"))
+    return SSMReadout(dims.first, dims.second, readout_frac, pool, lse_kappa)
 end
 
 Lux.initialparameters(::AbstractRNG, ::SSMReadout) = NamedTuple()
@@ -58,47 +71,48 @@ function Lux.initialstates(rng::AbstractRNG, l::SSMReadout)
     return (codes = random_symbols(rng, (l.hidden_dims, l.n_classes)),)
 end
 
-function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
-    C, L, B = size(z)
+# Pool per-timestep code similarities into (n_classes × B) logits, branching on
+# `l.pool`. Shared by the Complex-3D and Phase-3D dispatches (both first map to a
+# (C × L × B) Phase array). cos(π·(p−c)) is 2-periodic, so working in raw Float32
+# (no phase wrap) is identical to Phase subtraction and matches the PyTorch port.
+function _readout_pool(l::SSMReadout, phases::AbstractArray{<:Phase, 3}, codes)
+    C, L, B = size(phases)
+    n_cls = size(codes, 2)
+    c = reshape(Float32.(codes), C, n_cls, 1, 1)         # C × n_cls × 1 × 1
+
+    if l.pool == :logsumexp
+        # Smooth max over the WHOLE clip (keyword-spotting readout).
+        p = reshape(Float32.(phases), C, 1, L, B)        # C × 1 × L × B
+        cos_diff = cos.(pi_f32 .* (p .- c))              # C × n_cls × L × B
+        sims_per_step = dropdims(mean(cos_diff; dims=1); dims=1)  # n_cls × L × B
+        k = l.lse_kappa
+        ks = k .* sims_per_step
+        m = maximum(ks; dims=2)                          # n_cls × 1 × B (stable)
+        lse = dropdims(m .+ log.(sum(exp.(ks .- m); dims=2)); dims=2)  # n_cls × B
+        return (lse .- log(Float32(L))) ./ k
+    end
+
+    # :mean — average over the last `readout_frac` window.
     t0 = max(1, L - max(1, round(Int, L * l.readout_frac)) + 1)
     W = L - t0 + 1
+    p = reshape(Float32.(phases[:, t0:L, :]), C, 1, W, B)  # C × 1 × W × B
+    cos_diff = cos.(pi_f32 .* (p .- c))                    # C × n_cls × W × B
+    sims_per_step = mean(cos_diff; dims=1)                 # 1 × n_cls × W × B
+    sims_avg = mean(sims_per_step; dims=3)                 # 1 × n_cls × 1 × B
+    return dropdims(sims_avg; dims=(1, 3))                 # n_cls × B
+end
 
-    # Extract phase at each timestep in the readout window
-    z_window = z[:, t0:L, :]                         # C × W × B
-    z_norm = normalize_to_unit_circle(z_window)
-    phases = complex_to_angle(z_norm)                 # C × W × B  Phase
-
-    # Broadcast similarity: cos(π·(phase - code)) averaged over features
-    codes = st.codes                                  # C × n_classes  Phase
-    n_cls = size(codes, 2)
-    p = reshape(phases, C, 1, W, B)                   # C × 1 × W × B
-    c = reshape(codes, C, n_cls, 1, 1)                # C × n_classes × 1 × 1
-    cos_diff = cos.(pi_f32 .* (p .- c))               # C × n_classes × W × B
-    sims_per_step = mean(cos_diff; dims=1)            # 1 × n_classes × W × B
-
-    # Average logits over the readout window
-    sims_avg = mean(sims_per_step; dims=3)            # 1 × n_classes × 1 × B
-
-    return dropdims(sims_avg; dims=(1, 3)), st        # n_classes × B
+function (l::SSMReadout)(z::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
+    # Extract phase at each timestep, then pool. (normalize is per-element, so
+    # normalizing the whole clip and windowing inside _readout_pool is identical
+    # to the old window-then-normalize for :mean.)
+    phases = complex_to_angle(normalize_to_unit_circle(z))  # C × L × B  Phase
+    return _readout_pool(l, phases, st.codes), st          # n_classes × B
 end
 
 function (l::SSMReadout)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
-    # Phase input: already normalized, skip normalize_to_unit_circle
-    C, L, B = size(x)
-    t0 = max(1, L - max(1, round(Int, L * l.readout_frac)) + 1)
-    W = L - t0 + 1
-
-    phases = x[:, t0:L, :]                               # C × W × B  Phase
-
-    codes = st.codes                                      # C × n_classes  Phase
-    n_cls = size(codes, 2)
-    p = reshape(phases, C, 1, W, B)
-    c = reshape(codes, C, n_cls, 1, 1)
-    cos_diff = cos.(pi_f32 .* (Float32.(p) .- Float32.(c)))
-    sims_per_step = mean(cos_diff; dims=1)
-    sims_avg = mean(sims_per_step; dims=3)
-
-    return dropdims(sims_avg; dims=(1, 3)), st
+    # Phase input: already normalized, skip normalize_to_unit_circle.
+    return _readout_pool(l, x, st.codes), st
 end
 
 # ================================================================
