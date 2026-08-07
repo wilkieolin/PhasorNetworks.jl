@@ -51,29 +51,299 @@ for Phasor Networks (Temporal Real Probe)}
 \begin{document}
 \maketitle
 
+\begin{abstract}
+\noindent
+Equilibrium propagation (EP) trains an energy-based network by
+contrasting two settled states.  This note introduces \emph{lock-in
+EP}, the variant needed when the neurons are \emph{phasors} ---
+unit-modulus complex numbers living on a circle rather than real
+activations on a line.  We assume the reader knows vanilla EP
+(Scellier--Bengio) and focus on the single thing that genuinely
+changes: the map from the nudge $\beta$ to the equilibrium state is no
+longer holomorphic, so the standard two-phase (free/nudged) contrast
+does not read off the gradient cleanly.  The remedy is to drive
+$\beta$ as a small \emph{real cosine in time}, $\beta(t)=\varepsilon
+\cos(\omega_p t)$, and recover the gradient by lock-in demodulation at
+$+\omega_p$ in a single settle.  We build the method up from the
+vanilla-EP picture, illustrate the settling dynamics, and defer the
+heavier proofs to appendices.
+\end{abstract}
+
 \begin{center}\fbox{\parbox{0.95\linewidth}{\small
-\textbf{Module:} \texttt{src/ep.jl} (\texttt{LockinEP}) \quad
-\textbf{Regime:} unit-circle, non-holomorphic (\texttt{unit\_project}
-activation, real $W$) \quad
-\textbf{Technique:} temporal real-probe lock-in
-$\beta(t)=\varepsilon\cos(\omega_p t)$, demodulated at $+\omega_p$.\\[2pt]
-This document is the canonical math reference for the lock-in
-gradient extractor implemented as \texttt{LockinEP} in
-\texttt{src/ep.jl}.  Companion documents:
-\texttt{docs/phasor\_ep\_design.md} (informal design background,
-implementation sketch, demos); \texttt{docs/phasor\_hep\_derivation.tex}
-(spatial Cauchy contour in the \emph{holomorphic} regime, implemented
-in \texttt{src/hep.jl}); \texttt{docs/hep\_development\_summary.md}
-(status log for the holomorphic implementation).  Demos that
-exercise lock-in: \texttt{demos/phasor\_ep\_demo.ipynb} and
-\texttt{demos/lockin\_demo.ipynb}.\\[2pt]
-\emph{Terminology.} In this codebase ``lock-in'' is reserved for the
-temporal real-probe technique derived here; the spatial complex-$\beta$
-method of holomorphic EP is the ``Cauchy contour.''
+\textbf{Prerequisite:} vanilla equilibrium propagation. \quad
+\textbf{Setting:} phasor networks on the unit circle
+(non-holomorphic \emph{unit-projection} nonlinearity, real weights). \quad
+\textbf{New ingredient:} a temporal real-probe lock-in,
+$\beta(t)=\varepsilon\cos(\omega_p t)$, demodulated at $+\omega_p$,
+replacing the two static free/nudged phases.\\[2pt]
+\emph{Terminology.} Throughout, ``lock-in'' refers to the temporal
+real-probe technique derived here.  The related \emph{spatial}
+complex-$\beta$ method of holomorphic EP --- sampling $\beta$ on a
+circle in the complex plane and taking a Fourier coefficient --- is
+called the ``Cauchy contour,'' and is treated in the companion
+holomorphic-EP derivation.
 }}\end{center}
 
 %======================================================================
-\section{Phasor EP in the Unit-Circle Regime}\label{sec:phasor-ep}
+\section{From Vanilla EP to Phasor EP}\label{sec:intro}
+%======================================================================
+
+Equilibrium propagation trains an energy-based network by letting it
+settle to a \emph{free} equilibrium, nudging its output slightly toward
+the target, letting it settle to a \emph{nudged} equilibrium, and
+reading the parameter gradient off the difference between the two.
+This note asks a single question: what changes when each neuron is a
+\emph{phasor} --- a unit-modulus complex number $z=e^{\im\pi\theta}$
+living on a circle --- instead of a real activation on a line?  The
+answer is reassuring in shape and sharp in detail: the algorithm keeps
+its two-phase form almost verbatim, but the mathematics of how the
+gradient is extracted must change, because the phasor nonlinearity is
+\emph{not holomorphic}.  Sections~\ref{sec:phasor-ep}%
+--\ref{sec:grad} develop that change; this section sets up the picture.
+
+\subsection{Vanilla EP in one page}\label{sec:vanilla}
+
+Recall the standard construction.  A network has state $\bm{z}$,
+parameters $\theta$, and a scalar energy $E(\bm{z},\theta)$ whose local
+minima are the network's stable states.  Given an input, the
+\emph{free} phase relaxes $\bm{z}$ to an equilibrium
+$\bm{z}^*(0)=\arg\min_{\bm z} E$.  A cost $\mathcal{C}(\bm{z},\bm{y})$
+measures output error, and the \emph{nudged} phase relaxes the
+augmented energy $E + \beta\,\mathcal{C}$ to a second equilibrium
+$\bm{z}^*(\beta)$ for a small real $\beta>0$.  The gradient theorem of
+Scellier--Bengio then states
+\begin{equation}\label{eq:vanilla-ep}
+  \frac{\dd\mathcal{L}}{\dd\theta}
+  \;=\;
+  \lim_{\beta\to0}\frac{1}{\beta}
+  \Bigl[
+    \frac{\partial E}{\partial\theta}\Big|_{\bm{z}^*(\beta)}
+    -
+    \frac{\partial E}{\partial\theta}\Big|_{\bm{z}^*(0)}
+  \Bigr],
+\end{equation}
+so a \emph{local, two-phase contrast} of a Hebbian quantity computes
+the loss gradient --- no backward pass.  Everything below inherits this
+skeleton; only the state space and the extraction of the limit
+in~\eqref{eq:vanilla-ep} are new.
+
+\subsection{What changes for phasors}\label{sec:whatchanges}
+
+Three substitutions turn vanilla EP into phasor EP
+(Figure~\ref{fig:statespace}):
+\begin{enumerate}[label=(\roman*)]
+\item \emph{State space.}  Real activations $\bm{z}\in\R^N$ become
+  phasors on the torus $\T^N=\{z\in\C^N:|z_j|=1\}$.  The ``saturation''
+  that a squashing nonlinearity provides in the real case is replaced
+  by the \emph{topological} constraint $|z_j|=1$ --- a genuine
+  nonlinearity with no saturating function and no bound to fight.
+\item \emph{Coupling energy.}  Real quadratic couplings become the real
+  part of a Hermitian form, $\Real\langle W\bm{z}_{\ell-1},\bm{z}_\ell
+  \rangle$, which is exactly the channel-wise cosine similarity between
+  the drive into a neuron and its state.
+\item \emph{Cost.}  Mean-squared error becomes one-minus-similarity to
+  a target phasor pattern, $\mathcal{C}=1-\tfrac1{d}\Real\langle
+  \bm{z}_L,\bm{y}\rangle$, whose gradient is a constant pull toward
+  $\bm{y}$ on the circle.
+\end{enumerate}
+The nonlinearity that enforces (i) is the entrywise \emph{unit
+projector} $\mathrm{unit\_project}(z)=z/|z|$.  Because $|z|=\sqrt{z\bar
+z}$ depends on $\bar z$, this map --- and hence the whole equilibrium
+--- is not holomorphic in the state.  That single fact is the source of
+everything distinctive about lock-in EP, and we return to it in
+Section~\ref{sec:wirtinger}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,>=Latex]
+% ---------------- LEFT: vanilla EP on the line ----------------
+\begin{scope}
+  \node[anchor=south] at (2.4,2.7) {\textbf{Vanilla EP:} state on $\R$};
+  \draw[->,axisgray] (-0.3,0)--(4.9,0) node[right]{$z$};
+  \draw[->,axisgray] (0,-0.3)--(0,2.4) node[above]{$E$};
+  % free energy bowl
+  \draw[basinC,very thick,domain=0.35:4.4,samples=80,smooth]
+     plot (\x,{0.45*(\x-2.1)^2+0.25});
+  % free minimum
+  \fill[black] (2.1,0.25) circle (2pt) node[below=2pt]{$z^*(0)$};
+  % nudged bowl (shifted right toward target)
+  \draw[antiholo,thick,densely dashed,domain=0.7:4.7,samples=80,smooth]
+     plot (\x,{0.45*(\x-2.55)^2+0.25});
+  \fill[antiholo] (2.55,0.25) circle (2pt) node[below=2pt]{$z^*(\beta)$};
+  \draw[->,antiholo,thick] (2.25,0.9)--(2.75,0.9)
+     node[midway,above]{\footnotesize $+\beta\,\partial\mathcal{C}$};
+  \node[axisgray,anchor=west,font=\footnotesize] at (3.1,1.9)
+     {nudge shifts\\ the minimum};
+\end{scope}
+\draw[axisgray,densely dotted] (5.6,-0.7)--(5.6,2.9);
+% ---------------- RIGHT: phasor EP on the circle ----------------
+\begin{scope}[xshift=7.2cm,yshift=1.0cm]
+  \node[anchor=south] at (0,2.15) {\textbf{Phasor EP:} state on $\T$};
+  \draw[axisgray,thick] (0,0) circle (1.5);
+  \draw[->,axisgray] (-1.9,0)--(1.9,0) node[right]{$\Real z$};
+  \draw[->,axisgray] (0,-1.9)--(0,1.9) node[above]{$\Imag z$};
+  % free state
+  \draw[->,basinC,very thick] (0,0)--(50:1.5);
+  \fill[basinC] (50:1.5) circle (2pt) node[anchor=south west]{$z^*(0)$};
+  % target
+  \draw[->,holo,thick] (0,0)--(95:1.5);
+  \fill[holo] (95:1.5) circle (2pt) node[anchor=south]{$\bm{y}$};
+  % arc = cost
+  \draw[antiholo,very thick] (50:1.5) arc (50:95:1.5);
+  \node[antiholo,font=\footnotesize,anchor=west] at (72:1.95)
+     {$\mathcal{C}=1-\cos\!\sphericalangle$};
+\end{scope}
+\end{tikzpicture}
+\caption{The one conceptual substitution behind phasor EP.
+\emph{Left:} vanilla EP lives on the real line; the free minimum
+$z^*(0)$ of the energy bowl shifts to $z^*(\beta)$ when the output is
+nudged toward the target, and~\eqref{eq:vanilla-ep} reads the gradient
+off that shift.  \emph{Right:} a phasor neuron lives on the unit
+circle; the state $z^*(0)$ is an \emph{angle}, the target $\bm{y}$ is
+another angle, and the cost is the arc (cosine) distance between them.
+The nudge rotates $z^*$ toward $\bm{y}$ along the circle instead of
+sliding it along a line.}
+\label{fig:statespace}
+\end{figure}
+
+\subsection{Settling dynamics}\label{sec:settling-intro}
+
+In the free phase a phasor layer relaxes by a \emph{projected} flow:
+starting from $\bm{z}=\bm{0}$, each step forms the complex drive from
+the neighbouring layers, projects it back onto the unit circle, and
+takes a small convex step toward it.  The state therefore travels
+outward from the origin through the interior of the disk and curves
+into a phase-consensus equilibrium on the circle
+(Figure~\ref{fig:freesettle}); the interior iterates are transient and
+only the equilibrium sits exactly on $\T$.  Viewed as a time series,
+each channel's \emph{angle} converges to a plateau during the free
+settle, and switching on the nudge shifts that plateau by a small
+amount toward the target (Figure~\ref{fig:settle-ts}).  It is precisely
+that small, $O(\beta)$ shift of the equilibrium that
+both~\eqref{eq:vanilla-ep} and its lock-in replacement must measure
+(Figure~\ref{fig:nudge-arc}).
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,>=Latex]
+  \def\R{1.8}
+  \draw[axisgray,thick] (0,0) circle (\R);
+  \draw[->,axisgray] (-2.2,0)--(2.3,0) node[right]{$\Real z$};
+  \draw[->,axisgray] (0,-2.2)--(0,2.3) node[above]{$\Imag z$};
+  \fill[axisgray] (0,0) circle (1.5pt) node[anchor=north east]{$z=0$};
+  % trajectory: radius grows 0 -> R while angle sweeps 25 -> 65 deg
+  \draw[probeC,very thick,domain=0:1,samples=90,smooth,variable=\t]
+     plot ({\R*(1-exp(-3.0*\t))*cos(25+40*\t)},
+           {\R*(1-exp(-3.0*\t))*sin(25+40*\t)});
+  % transient interior iterates
+  \foreach \t in {0.12,0.28,0.5,0.78}{
+    \fill[probeC!55] ({\R*(1-exp(-3.0*\t))*cos(25+40*\t)},
+                      {\R*(1-exp(-3.0*\t))*sin(25+40*\t)}) circle (1.3pt);
+  }
+  \fill[basinC] (65:\R) circle (2.3pt);
+  \node[basinC!60!black,anchor=south west] at (65:\R) {$z^*(0)$};
+  \node[axisgray,anchor=west,font=\footnotesize,align=left] at (0.2,-1.25)
+     {projected drive\\ pulls outward};
+\end{tikzpicture}
+\caption{Free-phase settling of a single hidden phasor.  The state
+starts at the origin; each step projects the complex drive onto the
+unit circle and steps toward it, so the trajectory (green) travels
+\emph{outward} through the interior of the disk --- the transient
+iterates (faint dots) lie strictly inside $|z|<1$ --- and curves onto
+the free equilibrium $z^*(0)$, where the drift has become purely
+radial.  Only the equilibrium sits exactly on the torus $\T$.}
+\label{fig:freesettle}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,>=Latex]
+  \def\R{1.8}
+  \draw[axisgray,thick] (0,0) circle (\R);
+  \draw[->,axisgray] (-2.2,0)--(2.3,0) node[right]{$\Real z$};
+  \draw[->,axisgray] (0,-2.2)--(0,2.3) node[above]{$\Imag z$};
+  \draw[->,basinC,very thick] (0,0)--(55:\R);
+  \fill[basinC] (55:\R) circle (2.2pt);
+  \node[basinC!60!black,anchor=north west] at (55:\R) {$z^*(0)$};
+  \draw[->,antiholo,very thick] (0,0)--(66:\R);
+  \fill[antiholo] (66:\R) circle (2.2pt);
+  \node[antiholo,anchor=south west] at (66:\R) {$z^*(\beta)$};
+  \draw[->,holo,thick,densely dashed] (0,0)--(100:\R);
+  \fill[holo] (100:\R) circle (2pt);
+  \node[holo,anchor=south] at (100:\R) {$\bm{y}$};
+  \draw[very thick] (55:\R) arc (55:66:\R);
+  \draw[->,thick] (57:2.1) arc (57:64:2.1);
+  \node[anchor=west,font=\footnotesize,align=left] at (2.05,0.95)
+     {measured shift\\ $\propto \dd z^*/\dd\beta_R=O(\beta)$};
+  \node[holo!70!black,font=\footnotesize,anchor=west] at (2.05,-0.25)
+     {nudge pulls $z^*$ toward $\bm{y}$};
+\end{tikzpicture}
+\caption{What the two-phase contrast measures.  The nudge rotates the
+free equilibrium $z^*(0)$ a small arc toward the target $\bm{y}$,
+reaching $z^*(\beta)$.  Vanilla EP reads the gradient off this
+$O(\beta)$ displacement via~\eqref{eq:vanilla-ep}; lock-in EP measures
+the same displacement, but as the amplitude of a modulation rather than
+a static difference (Section~\ref{sec:probe}).}
+\label{fig:nudge-arc}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small]
+\begin{axis}[
+   width=12cm,height=5.4cm,
+   xlabel={settling step $n$},
+   ylabel={channel phase (rad)},
+   xmin=0,xmax=300,ymin=0,ymax=2.2,
+   ytick=\empty,
+   axis lines=left,
+   clip=false,
+]
+  \fill[holo!12] (axis cs:200,0) rectangle (axis cs:300,2.2);
+  \draw[axisgray,densely dashed] (axis cs:200,0)--(axis cs:200,2.2);
+  \node[anchor=south,axisgray,font=\footnotesize] at (axis cs:200,2.02){nudge on};
+  \node[anchor=south,basinC!60!black,font=\footnotesize] at (axis cs:95,2.02){free settle};
+  \addplot[basinC,very thick,domain=0:200,samples=90]{1.5*(1-exp(-x/38))};
+  \addplot[antiholo,very thick,domain=200:300,samples=60]
+     {1.5*(1-exp(-x/38))+0.16*(1-exp(-(x-200)/22))};
+  \addplot[basinC!55,thick,domain=0:200,samples=90]{0.85*(1-exp(-x/30))};
+  \addplot[antiholo!55,thick,domain=200:300,samples=60]
+     {0.85*(1-exp(-x/30))+0.10*(1-exp(-(x-200)/22))};
+\end{axis}
+\end{tikzpicture}
+\caption{Settling as a time series.  During the free phase
+($\beta=0$) each channel's phase relaxes to a plateau $z^*(0)$; when the
+nudge switches on (shaded) the plateau shifts by a small $O(\beta)$
+amount to $z^*(\beta)$.  Lock-in EP replaces the abrupt switch with a
+gentle cosine modulation of $\beta$ and reads the gradient from the
+amplitude of the resulting oscillation of these plateaus.}
+\label{fig:settle-ts}
+\end{figure}
+
+\subsection{The one new complication, and the fix}\label{sec:complication}
+
+Here is the wrinkle that the rest of the note resolves.  Because the
+unit projector is not holomorphic, perturbing the equilibrium by a
+nudge produces \emph{two} first-order responses, not one: a
+``holomorphic'' part $\partial\bm{z}^*/\partial\beta$ and an
+``anti-holomorphic'' part $\partial\bm{z}^*/\partial\bar\beta$
+(Section~\ref{sec:wirtinger}).  The gradient on real weights needs
+their \emph{sum}, the real-axis directional derivative
+$\dd\bm{z}^*/\dd\beta_R$.  Driving the nudge as a real cosine in time,
+$\beta(t)=\varepsilon\cos(\omega_p t)$, excites both responses
+coherently at the probe frequency, and a single lock-in demodulation at
+$+\omega_p$ returns exactly that sum
+(Section~\ref{sec:probe}--\ref{sec:grad}).  The remainder of the note
+makes this precise: Section~\ref{sec:phasor-ep} sets up the phasor
+energy and its equilibria; Section~\ref{sec:wirtinger} pins down the
+non-holomorphicity; Sections~\ref{sec:probe}--\ref{sec:demod} build the
+probe and its demodulation; Section~\ref{sec:grad} states the gradient
+formula; and Sections~\ref{sec:knobs}--\ref{sec:rel} cover tuning and
+the relationship to other EP variants.  Heavier proofs are collected in
+Appendices~\ref{app:stationarity}--\ref{app:sidebands}.
+
+%======================================================================
+\section{The Phasor Energy and Its Equilibria}\label{sec:phasor-ep}
 %======================================================================
 
 \subsection{State space and energy}
@@ -119,20 +389,19 @@ similarity that the codebook similarity cost
 $\mathcal{C}(\bm{z}_L,\bm{y}) = 1 - \tfrac{1}{d_L}\Real\langle\bm{z}_L,\bm{y}\rangle$
 also uses.  This differs from the bilinear form
 $\langle u,v\rangle_\mathrm{bi}=\sum_j u_j v_j$ used in the
-holomorphic-regime derivation (\texttt{phasor\_hep\_derivation.tex});
+holomorphic-regime (companion) derivation;
 the Hermitian convention is what allows the unit-circle constraint to
 sit comfortably inside the energy at the cost of breaking
 holomorphicity in $\bm{z}$.
 \end{remark}
 
-\subsection{Settling dynamics}
+\subsection{The settling drift and its equilibria}
 
 The settling is a \emph{projected quasi-gradient flow} on $\Phi$: in
 the default configuration the drift is exactly (twice) the Wirtinger
-gradient of $\Phi$, and under \texttt{K\_mode = :stored} it
-additionally contains a non-variational rotational component
-(Remark~\ref{rem:drift-decomp}).  The drift used by
-\texttt{phasor\_settle} in \texttt{src/ep.jl} is
+gradient of $\Phi$, and the variant that folds in the oscillator
+self-force additionally contains a non-variational rotational component
+(Appendix~\ref{app:stationarity}).  The drift is
 \begin{equation}\label{eq:settle-grad}
   \bm{g}_\ell
   \;=\;
@@ -145,18 +414,18 @@ additionally contains a non-variational rotational component
   2\beta\,\delta_{\ell L}\,
   \frac{\partial\mathcal{C}}{\partial\bar{\bm{z}}_L},
 \end{equation}
-where the self-force $\tfrac12 K_\ell\bm{z}_\ell$ is present only
-under \texttt{K\_mode = :stored}; the default and benchmarked
-configuration is \texttt{K\_mode = :zero}, in which the $K$ term is
-absent entirely.  The cost term is implemented as
-\texttt{nudge\_force} $= (\beta/d_L)\,\bm{y}
+where the self-force $\tfrac12 K_\ell\bm{z}_\ell$ is present only in the
+variant that folds the oscillator dynamics into the drift; the default
+and benchmarked configuration drops it, so the $K$ term is absent
+entirely.  The cost term uses the \emph{real-parameter convention}
+$\mathrm{nudge} = (\beta/d_L)\,\bm{y}
 = -2\beta\,\partial\mathcal{C}/\partial\bar{\bm{z}}_L$ for the
-similarity cost — the \emph{real-parameter convention}, deliberately
-carrying no factor of $\tfrac12$ (see the ``do not fix'' comment at
-the definition of \texttt{nudge\_force}).
+similarity cost, deliberately carrying no factor of $\tfrac12$; this is
+the convention that makes the estimator match finite differences on
+real weights without a stray factor of two
+(Appendix~\ref{app:stationarity}).
 Discrete settling step (the projection is applied to the \emph{drive},
-then convex-combined with the state — this is the update
-\texttt{\_phasor\_step} implements):
+then convex-combined with the state):
 \begin{equation}\label{eq:settle-step}
   \bm{z}_\ell^{(n+1)}
   \;=\;
@@ -180,73 +449,17 @@ $\bm{z}_\ell^* = \mathrm{unit\_project}(\bm{g}_\ell^*)$, hence
 free equilibrium $\bm{z}^*(0)$ at $\beta=0$ and the $\beta$-dependent
 family $\bm{z}^*(\beta)$ when $\beta \ne 0$.
 
-\begin{remark}[The drift is not exactly the Wirtinger gradient of
-$\Phi$]\label{rem:drift-decomp}
-The Wirtinger gradient of the energy~\eqref{eq:energy} is in fact
-\begin{equation}\label{eq:true-grad}
-  \frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell}
-  \;=\;
-  \tfrac{1}{2}\Lambda_\ell\bm{z}_\ell
-  \;+\;
-  \tfrac{1}{2}W_\ell\bm{z}_{\ell-1}
-  \;+\;
-  \tfrac{1}{2}W_{\ell+1}^{\!\top}\bm{z}_{\ell+1}
-  \;-\;
-  \beta\,\delta_{\ell L}\,
-  \frac{\partial\mathcal{C}}{\partial\bar{\bm{z}}_L},
-  \qquad \Lambda_\ell = \diag(\bm{\lambda}_\ell),
-\end{equation}
-because $\tfrac12\Real\langle\bm{z},K\bm{z}\rangle
-= \tfrac12\sum_j \lambda_j |z_j|^2$ depends only on $\Real K$ (on the
-torus it is moreover \emph{constant}, so the self-energy does no work
-in the constrained dynamics; any radial term $\bm{\mu}\odot\bm{z}$
-with real $\bm{\mu}$ is annihilated by the projection anyway), and
-$\partial_{\bar z}\,\Real\langle\bm{u},\bm{z}\rangle = \tfrac12\bm{u}$.
-The implemented drift~\eqref{eq:settle-grad} thus differs
-from~\eqref{eq:true-grad} in two ways.
-
-(i)~\emph{Rotational component (only under \texttt{K\_mode = :stored}).}
-The term $\tfrac12\,\im\,\bm{\omega}_\ell\odot\bm{z}_\ell$ is not the
-gradient of any real energy.  It is purely tangential to the torus
-($\Real(\bar z_j \cdot \im\omega_j z_j) = 0$), so at a fixed point
-the tangential part of the true gradient must cancel it — meaning
-$\bm{z}^*$ is \emph{not} a constrained critical point of $\Phi$ when
-$\bm{\omega}\ne\bm{0}$, and the envelope argument of
-Lemma~\ref{lem:stationarity} does not directly apply.  For uniform
-$\omega_{\ell,c}\equiv\omega$ the rotation is removed exactly by the
-rotating-frame substitution $\bm{z}\mapsto e^{\im\omega t}\bm{w}$: the
-Hermitian couplings $\Real\langle W\bm{z}_{\ell-1},\bm{z}_\ell\rangle$
-are invariant under a global phase, provided the target $\bm{y}$ is
-defined in the rotating frame.  For non-uniform $\bm{\omega}$ no such
-global frame exists.  In the default and benchmarked configuration
-(\texttt{K\_mode = :zero}, used by the XOR demos) this issue is moot:
-$\bm{\lambda}$ and $\bm{\omega}$ are absent from the drift entirely,
-and the \texttt{:stored} docstring itself notes that settling with
-the layers' default $\omega = 2\pi$ requires a smaller \texttt{dt} or
-an $\omega$ override.  The rotating-frame construction is the path to
-extending the derivation to \texttt{:stored}.
-
-(ii)~\emph{Term-wise factors (resolved against the implementation).}
-With \texttt{K\_mode = :zero} and the implemented cost drift
-$-2\beta\,\partial\mathcal{C}/\partial\bar{\bm{z}}_L$, the drift
-satisfies \emph{exactly}
-\begin{equation}\label{eq:drift-is-2grad}
-  \bm{g}_\ell \;=\; 2\,\frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell},
-\end{equation}
-the steepest-descent direction of a real function of complex
-variables ($\nabla = 2\,\partial/\partial\bar z$).  The overall
-factor of $2$ rescales the flow without moving its fixed points, and
-the $\beta$-scaling of the nudge matches the $\beta$ that the EP
-estimator~\eqref{eq:static-ep} divides by, so the constants of
-Theorem~\ref{thm:lockin-grad} are as stated.  Had the cost drift
-carried the na\"ive Wirtinger factor
-$-\beta\,\partial\mathcal{C}/\partial\bar{\bm{z}}_L$ instead, the
-effective nudge would be $\beta/2$ and every EP prefactor would
-double — this is the ``subtle convention point'' the
-\texttt{nudge\_force} comment guards, and it is what makes the
-estimator match finite differences on \emph{real} weights without a
-stray factor of~$2$.
-\end{remark}
+The implemented drift~\eqref{eq:settle-grad} is not quite the Wirtinger
+gradient of the energy~\eqref{eq:energy}.  In the benchmarked
+configuration it equals that gradient exactly up to an overall factor
+of two,~\eqref{eq:drift-is-2grad}, which rescales the flow without
+moving its fixed points; the variant that folds in the oscillator
+self-force instead adds a non-variational \emph{rotational} term that
+is tangential to the torus.
+Appendix~\ref{app:stationarity} carries out the full decomposition:
+the term-wise bookkeeping (including why the real-parameter nudge
+convention avoids a stray factor of two) and the rotational component
+together with its rotating-frame reduction for uniform $\bm{\omega}$.
 
 \begin{lemma}[Stationarity at the projected equilibrium]
 \label{lem:stationarity}
@@ -254,11 +467,10 @@ Suppose the drift is variational up to a radial term,
 $\bm{g}_\ell = c\,\partial\Phi/\partial\bar{\bm{z}}_\ell
 + \bm{r}_\ell$ with $c>0$ and
 $\bm{r}_\ell = \bm{\mu}'_\ell\odot\bm{z}_\ell$, $\bm{\mu}'_\ell$ real
-(in the benchmarked \texttt{K\_mode = :zero} configuration this holds
-exactly with $c=2$ and $\bm{r}_\ell=\bm{0}$
-by~\eqref{eq:drift-is-2grad}; under \texttt{:stored} it requires the
-$\bm{\omega}=\bm{0}$ or rotating-frame reduction of
-Remark~\ref{rem:drift-decomp}).  Then at a projected fixed point,
+(in the benchmarked configuration this holds exactly with $c=2$ and
+$\bm{r}_\ell=\bm{0}$ by~\eqref{eq:drift-is-2grad}; the self-force
+variant requires the $\bm{\omega}=\bm{0}$ or rotating-frame reduction
+of Appendix~\ref{app:stationarity}).  Then at a projected fixed point,
 \[
   \frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell}\bigg|_{\bm{z}^*}
   \;=\; \bm{\nu}_\ell\odot\bm{z}^*_\ell,
@@ -279,20 +491,7 @@ $\delta\bm{z} = (\dd\bm{z}^*/\dd\beta_R)\,\delta\beta_R$),
   -\,\mathcal{C}\bigl(\bm{z}^*_L,\bm{y}\bigr).
 \end{equation}
 \end{lemma}
-\begin{proof}
-By~\eqref{eq:radial-fp}, $\bm{g}^*_\ell = \bm{\mu}_\ell\odot\bm{z}^*_\ell$
-with $\bm{\mu}_\ell$ real; subtracting the radial $\bm{r}_\ell$ and
-dividing by $c$ gives the first claim with
-$\bm{\nu}_\ell = (\bm{\mu}_\ell-\bm{\mu}'_\ell)/c$.  For real $\Phi$
-the chain rule reads $\dd\Phi = 2\Real\langle
-\partial\Phi/\partial\bar{\bm{z}},\,\dd\bm{z}\rangle$, and with a
-radial gradient the pairing vanishes term by term:
-$\Real\bigl(\overline{\nu_j z^*_j}\,\dd z_j\bigr)
-= \nu_j\,\Real(\bar z^*_j\,\dd z_j) = 0$ by tangentiality.  Hence the
-total $\theta$- and $\beta_R$-derivatives of $\Phi^*$ reduce to the
-partials, and $\partial\Phi/\partial\beta_R = -\,\mathcal{C}$
-from~\eqref{eq:energy}.
-\end{proof}
+\noindent\emph{Proof.} See Appendix~\ref{app:stationarity}.
 
 \subsection{Standard (static) EP}
 
@@ -308,19 +507,18 @@ For real $\beta$ the Scellier--Bengio gradient theorem gives
 \end{equation}
 with the corresponding two-phase Hebbian estimator
 $\Delta W_\ell \propto -\bigl(\mathrm{hebb}_\ell^{\text{nudge}} - \mathrm{hebb}_\ell^{\text{free}}\bigr)/\beta$
-(implemented as \texttt{StaticEP}).  On the constrained state space,
+(the two-phase static estimator).  On the constrained state space,
 \eqref{eq:static-ep} rests on the envelope
 property~\eqref{eq:envelope}: the Scellier--Bengio argument
 differentiates $\Phi$ at a \emph{stationary} point, whereas the
 projected equilibrium is stationary only up to a radial residual —
 Lemma~\ref{lem:stationarity} shows this residual is invisible to
 tangential variations, so the theorem carries over (under the
-variational-drift reduction of Remark~\ref{rem:drift-decomp}).
+variational-drift reduction of Appendix~\ref{app:stationarity}).
 Finite $\beta$ introduces
 $O(\beta)$ bias from the nonlinearity of $\bm{z}^*(\beta)$; the
-small-$\beta$ / large-bias trade-off is what holomorphic EP
-(\texttt{phasor\_hep\_derivation.tex}) and lock-in EP (this document)
-each address differently.
+small-$\beta$ / large-bias trade-off is what holomorphic EP and lock-in
+EP (this note) each address differently.
 
 %======================================================================
 \section{Wirtinger Calculus and Non-Holomorphicity}\label{sec:wirtinger}
@@ -355,7 +553,7 @@ and the imaginary-axis directional derivative is
   \im\!\left(\frac{\partial f}{\partial\beta} - \frac{\partial f}{\partial\bar\beta}\right).
 \end{equation}
 
-\subsection{Non-holomorphicity of \texttt{unit\_project}}
+\subsection{Non-holomorphicity of unit projection}
 
 \begin{proposition}\label{prop:nonholo}
 The unit projector~\eqref{eq:unit-project} is not holomorphic in
@@ -402,53 +600,28 @@ with both Wirtinger sidebands present.
 
 \subsection{Why the spatial Cauchy contour misses the target}
 
-The spatial Cauchy contour estimator of holomorphic EP
-(\texttt{phasor\_hep\_derivation.tex}, Section~4) evaluates
+The spatial Cauchy contour estimator of holomorphic EP evaluates
 $\partial\Phi/\partial\theta$ at $\beta_n = r\,e^{2\pi\im n/N}$ and
 takes the first Fourier coefficient $(1/N)\sum_n
 \partial\Phi/\partial\theta|_{\bm{z}^*(\beta_n)}\cdot e^{-2\pi\im n/N}$.
 
-\begin{remark}[What actually obstructs the spatial contour]
-\label{rem:contam}
-Substituting~\eqref{eq:dz-wirtinger} with
-$\beta_n = r\,e^{\im\varphi_n}$, $\varphi_n = 2\pi n/N$, into the
-spatial Fourier sum, the term proportional to
-$\partial\bm{z}^*/\partial\bar\beta$ multiplies
-$\bar\beta_n\, e^{-\im\varphi_n} = r\,e^{-2\im\varphi_n}$, and
-$\tfrac1N\sum_{n=0}^{N-1} e^{-2\im\varphi_n} = 0$ for every
-$N \ge 3$: at first order the anti-holomorphic sideband is
-\emph{exactly} annihilated by the discrete Fourier sum, not merely
-approximately.  The genuine obstructions are different:
-\begin{enumerate}[label=(\roman*)]
-\item \emph{Wrong target.}  The $+1$ Fourier coefficient extracts
-$\partial\bm{z}^*/\partial\beta$ alone, whereas the gradient theorem
-on real parameters needs the real-axis directional derivative
-$\dd/\dd\beta_R = \partial_\beta + \partial_{\bar\beta}$
-\eqref{eq:real-dir}.  On a non-holomorphic recurrence the unmodified
-contour therefore converges cleanly to the \emph{wrong quantity}.
-This is repairable in principle: demodulating the same contour data
-against $e^{+\im\varphi_n}$ extracts
-$\partial\bm{z}^*/\partial\bar\beta$ (the holomorphic term then
-carries $e^{+2\im\varphi_n}$ and averages away for $N\ge3$), and the
-sum of the two demodulations recovers $\dd\bm{z}^*/\dd\beta_R$; see
-Proposition~\ref{prop:cplx-fail} for the same two-sideband repair in
-the temporal picture, including the quadratic Hebbian observable.
-\item \emph{Surviving alias.}  Among the low-order Taylor terms, the
-mixed cubic $\beta^2\bar\beta$ has angular phase $e^{+\im\varphi_n}$
-and passes the $e^{-\im\varphi_n}$ demodulation at \emph{every}
-$N$, contributing $O(r^3)$ to the coefficient and hence $O(r^2)$ to
-the gradient estimate — the same order as the curvature bias of the
-temporal probe (Theorem~\ref{thm:lockin-grad}), so neither method
-wins on bias order.  Small $N$ admits further aliases from
-$\bar\beta^{\,N-1}$ at order $r^{N-1}$ (\eg\ $\bar\beta^2$ at
-$N=3$).
-\end{enumerate}
-The advantage of the temporal real probe is therefore operational
-rather than a matter of impossibility: a single real drive and a
-single accumulator deliver $\dd/\dd\beta_R$ directly, with the
-narrowband noise rejection of lock-in detection, instead of a
-two-sideband reconstruction bolted onto the contour.
-\end{remark}
+The obstruction is subtler than a contamination.  The
+anti-holomorphic sideband is in fact annihilated \emph{exactly} at
+first order by the discrete Fourier sum for every $N\ge3$, so the
+contour does not fail by leakage.  It fails by converging cleanly to
+the \emph{wrong target} --- the holomorphic Wirtinger derivative
+$\partial\bm{z}^*/\partial\beta$ rather than the real-axis directional
+derivative $\dd/\dd\beta_R=\partial_\beta+\partial_{\bar\beta}$
+\eqref{eq:real-dir} that EP on real parameters needs --- and by
+retaining an aliased $O(r^2)$ mixed-term bias of the same order as the
+temporal probe's own curvature bias.  It \emph{can} be repaired, by
+demodulating the same samples against both $e^{\mp\im\varphi_n}$ and
+adding, at the cost of a second accumulator and a coherent combination
+(Appendix~\ref{app:sidebands}; Proposition~\ref{prop:cplx-fail} gives
+the temporal analogue).  The temporal real probe's advantage is
+therefore operational --- a single real drive and a single accumulator
+deliver $\dd/\dd\beta_R$ directly, with the narrowband noise rejection
+of lock-in detection --- rather than a matter of possibility.
 
 \begin{figure}[htbp]
 \centering
@@ -480,7 +653,7 @@ two-sideband reconstruction bolted onto the contour.
 converge to the wrong quantity.  Its first Fourier coefficient
 isolates the holomorphic Wirtinger derivative, which equals the real
 directional derivative only when the recurrence is holomorphic.  On
-the \texttt{unit\_project} recurrence it can be repaired by combining
+the unit projection recurrence it can be repaired by combining
 the $\pm1$ harmonics of the same sampled data --- the spatial analogue
 of the two-sideband combination in Figure~\ref{fig:sidebands}.}
 \label{fig:contour}
@@ -626,62 +799,20 @@ to the factor of 2 absorbed in the gradient formula
 of Section~\ref{sec:grad}.
 \end{proof}
 
-\begin{proposition}[Complex probe: single-sideband demodulation is
-wrong; two-sideband demodulation is a repair]\label{prop:cplx-fail}
-Let $\partial\bm{z}^*/\partial\bar\beta \ne 0$ and take the complex
-probe $\beta(t) = \varepsilon\,e^{\im\omega_p t}$.  Write
-$\bm{a}_\ell = \partial\bm{z}^*_\ell/\partial\beta|_0$,
-$\bm{b}_\ell = \partial\bm{z}^*_\ell/\partial\bar\beta|_0$.  Then:
-\begin{enumerate}[label=(\roman*)]
-\item the Fourier coefficient of $\bm{z}(t)$ at $+\omega_p$ recovers
-$\varepsilon\,\bm{a}_\ell$ only — the wrong target for real
-parameters;
-\item the \emph{sum} of the $+\omega_p$ and $-\omega_p$ coefficients
-recovers $\varepsilon(\bm{a}_\ell+\bm{b}_\ell)
-= \varepsilon\,\dd\bm{z}^*_\ell/\dd\beta_R$;
-\item the same repair works for the quadratic Hebbian observable
-$H_\ell = \bm{z}_\ell\bm{z}_{\ell-1}^H$, despite its sideband mixing
-through the conjugated factor: the first-order Fourier coefficients
-are
-\[
-  H_\ell^{(+\omega_p)}
-  = \varepsilon\bigl(\bm{a}_\ell\,\bm{z}_{\ell-1}^{*\,H}
-    + \bm{z}_\ell^*\,\bm{b}_{\ell-1}^{H}\bigr),
-  \qquad
-  H_\ell^{(-\omega_p)}
-  = \varepsilon\bigl(\bm{b}_\ell\,\bm{z}_{\ell-1}^{*\,H}
-    + \bm{z}_\ell^*\,\bm{a}_{\ell-1}^{H}\bigr),
-\]
-whose sum is
-$\varepsilon\bigl[(\bm{a}+\bm{b})_\ell\,\bm{z}_{\ell-1}^{*\,H}
-+ \bm{z}_\ell^*\,(\bm{a}+\bm{b})_{\ell-1}^{H}\bigr]
-= \varepsilon\,\dd H_\ell^*/\dd\beta_R$.
-\end{enumerate}
-The complex probe is thus not unusable on a non-holomorphic
-recurrence, but it requires two demodulation accumulators and their
-coherent combination.
-\end{proposition}
-\begin{proof}
-Substituting $\beta(t) = \varepsilon\,e^{\im\omega_p t}$ and
-$\bar\beta(t) = \varepsilon\,e^{-\im\omega_p t}$
-into~\eqref{eq:dz-wirtinger} gives
-$\delta\bm{z}_\ell = \varepsilon\,e^{\im\omega_p t}\bm{a}_\ell
-+ \varepsilon\,e^{-\im\omega_p t}\bm{b}_\ell + O(\varepsilon^2)$,
-which yields (i) and (ii) with~\eqref{eq:real-dir}.  For (iii),
-expand $\delta H_\ell = \delta\bm{z}_\ell\,\bm{z}_{\ell-1}^{*\,H}
-+ \bm{z}_\ell^*\,\delta\bm{z}_{\ell-1}^{H}$ and note that Hermitian
-conjugation swaps the sidebands of the second factor:
-$\delta\bm{z}_{\ell-1}^{H}
-= \varepsilon\,e^{-\im\omega_p t}\bm{a}_{\ell-1}^{H}
-+ \varepsilon\,e^{+\im\omega_p t}\bm{b}_{\ell-1}^{H}$.  Collecting
-$e^{\pm\im\omega_p t}$ terms gives the display; the final equality
-uses $\dd\bm{z}^*/\dd\beta_R = \bm{a}+\bm{b}$ and
-$\dd(\bm{z}^{*\,H})/\dd\beta_R = (\bm{a}+\bm{b})^{H}$.
-\end{proof}
+The complex probe is not unusable on a non-holomorphic recurrence, but
+single-sideband demodulation at $+\omega_p$ recovers only the
+holomorphic half $\partial\bm{z}^*/\partial\beta$ --- the wrong target
+for real parameters.  Recovering the full directional derivative
+$\dd\bm{z}^*/\dd\beta_R$ then requires \emph{two} demodulation
+accumulators, at $+\omega_p$ and $-\omega_p$, and their coherent sum;
+the same two-sideband repair extends even to the quadratic Hebbian
+observable, despite the sideband mixing introduced by its conjugated
+factor.  The precise statement and proof are collected as
+Proposition~\ref{prop:cplx-fail} in Appendix~\ref{app:sidebands}.
 
 \begin{corollary}[Why the real probe]\label{cor:why-real}
 On a non-holomorphic recurrence (the phasor-EP regime with
-\texttt{unit\_project}), the real probe excites both Wirtinger
+unit projection), the real probe excites both Wirtinger
 sidebands coherently, so its $+\omega_p$ Fourier coefficient already
 contains the full $\dd\bm{z}^*/\dd\beta_R$ directional derivative —
 exactly the quantity finite-difference EP on real parameters would
@@ -800,10 +931,8 @@ appear from incomplete cycle cancellation or higher-order Wirtinger
 mixing.  The bias is $O(\varepsilon^2)$ rather than $O(\varepsilon)$
 by the even-order rejection of~\eqref{eq:HpHebbian}: the quadratic
 response is invisible at $+\omega_p$, and the leading contamination is
-cubic.  The prefactor $2/\varepsilon$ matches the implemented
-real-parameter nudge convention
-(\eqref{eq:drift-is-2grad}; \texttt{nudge\_force} $= (\beta/d_L)\bm y$)
-and neglects the adiabatic phase
+cubic.  The prefactor $2/\varepsilon$ matches the real-parameter nudge
+convention~\eqref{eq:drift-is-2grad} and neglects the adiabatic phase
 lag; at finite $\omega_p$ the estimate is additionally attenuated by
 $\cos\phi$ with $\phi\sim\omega_p/R_\text{relax}$ (see
 Section~\ref{sec:knobs}).
@@ -829,10 +958,9 @@ and the gradient~\eqref{eq:main-grad} becomes
   \;=\;
   -\frac{2}{T_\text{lockin}\,\varepsilon}\,\Real\bigl(\tilde H_\ell^{+}\bigr).
 \end{equation}
-This is the formula implemented in \texttt{ep.jl} (the
-\texttt{ep\_gradient(::LockinEP, \ldots)} method); see also the
-``Implementation sketch'' section of
-\texttt{docs/phasor\_ep\_design.md} for a side-by-side with the code.
+This is the discrete estimator used in practice; it is a drop-in
+replacement for the two static free/nudged Hebbian differences of
+vanilla EP, accumulated over the lock-in window instead.
 
 \subsection{Warm-up}
 
@@ -871,8 +999,8 @@ subtraction.  The probe $\beta(t)=\varepsilon\cos\omega_p t$ is then
 switched on; the \emph{warm-up} discards $T_\text{warmup}$ so the
 equilibrium can lock onto the modulation, and only the
 \emph{accumulate} window (an integer number $N_c$ of probe periods) is
-demodulated at $+\omega_p$ into $\tilde H^{+}$.  Both driven phases run
-their own step counter in \texttt{src/ep.jl}, so the probe clock
+demodulated at $+\omega_p$ into $\tilde H^{+}$.  If the warm-up and
+accumulation loops each run their own step counter, the probe clock
 resets at the warm-up/accumulate boundary
 (Section~\ref{sec:grad}).}
 \label{fig:timeline}
@@ -928,10 +1056,9 @@ independently:
   \;=\;
   -\frac{2}{T_\text{lockin}\,\varepsilon}\,\Imag\bigl(\tilde H_{\ell,b}^{+}\bigr).
 \end{equation}
-The implementation packages $\bm{z}_\ell^{(n)}$ directly as a complex
-number so a single demodulation accumulator handles both real and
-imaginary bias parts (see \texttt{\_ep\_lockin\_gradient} in
-\texttt{src/ep.jl}).
+Packaging $\bm{z}_\ell^{(n)}$ directly as a complex number lets a
+single demodulation accumulator handle both the real and imaginary bias
+parts at once.
 
 %======================================================================
 \section{Accuracy Knobs and Failure Modes}\label{sec:knobs}
@@ -1071,9 +1198,9 @@ basin for the demonstrated networks.
 
 \begin{corollary}[Lock-in $\leftrightarrow$ spatial Cauchy contour]
 \label{cor:holo-limit}
-If the recurrence is holomorphic in $\beta$ (no \texttt{unit\_project},
-holomorphic $\sigma$, bilinear inner product as in
-\texttt{phasor\_hep\_derivation.tex}), the lock-in
+If the recurrence is holomorphic in $\beta$ (no unit projection,
+holomorphic $\sigma$, bilinear inner product as in the companion
+holomorphic-EP derivation), the lock-in
 formula~\eqref{eq:main-grad} agrees with the spatial Cauchy
 contour formula of holomorphic EP up to discretization.  In this
 regime both probes (real and complex) extract the same gradient
@@ -1123,72 +1250,45 @@ off every demodulation bin, as in standard multi-tone lock-in
 practice.
 
 %======================================================================
-\section{Connection to PhasorNetworks Dispatch}\label{sec:dispatch}
+\section{Practical Defaults and Training}\label{sec:practical}
 %======================================================================
 
-The lock-in extractor maps onto the existing dispatch as follows:
+A useful starting operating point sits deep in the adiabatic basin of
+Section~\ref{sec:knobs}: a small amplitude $\varepsilon\approx0.05$, a
+probe frequency $\omega_p$ well below the relaxation rate
+$R_\text{relax}$ but high enough to fit several whole cycles in the
+settling budget, a handful of demodulation cycles ($N_c\sim8$), one or
+two warm-up cycles, and a free settle long enough to reach $\bm{z}^*(0)$.
+Around such a point the lock-in gradient typically matches a
+finite-difference oracle to a few percent across roughly a decade in
+each knob, with the failure modes as tabulated in
+Section~\ref{sec:knobs}.
 
-\begin{center}\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Symbol in this document} & \textbf{Code in \texttt{src/ep.jl}} \\
-\midrule
-$\bm{z}^{(n)}$ (settling state) & \texttt{phasor\_settle(\ldots)} return value \\
-$H_\ell^{\text{DC}}$ & \texttt{chain\_hebbians(chain, ps, st, x, s\_free)} \\
-$\beta[n] = \varepsilon\cos(\omega_p n \dt)$ & \texttt{$\beta$\_t = $\varepsilon$ .* cos($\omega$\_p * t * dt)} \\
-$T_\text{free}$ & \texttt{LockinEP.T\_free} \\
-$T_\text{warmup}$ & \texttt{LockinEP.T\_warmup\_cycles} (in probe periods) \\
-$N_c$ & \texttt{LockinEP.n\_cycles} \\
-$\tilde H_\ell^{+}$ accumulator & \texttt{H\_W[key]} dict in \texttt{ep\_gradient(::LockinEP)} \\
-Discrete gradient~\eqref{eq:disc-grad} & \texttt{\_ep\_lockin\_gradient} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{Default knobs}
-
-The defaults in \texttt{LockinEP} (\texttt{$\varepsilon$=0.05,
-$\omega$\_p=0.05, n\_cycles=8, T\_warmup\_cycles=2, T\_free=200,
-dt=0.1}) place the
-operating point deep in the adiabatic basin
-(Section~\ref{sec:knobs}) for the two-layer phasor chains in
-\texttt{demos/phasor\_ep\_demo.ipynb} and
-\texttt{demos/lockin\_demo.ipynb}.  The
-\texttt{lockin\_demo} ablation sweeps (§5--§6) show that the
-gradient matches finite-difference oracles to a few percent across
-roughly a decade in each knob, and that the failure modes match
-those tabulated in Section~\ref{sec:knobs}.
-
-\subsection{Why the lock-in cell in \texttt{lockin\_demo} uses
-$\varepsilon = 0.01$, $N_\text{epochs} = 400$}
-
-The end-to-end XOR demo (\texttt{lockin\_demo.ipynb} §7) trains
-with $\varepsilon = 0.01$ and 400 epochs.  The smaller $\varepsilon$
-trades a slightly higher noise floor for a smaller
-$O(\varepsilon^2)$ nonlinearity bias, which matters once the loss
-gets close to zero; the doubled epoch count compensates for the
-roughly $5\%$ gradient-direction noise visible in the §5--§6
-sweeps, which translates into a proportionally slower descent
-compared with the noise-free static EP gradient.  Both methods
-reach 4/4 on the canonical four-corner XOR with bias-on,
-consistent $\{0^\circ, 90^\circ\}$ encoding (see §7.1 of the demo for the
-no-bias counter-example and the per-seed robustness sweep at the
-bottom of \texttt{demos/xor\_diagnosis\_part3.jl}).
+When training all the way to low loss, it helps to reduce the amplitude
+(\eg\ to $\varepsilon\approx0.01$): the smaller drive trades a slightly
+higher noise floor for a smaller $O(\varepsilon^2)$ nonlinearity bias,
+which dominates once the loss approaches zero.  Because the lock-in
+gradient carries a few-percent directional noise that the noise-free
+static estimator does not, a proportionally larger number of training
+epochs compensates.  As an end-to-end sanity check, the two- and
+four-corner XOR problems are learned by both the static and the lock-in
+estimator provided a bias term is enabled and the input and target use
+a consistent $\{0^\circ,90^\circ\}$ phase encoding; disabling the bias is
+a useful counter-example that fails to converge.
 
 %======================================================================
 \section{Summary}\label{sec:summary}
 %======================================================================
 
 \begin{enumerate}
-\item Phasor networks in the unit-circle regime have a
-  \texttt{unit\_project} activation that is \textbf{not holomorphic}
-  in the state $\bm{z}$ and therefore not holomorphic in the
-  nudge $\beta$.  The spatial Cauchy contour of holomorphic EP
-  annihilates the anti-holomorphic sideband exactly at first order
-  for $N\ge3$, but converges to the \emph{wrong target} —
-  $\partial\bm{z}^*/\partial\beta$ rather than $\dd/\dd\beta_R$ —
-  and retains an aliased $O(r^2)$ mixed-term bias
-  (Remark~\ref{rem:contam}).  It can be repaired by two-sideband
+\item Phasor networks in the unit-circle regime use a unit-projection
+  nonlinearity that is \textbf{not holomorphic} in the state $\bm{z}$
+  and therefore not holomorphic in the nudge $\beta$.  The spatial
+  Cauchy contour of holomorphic EP annihilates the anti-holomorphic
+  sideband exactly at first order for $N\ge3$, but converges to the
+  \emph{wrong target} — $\partial\bm{z}^*/\partial\beta$ rather than
+  $\dd/\dd\beta_R$ — and retains an aliased $O(r^2)$ mixed-term bias
+  (Appendix~\ref{app:sidebands}).  It can be repaired by two-sideband
   demodulation, at the cost of a second accumulator and coherent
   combination.
 
@@ -1196,14 +1296,13 @@ bottom of \texttt{demos/xor\_diagnosis\_part3.jl}).
   gradient theorem holds because the residual energy gradient at a
   projected fixed point is radial and hence invisible to tangential
   variations (Lemma~\ref{lem:stationarity}).  In the benchmarked
-  \texttt{K\_mode = :zero} configuration the drift is exactly
-  $2\,\partial\Phi/\partial\bar{\bm{z}}$
-  \eqref{eq:drift-is-2grad} — the real-parameter nudge convention
-  \texttt{nudge\_force} $= (\beta/d_L)\bm{y}$, verified against
-  \texttt{src/ep.jl} — so the lemma applies with no caveat; under
-  \texttt{K\_mode = :stored} the non-variational rotation
-  $\tfrac12\im\bm{\omega}\odot\bm{z}$ requires the rotating-frame
-  reduction (uniform $\bm{\omega}$) before the theorem applies.
+  configuration the drift is exactly $2\,\partial\Phi/\partial\bar{\bm{z}}$
+  \eqref{eq:drift-is-2grad} under the real-parameter nudge convention
+  $\mathrm{nudge}=(\beta/d_L)\bm{y}$, so the lemma applies with no
+  caveat; the variant that folds in the oscillator self-force adds a
+  non-variational rotation $\tfrac12\im\bm{\omega}\odot\bm{z}$, which
+  requires the rotating-frame reduction (uniform $\bm{\omega}$) before
+  the theorem applies (Appendix~\ref{app:stationarity}).
 
 \item Driving $\beta$ as a \textbf{real cosine in time}
   $\beta(t) = \varepsilon\cos(\omega_p t)$ excites both Wirtinger
@@ -1245,9 +1344,13 @@ bottom of \texttt{demos/xor\_diagnosis\_part3.jl}).
   subject to an intermodulation-aware frequency plan
   (Section~\ref{sec:rel}).
 
-\item The implementation lives in \texttt{src/ep.jl}
-  (\texttt{LockinEP} method of \texttt{ep\_gradient}); the
-  end-to-end demonstration is \texttt{demos/lockin\_demo.ipynb}.
+\item Algorithmically, lock-in EP keeps the two-phase skeleton of
+  vanilla EP: a free settle to $\bm{z}^*(0)$, a driven settle under the
+  cosine probe, and a single Hebbian accumulator read out
+  by~\eqref{eq:disc-grad} in place of the free/nudged difference.  The
+  heavier arguments --- the drift decomposition and stationarity proof,
+  and the two-sideband algebra --- are collected in
+  Appendices~\ref{app:stationarity}--\ref{app:sidebands}.
 \end{enumerate}
 
 \section*{References}
@@ -1259,11 +1362,200 @@ bottom of \texttt{demos/xor\_diagnosis\_part3.jl}).
 \item Laborieux, A.\ \& Zenke, F.\ (2022). ``Holomorphic Equilibrium
   Propagation Computes Exact Gradients Through Finite Size
   Oscillations.'' NeurIPS 2022. arXiv:2209.00530.  (The spatial
-  Cauchy contour technique adapted from this paper is derived in
-  \texttt{docs/phasor\_hep\_derivation.tex}.)
+  Cauchy contour technique is adapted from this paper; it is treated in
+  the companion holomorphic-EP derivation.)
 \item Wirtinger, W.\ (1927). ``Zur formalen Theorie der Funktionen
   von mehr komplexen Veränderlichen.'' \emph{Mathematische Annalen}
   97, 357--375.
 \end{itemize}
+
+\appendix
+
+%======================================================================
+\section{Drift Decomposition and Stationarity}\label{app:stationarity}
+%======================================================================
+
+This appendix expands the two claims deferred from
+Section~\ref{sec:phasor-ep}: that the settling drift is (twice) the
+Wirtinger gradient of the energy in the benchmarked configuration, and
+that the projected equilibrium is stationary up to a radial residual.
+
+\subsection*{The drift versus the Wirtinger gradient}
+
+The Wirtinger gradient of the energy~\eqref{eq:energy} is
+\begin{equation}\label{eq:true-grad}
+  \frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell}
+  \;=\;
+  \tfrac{1}{2}\Lambda_\ell\bm{z}_\ell
+  \;+\;
+  \tfrac{1}{2}W_\ell\bm{z}_{\ell-1}
+  \;+\;
+  \tfrac{1}{2}W_{\ell+1}^{\!\top}\bm{z}_{\ell+1}
+  \;-\;
+  \beta\,\delta_{\ell L}\,
+  \frac{\partial\mathcal{C}}{\partial\bar{\bm{z}}_L},
+  \qquad \Lambda_\ell = \diag(\bm{\lambda}_\ell),
+\end{equation}
+because $\tfrac12\Real\langle\bm{z},K\bm{z}\rangle
+= \tfrac12\sum_j \lambda_j |z_j|^2$ depends only on $\Real K$ (on the
+torus it is moreover \emph{constant}, so the self-energy does no work
+in the constrained dynamics; any radial term $\bm{\mu}\odot\bm{z}$ with
+real $\bm{\mu}$ is annihilated by the projection anyway), and
+$\partial_{\bar z}\,\Real\langle\bm{u},\bm{z}\rangle = \tfrac12\bm{u}$.
+The implemented drift~\eqref{eq:settle-grad} differs
+from~\eqref{eq:true-grad} in two ways.
+
+\paragraph{(i) Rotational component.}
+When the oscillator self-force is folded into the drift, the term
+$\tfrac12\,\im\,\bm{\omega}_\ell\odot\bm{z}_\ell$ appears; it is not the
+gradient of any real energy.  It is purely tangential to the torus
+($\Real(\bar z_j\cdot\im\omega_j z_j)=0$), so at a fixed point the
+tangential part of the true gradient must cancel it --- meaning
+$\bm{z}^*$ is \emph{not} a constrained critical point of $\Phi$ when
+$\bm{\omega}\ne\bm{0}$, and the envelope argument of
+Lemma~\ref{lem:stationarity} does not directly apply.  For uniform
+$\omega_{\ell,c}\equiv\omega$ the rotation is removed exactly by the
+rotating-frame substitution $\bm{z}\mapsto e^{\im\omega t}\bm{w}$: the
+Hermitian couplings $\Real\langle W\bm{z}_{\ell-1},\bm{z}_\ell\rangle$
+are invariant under a global phase, provided the target $\bm{y}$ is
+defined in the rotating frame.  For non-uniform $\bm{\omega}$ no such
+global frame exists.  In the default and benchmarked configuration the
+$K$ term is dropped from the drift entirely, so $\bm{\lambda}$ and
+$\bm{\omega}$ are absent and the issue is moot; the rotating-frame
+construction is the path to extending the derivation to the self-force
+variant.
+
+\paragraph{(ii) Term-wise factors.}
+With the $K$ term dropped and the cost drift
+$-2\beta\,\partial\mathcal{C}/\partial\bar{\bm{z}}_L$, the drift
+satisfies \emph{exactly}
+\begin{equation}\label{eq:drift-is-2grad}
+  \bm{g}_\ell \;=\; 2\,\frac{\partial\Phi}{\partial\bar{\bm{z}}_\ell},
+\end{equation}
+the steepest-descent direction of a real function of complex variables
+($\nabla = 2\,\partial/\partial\bar z$).  The overall factor of $2$
+rescales the flow without moving its fixed points, and the
+$\beta$-scaling of the nudge matches the $\beta$ that the EP
+estimator~\eqref{eq:static-ep} divides by, so the constants of
+Theorem~\ref{thm:lockin-grad} are as stated.  Had the cost drift
+carried the na\"ive Wirtinger factor
+$-\beta\,\partial\mathcal{C}/\partial\bar{\bm{z}}_L$ instead, the
+effective nudge would be $\beta/2$ and every EP prefactor would double.
+This is the subtle convention point behind the real-parameter nudge: it
+is what makes the estimator match finite differences on \emph{real}
+weights without a stray factor of~$2$.
+
+\subsection*{Proof of the stationarity lemma}
+
+\begin{proof}[Proof of Lemma~\ref{lem:stationarity}]
+By~\eqref{eq:radial-fp}, $\bm{g}^*_\ell = \bm{\mu}_\ell\odot\bm{z}^*_\ell$
+with $\bm{\mu}_\ell$ real; subtracting the radial $\bm{r}_\ell$ and
+dividing by $c$ gives the first claim with
+$\bm{\nu}_\ell = (\bm{\mu}_\ell-\bm{\mu}'_\ell)/c$.  For real $\Phi$
+the chain rule reads $\dd\Phi = 2\Real\langle
+\partial\Phi/\partial\bar{\bm{z}},\,\dd\bm{z}\rangle$, and with a
+radial gradient the pairing vanishes term by term:
+$\Real\bigl(\overline{\nu_j z^*_j}\,\dd z_j\bigr)
+= \nu_j\,\Real(\bar z^*_j\,\dd z_j) = 0$ by tangentiality.  Hence the
+total $\theta$- and $\beta_R$-derivatives of $\Phi^*$ reduce to the
+partials, and $\partial\Phi/\partial\beta_R = -\,\mathcal{C}$
+from~\eqref{eq:energy}.
+\end{proof}
+
+%======================================================================
+\section{Sideband Algebra}\label{app:sidebands}
+%======================================================================
+
+This appendix collects the two-sideband bookkeeping deferred from
+Sections~\ref{sec:wirtinger} and~\ref{sec:probe}.
+
+\subsection*{Why the spatial contour hits the wrong target}
+
+Substituting~\eqref{eq:dz-wirtinger} with $\beta_n = r\,e^{\im\varphi_n}$,
+$\varphi_n = 2\pi n/N$, into the spatial Fourier sum, the term
+proportional to $\partial\bm{z}^*/\partial\bar\beta$ multiplies
+$\bar\beta_n\,e^{-\im\varphi_n} = r\,e^{-2\im\varphi_n}$, and
+$\tfrac1N\sum_{n=0}^{N-1}e^{-2\im\varphi_n}=0$ for every $N\ge3$: at
+first order the anti-holomorphic sideband is \emph{exactly} annihilated
+by the discrete Fourier sum, not merely approximately.  The genuine
+obstructions are different:
+\begin{enumerate}[label=(\roman*)]
+\item \emph{Wrong target.}  The $+1$ Fourier coefficient extracts
+$\partial\bm{z}^*/\partial\beta$ alone, whereas the gradient theorem on
+real parameters needs the real-axis directional derivative
+$\dd/\dd\beta_R = \partial_\beta+\partial_{\bar\beta}$
+\eqref{eq:real-dir}.  On a non-holomorphic recurrence the unmodified
+contour therefore converges cleanly to the \emph{wrong quantity}.  It
+is repairable in principle: demodulating the same contour data against
+$e^{+\im\varphi_n}$ extracts $\partial\bm{z}^*/\partial\bar\beta$ (the
+holomorphic term then carries $e^{+2\im\varphi_n}$ and averages away
+for $N\ge3$), and the sum of the two demodulations recovers
+$\dd\bm{z}^*/\dd\beta_R$; Proposition~\ref{prop:cplx-fail} gives the
+same two-sideband repair in the temporal picture, including the
+quadratic Hebbian observable.
+\item \emph{Surviving alias.}  Among the low-order Taylor terms, the
+mixed cubic $\beta^2\bar\beta$ has angular phase $e^{+\im\varphi_n}$ and
+passes the $e^{-\im\varphi_n}$ demodulation at \emph{every} $N$,
+contributing $O(r^3)$ to the coefficient and hence $O(r^2)$ to the
+gradient estimate --- the same order as the curvature bias of the
+temporal probe (Theorem~\ref{thm:lockin-grad}), so neither method wins
+on bias order.  Small $N$ admits further aliases from
+$\bar\beta^{\,N-1}$ at order $r^{N-1}$ (\eg\ $\bar\beta^2$ at $N=3$).
+\end{enumerate}
+
+\subsection*{The complex probe repaired}
+
+\begin{proposition}[Complex probe: single-sideband demodulation is
+wrong; two-sideband demodulation is a repair]\label{prop:cplx-fail}
+Let $\partial\bm{z}^*/\partial\bar\beta \ne 0$ and take the complex
+probe $\beta(t) = \varepsilon\,e^{\im\omega_p t}$.  Write
+$\bm{a}_\ell = \partial\bm{z}^*_\ell/\partial\beta|_0$,
+$\bm{b}_\ell = \partial\bm{z}^*_\ell/\partial\bar\beta|_0$.  Then:
+\begin{enumerate}[label=(\roman*)]
+\item the Fourier coefficient of $\bm{z}(t)$ at $+\omega_p$ recovers
+$\varepsilon\,\bm{a}_\ell$ only — the wrong target for real
+parameters;
+\item the \emph{sum} of the $+\omega_p$ and $-\omega_p$ coefficients
+recovers $\varepsilon(\bm{a}_\ell+\bm{b}_\ell)
+= \varepsilon\,\dd\bm{z}^*_\ell/\dd\beta_R$;
+\item the same repair works for the quadratic Hebbian observable
+$H_\ell = \bm{z}_\ell\bm{z}_{\ell-1}^H$, despite its sideband mixing
+through the conjugated factor: the first-order Fourier coefficients
+are
+\[
+  H_\ell^{(+\omega_p)}
+  = \varepsilon\bigl(\bm{a}_\ell\,\bm{z}_{\ell-1}^{*\,H}
+    + \bm{z}_\ell^*\,\bm{b}_{\ell-1}^{H}\bigr),
+  \qquad
+  H_\ell^{(-\omega_p)}
+  = \varepsilon\bigl(\bm{b}_\ell\,\bm{z}_{\ell-1}^{*\,H}
+    + \bm{z}_\ell^*\,\bm{a}_{\ell-1}^{H}\bigr),
+\]
+whose sum is
+$\varepsilon\bigl[(\bm{a}+\bm{b})_\ell\,\bm{z}_{\ell-1}^{*\,H}
++ \bm{z}_\ell^*\,(\bm{a}+\bm{b})_{\ell-1}^{H}\bigr]
+= \varepsilon\,\dd H_\ell^*/\dd\beta_R$.
+\end{enumerate}
+The complex probe is thus not unusable on a non-holomorphic
+recurrence, but it requires two demodulation accumulators and their
+coherent combination.
+\end{proposition}
+\begin{proof}
+Substituting $\beta(t) = \varepsilon\,e^{\im\omega_p t}$ and
+$\bar\beta(t) = \varepsilon\,e^{-\im\omega_p t}$
+into~\eqref{eq:dz-wirtinger} gives
+$\delta\bm{z}_\ell = \varepsilon\,e^{\im\omega_p t}\bm{a}_\ell
++ \varepsilon\,e^{-\im\omega_p t}\bm{b}_\ell + O(\varepsilon^2)$,
+which yields (i) and (ii) with~\eqref{eq:real-dir}.  For (iii),
+expand $\delta H_\ell = \delta\bm{z}_\ell\,\bm{z}_{\ell-1}^{*\,H}
++ \bm{z}_\ell^*\,\delta\bm{z}_{\ell-1}^{H}$ and note that Hermitian
+conjugation swaps the sidebands of the second factor:
+$\delta\bm{z}_{\ell-1}^{H}
+= \varepsilon\,e^{-\im\omega_p t}\bm{a}_{\ell-1}^{H}
++ \varepsilon\,e^{+\im\omega_p t}\bm{b}_{\ell-1}^{H}$.  Collecting
+$e^{\pm\im\omega_p t}$ terms gives the display; the final equality
+uses $\dd\bm{z}^*/\dd\beta_R = \bm{a}+\bm{b}$ and
+$\dd(\bm{z}^{*\,H})/\dd\beta_R = (\bm{a}+\bm{b})^{H}$.
+\end{proof}
 
 \end{document}

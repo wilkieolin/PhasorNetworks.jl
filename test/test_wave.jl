@@ -38,6 +38,70 @@ function wave_tests()
         test_wave_chain_integration()
         test_wave_stencil_coupling()
         test_wave_spike_transmission()
+        test_soliton_wave_sheet()
+    end
+end
+
+# ---- SolitonWaveSheet: conservative (unitary) nonlinear wave sheet -----
+
+function test_soliton_wave_sheet()
+    @testset "SolitonWaveSheet (conservative + Kerr)" begin
+        rng = Xoshiro(21)
+
+        # (a) Phase-3D forward: shape, eltype, range, finiteness
+        H = W = 10; L = 6; B = 2
+        l = SolitonWaveSheet(H, W; init_log_D = log(1.0), init_beta = 0.2)
+        ps, st = Lux.setup(rng, l)
+        x = Phase.(2f0 .* rand(rng, Float32, H * W, L, B) .- 1f0)
+        y, st_out = l(x, ps, st)
+        @test size(y) == (H * W, L, B)
+        @test eltype(y) === Phase
+        @test all(isfinite, Float32.(y))
+        @test all(-1f0 - 1f-4 .<= Float32.(y) .<= 1f0 + 1f-4)
+        @test st_out === st
+
+        # (b) autonomous recurrence is UNITARY: ‖z‖ conserved to ~machine precision
+        Hn = Wn = 24
+        ln = SolitonWaveSheet(Hn, Wn; init_log_D = log(1.0), init_beta = 0.4)
+        pn, sn = Lux.setup(Xoshiro(3), ln)
+        z0 = zeros(ComplexF32, Hn, Wn)
+        for j in 1:Wn, i in 1:Hn
+            z0[i, j] = ComplexF32(exp(-(((i-8)^2)+((j-12)^2))/(2*3f0^2))) * cis(0.5f0*(i-8))
+        end
+        traj = soliton_simulate(ln, pn, sn; z0 = z0, L = 40)
+        @test size(traj) == (Hn, Wn, 40)
+        n0 = sum(abs2, z0)
+        ns = [sum(abs2, traj[:, :, t]) for t in 1:40]
+        @test maximum(abs.(ns .- n0)) / n0 < 1f-3           # norm conserved
+
+        # (c) Kerr self-trapping: β>0 arrests dispersion (narrower packet at distance)
+        #     1-D stripe (uniform in y ⇒ stable 1-D soliton), stationary, matched β.
+        Hs = 64; Ws = 4; Ls = 30; σ0 = 2f0
+        seed = zeros(ComplexF32, Hs, Ws)
+        for j in 1:Ws, i in 1:Hs
+            seed[i, j] = ComplexF32(exp(-((i - Hs÷2)^2) / (2f0 * σ0^2)))   # peak |z|=1
+        end
+        width(β) = begin
+            lb = SolitonWaveSheet(Hs, Ws; init_log_D = log(1.0), init_beta = β)
+            pb, sb = Lux.setup(Xoshiro(5), lb)
+            Y = soliton_simulate(lb, pb, sb; z0 = seed, L = Ls)
+            I = vec(sum(abs2.(Y[:, :, Ls]); dims = 2))
+            xs = Float32.(0:Hs-1); c = sum(xs .* I) / sum(I)
+            sqrt(sum(((xs .- c) .^ 2) .* I) / sum(I))                        # RMS width
+        end
+        w_lin = width(0f0); w_kerr = width(0.25f0)
+        @test w_kerr < w_lin                                # nonlinearity self-traps
+
+        # (d) gradient flow through every trainable param
+        xg = Phase.(2f0 .* rand(Xoshiro(7), Float32, H * W, L, B) .- 1f0)
+        loss(p) = sum(abs2, Float32.(first(l(xg, p, st))))
+        val, grads = Zygote.withgradient(loss, ps)
+        g = grads[1]
+        @test isfinite(val)
+        for name in keys(ps)
+            @test haskey(g, name) && all(isfinite, g[name])
+        end
+        @test any(any(abs.(g[name]) .> 0) for name in keys(ps))
     end
 end
 

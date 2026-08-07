@@ -1229,3 +1229,154 @@ function route_stats(l::WaveExpertSheet, ps::LuxParams, st::NamedTuple,
     gate = moe_gate(logits, st.route_bias; hard = l.hard, τ = l.tau)
     return (; load = load, entropy = mean(ent), gate = gate)
 end
+
+# =======================================================================
+# SolitonWaveSheet — conservative (unitary) nonlinear wave sheet
+# =======================================================================
+#
+# Backwards-design layer (demos/wave_soliton_c1.jl screen). The goal is
+# SOLITONIC transport: a wave packet that carries a phase code over long
+# distance WITHOUT spreading. The C-1 screen showed two things:
+#
+#   (i)  the linear PhasorWaveSheet map M(q)=A+g·Ŵ(q) is DISSIPATIVE and
+#        modal-filtering — bolting an amplitude-dependent ω onto it just
+#        bleeds power into lossy modes (no self-trapping);
+#   (ii) once the linear step is made CONSERVATIVE (unit-modulus per mode),
+#        the same amplitude-dependent ω (Kerr / nonlinear-Schrödinger self-
+#        phase-modulation) DOES arrest dispersion — a soliton balance.
+#
+# So this layer realizes the medium the analysis prescribed:
+#
+#   linear step (Fourier):   ẑ(q) ← e^{iθ(q)}·ẑ(q)          (|·|=1, UNITARY)
+#     θ(q) = ωT + D·(cos q_h + cos q_w) − (s_h q_h + s_w q_w)
+#            └carrier┘ └─ tight-binding dispersion ─┘ └── directed drift ──┘
+#   Kerr step (pointwise):   z ← z·exp(i·β·|z|²)             (|·|=1, UNITARY)
+#
+# Both steps preserve |z| pointwise / by Parseval ⇒ the whole recurrence is
+# NORM-CONSERVING (an isometry) ⇒ UNCONDITIONALLY STABLE: no spectral-radius
+# tuning, no leak, no runaway. This is the key structural difference from
+# PhasorWaveSheet (which needs ρ<1). The conservative linear step is the
+# Hamiltonian (λ→0) limit of the R&F sheet with a discrete-Laplacian
+# (nearest-neighbour) imaginary coupling; D = exp(log_D) is the hopping
+# strength (dispersion curvature θ''(0) = −D), and β>0 focuses to balance it.
+#
+# Trainable params: log_D (dispersion), beta (Kerr), drift_h, drift_w.
+# Everything else (carrier ω, FFT frequency grids) is fixed state.
+
+struct SolitonWaveSheet <: Lux.AbstractLuxLayer
+    grid_h::Int
+    grid_w::Int
+    dispersion::Symbol         # :tight_binding — θ(q)=D(cos q_h+cos q_w)
+    init_log_D::Float32        # dispersion curvature D=exp(log_D)   (trainable)
+    init_beta::Float32         # Kerr self-phase-modulation strength (trainable)
+    init_drift_h::Float32      # directed drift (sites/step) along axis-1 (rows)
+    init_drift_w::Float32      # directed drift along axis-2 (cols)
+    spk_args::SpikingArgs
+end
+
+function SolitonWaveSheet(H::Integer, W::Integer;
+                          dispersion::Symbol = :tight_binding,
+                          init_log_D::Real = log(1.0),
+                          init_beta::Real  = 0.0,
+                          init_drift_h::Real = 0.0,
+                          init_drift_w::Real = 0.0,
+                          spk_args::SpikingArgs = SpikingArgs())
+    dispersion === :tight_binding ||
+        throw(ArgumentError("dispersion must be :tight_binding, got :$dispersion"))
+    return SolitonWaveSheet(Int(H), Int(W), dispersion,
+                            Float32(init_log_D), Float32(init_beta),
+                            Float32(init_drift_h), Float32(init_drift_w), spk_args)
+end
+
+function Base.show(io::IO, l::SolitonWaveSheet)
+    print(io, "SolitonWaveSheet($(l.grid_h)×$(l.grid_w); dispersion=:$(l.dispersion), ",
+          "D=$(round(exp(l.init_log_D),digits=3)), β=$(round(l.init_beta,digits=3)), ",
+          "drift=($(l.init_drift_h),$(l.init_drift_w)))")
+end
+
+function Lux.initialparameters(::AbstractRNG, l::SolitonWaveSheet)
+    return (log_D    = Float32[l.init_log_D],
+            beta     = Float32[l.init_beta],
+            drift_h  = Float32[l.init_drift_h],
+            drift_w  = Float32[l.init_drift_w])
+end
+
+function Lux.initialstates(::AbstractRNG, l::SolitonWaveSheet)
+    H, W = l.grid_h, l.grid_w
+    qh = reshape(Float32.(2f0 .* Float32(pi) .* (0:H-1) ./ H), H, 1)   # (H,1) FFT freqs
+    qw = reshape(Float32.(2f0 .* Float32(pi) .* (0:W-1) ./ W), 1, W)   # (1,W)
+    return (qh = qh, qw = qw, cos_qh = cos.(qh), cos_qw = cos.(qw))
+end
+
+# Unit-modulus per-mode propagator e^{iθ(q)} — the conservative linear step.
+function _soliton_prop(l::SolitonWaveSheet, ps, st)
+    ω = period_to_angfreq(l.spk_args.t_period)
+    T = Float32(l.spk_args.t_period)
+    D = exp.(ps.log_D)                                                 # (1,)
+    θ = (ω * T) .+ D .* (st.cos_qh .+ st.cos_qw) .-
+        (ps.drift_h .* st.qh .+ ps.drift_w .* st.qw)                   # (H,W)
+    return cis.(θ)
+end
+
+# Autonomous (or driven) rollout for L steps from z0 (H,W,B) → (H,W,L,B).
+# AD-safe (Buffer, no mutation of tracked arrays). Norm-conserving when
+# drive === nothing.
+function _soliton_rollout(l::SolitonWaveSheet, ps, st, z0, drive, L::Int)
+    prop = _soliton_prop(l, ps, st)                                    # (H,W)
+    β = ps.beta[1]
+    H, W, B = size(z0)
+    P = reshape(prop, H, W, 1)
+    Y = Buffer(similar(z0, ComplexF32, H, W, L, B))
+    z = ComplexF32.(z0)
+    for t in 1:L
+        z_lin = ifft(P .* fft(z, (1, 2)), (1, 2))                     # unitary propagate
+        if drive !== nothing
+            z_lin = z_lin .+ drive[:, :, t, :]
+        end
+        z = z_lin .* cis.(β .* abs2.(z_lin))                          # Kerr (norm-preserving)
+        Y[:, :, t, :] = z
+    end
+    return copy(Y)                                                     # (H,W,L,B)
+end
+
+"""
+    soliton_simulate(l::SolitonWaveSheet, ps, st; z0, L, drive=nothing) -> Array{ComplexF32}
+
+Evolve the conservative nonlinear sheet for `L` steps from the initial complex
+field `z0`, returning the full trajectory. Autonomous when `drive === nothing`
+(then `‖z‖` is conserved to machine precision — the recurrence is unitary).
+
+`z0` may be `(H,W)` or `(H,W,B)`; the return is `(H,W,L)` or `(H,W,L,B)`.
+`drive`, if given, is `(H,W,L)` / `(H,W,L,B)`. This is the pure-forward
+interface for the soliton / VSA-transport demos: seed a localized packet whose
+per-site phases carry a code, and watch it travel coherently.
+"""
+function soliton_simulate(l::SolitonWaveSheet, ps::LuxParams, st::NamedTuple;
+                          z0::AbstractArray, L::Integer, drive = nothing)
+    H, W = l.grid_h, l.grid_w
+    had_batch = ndims(z0) == 3
+    z0_3 = had_batch ? ComplexF32.(z0) : reshape(ComplexF32.(z0), H, W, 1)
+    @assert size(z0_3, 1) == H && size(z0_3, 2) == W "z0 must be $(H)×$(W)[×B]"
+    drive_4 = drive === nothing ? nothing :
+        (ndims(drive) == 4 ? ComplexF32.(drive) :
+         reshape(ComplexF32.(drive), H, W, Int(L), 1))
+    Y = _soliton_rollout(l, ps, st, z0_3, drive_4, Int(L))
+    return had_batch ? Y : dropdims(Y; dims = 4)
+end
+
+# Lux forward on Phase 3D input (N=H*W, L, B): inject the encoded input as a
+# per-step complex drive from a zero initial field (mirrors PhasorWaveSheet),
+# propagate, and decode back to phase. For pure autonomous soliton transport
+# use `soliton_simulate` directly.
+function (l::SolitonWaveSheet)(x::AbstractArray{<:Phase, 3},
+                               ps::LuxParams, st::NamedTuple)
+    H, W = l.grid_h, l.grid_w
+    N, L, B = size(x)
+    @assert N == H * W "input channels $(N) ≠ grid $(H)×$(W) = $(H*W)"
+    drive = reshape(angle_to_complex(x), H, W, L, B)
+    z0 = ignore_derivatives() do
+        z = similar(st.qh, ComplexF32, H, W, B); z .= 0f0; return z
+    end
+    Y = _soliton_rollout(l, ps, st, z0, drive, L)
+    return complex_to_angle(reshape(Y, H * W, L, B)), st
+end
