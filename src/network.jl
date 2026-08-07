@@ -1176,6 +1176,83 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
     end
 end
 
+# ---- Continuous-time dispatch: per-channel-ω resonator bank ----
+#
+# Solves the resonator ODE dz_c/dt = k_c·z_c + (W·I)_c(t) [+ bias_c] with
+# PER-CHANNEL k_c = λ_c + iω_c (ω_c = params.omega — the per-channel-ω exception
+# to the shared-carrier rule, same as the discrete ResonantSTFT), driven by the
+# continuous input current `x.current.current_fn(t)`, then samples at period
+# boundaries and applies `_freq_shift` (re-encode to the shared carrier ω_out) +
+# activation — matching the discrete Complex-3D dispatch's tail (no −conj; that
+# frame correction is Phase-3D/Dirac-only). The discrete `causal_conv` path is the
+# ZOH-exact discretization of this ODE at dt = t_period, so this reproduces it as
+# the solver step shrinks (validated in phasor_torch julia_parity P1/P2). Wrap a
+# raw waveform with `waveform_currentcall` to obtain the input `CurrentCall`.
+function (a::ResonantSTFT)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    spk_args = x.spk_args                       # simulation concerns (solver, dt)
+    tspan = x.t_span
+    T = a.spk_args.t_period                     # dynamics carrier source
+    ω = params.omega                            # per-channel ω
+    ω_out = period_to_angfreq(T)
+    use_bias = a.use_bias && haskey(params, :bias_real)
+
+    sample_I = x.current.current_fn(Float32(tspan[1]))
+    out_shape = ndims(sample_I) >= 2 ? (a.n_freqs, size(sample_I)[2:end]...) : (a.n_freqs,)
+    u0 = similar(sample_I, ComplexF32, out_shape)
+    ignore_derivatives() do
+        u0 .= zero(ComplexF32)
+    end
+
+    function dzdt(u, p, t)
+        k = ComplexF32.(-exp.(p.log_neg_lambda) .+ im .* p.omega)   # per-channel
+        result = k .* u .+ p.weight * x.current.current_fn(t)
+        if use_bias
+            # Constant complex bias current; integrating it reproduces the
+            # discrete ZOH `bias_kernel_accumulation` gain.
+            result = result .+ (p.bias_real .+ 1.0f0im .* p.bias_imag)
+        end
+        return result
+    end
+
+    prob = ODEProblem(dzdt, u0, tspan, params)
+    sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
+
+    # Sample at the L period boundaries → (n_freqs, L, B), matching the discrete
+    # Complex-3D output before the external downsample. Use `stack` (not
+    # `cat(...)`) to avoid splatting L arrays — L can be O(1e4) for audio, which
+    # overflows the stack.
+    L = round(Int, (tspan[2] - tspan[1]) / T)
+    sample_times = Float32.(tspan[1] .+ (1:L) .* T)
+    samples = [sol(t) for t in sample_times]          # L × (n_freqs, B)
+    Z_sig = stack(samples; dims = 2)                  # (n_freqs, L, B)
+
+    Z = _freq_shift(Z_sig, ω, ω_out, T)
+    Y = a.activation === nothing ? _apply_trainable_slerp(Z, params) : a.activation(Z)
+    return Y, state
+end
+
+"""
+    waveform_currentcall(x, spk_args; offset=0) -> CurrentCall
+
+Wrap a sampled complex waveform `x` (C_in × L × B, samples spaced `t_period`
+apart in the resonator's kernel time) as a `CurrentCall` for the continuous
+[`ResonantSTFT`](@ref) dispatch. The input current is held zero-order (ZOH) over
+each period — sample `n` drives the interval `((n−1)·T, n·T]` — so the ODE at the
+period grid matches the discrete `causal_conv` ZOH discretization. Use a finer
+`spk_args.solver_args[:dt]` for the genuinely-continuous (sub-period) response.
+"""
+function waveform_currentcall(x::AbstractArray{<:Complex, 3}, spk_args::SpikingArgs;
+                              offset::Real = 0.0f0)
+    C, L, B = size(x)
+    T = spk_args.t_period
+    current_fn = t -> begin
+        n = clamp(ceil(Int, Float32(t) / T), 1, L)
+        x[:, n, :]
+    end
+    tspan = (0.0f0, Float32(L) * T)
+    return CurrentCall(LocalCurrent(current_fn, (C, B), Float32(offset)), spk_args, tspan)
+end
+
 ###
 ### Convolutional Phasor Layer
 ###

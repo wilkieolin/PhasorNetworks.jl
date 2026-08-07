@@ -1096,6 +1096,24 @@ function phasor_stft_tests()
         y2, _ = layer(x2, ps, st)
         @test y != y2
 
+        @testset "CurrentCall dispatch (continuous ODE) ≈ discrete Complex-3D" begin
+            # The per-channel-ω resonator ODE reproduces the discrete causal_conv
+            # (Complex-3D) path as the solver step shrinks — causal_conv is the
+            # ZOH-exact discretization at dt=t_period. Guards waveform_currentcall
+            # + the ResonantSTFT(::CurrentCall) dispatch.
+            front_spk = SpikingArgs(t_period = layer.spk_args.t_period,
+                                    solver_args = Dict(:dt => 0.05f0, :adaptive => false,
+                                                       :save_start => true))
+            cc = waveform_currentcall(ComplexF32.(x), front_spk)
+            y_cont, _ = layer(cc, ps, st)
+            @test size(y_cont) == size(y)
+            @test all(isfinite, y_cont)
+            arc = mod.(Float32.(complex_to_angle(y_cont)) .- Float32.(complex_to_angle(y)) .+ 1f0,
+                       2f0) .- 1f0
+            # Empirically mean|arc| ~1e-2 at dt=0.05; 0.1 floor is generous.
+            @test mean(abs.(arc)) < 0.1
+        end
+
         # 3D Phase forward pass
         x_phase = Phase.(2f0 .* rand(rng, Float32, in_dim, L, B) .- 1f0)
         y_phase, _ = layer(x_phase, ps, st)
