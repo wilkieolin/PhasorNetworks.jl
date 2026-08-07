@@ -987,6 +987,32 @@ function ssm_spiking_correlation_tests()
             # is generous to keep the test robust to solver tweaks.
             @test c > 0.3
         end
+
+        @testset "spiking return-type (solution_to_train) matches Dirac frame" begin
+            # Exercises the :spiking return path — solution_to_train /
+            # potential_to_time — which the :potential path above BYPASSES
+            # (it unrotates manually via sample_phases_at_periods). Guards the
+            # static-frame spike encoding in solution_to_train: if the spike
+            # encoder references the wrong frame (e.g. the raw R&F spiking-angle
+            # π/2 instead of the moving zero current_zero(t)=phase_to_potential),
+            # spiking-decoded phases decorrelate from the Dirac output (ρ≈0 at
+            # every threshold and length — the frame bug that this test would
+            # have caught). Reconstruct the phase the next layer would see, as
+            # the attention layers do via CurrentCall → reconstruct_from_current.
+            layer_spk = PhasorDense(C_in => C_out, normalize_to_unit_circle;
+                                    init_mode=:hippo, use_bias=false,
+                                    return_type=SolutionType(:spiking))
+            out_sc, _ = layer_spk(sc, ps, st)
+            @test out_sc isa SpikingCall
+            z_rec = reconstruct_from_current(CurrentCall(out_sc), L, spk_args)
+            phases_spk = complex_to_angle(z_rec)
+            c_spk = cor_realvals(vec(Float32.(phases_dirac)),
+                                 vec(Float32.(phases_spk)))
+            # Static-frame encoding: ρ ≈ 0.9 empirically; the 0.5 floor guards
+            # the frame (a wrong frame collapses this to ≈0), with margin for the
+            # threshold gate and finite-width spike kernel.
+            @test c_spk > 0.5
+        end
     end
 end
 
