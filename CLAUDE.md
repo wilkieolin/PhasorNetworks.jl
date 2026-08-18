@@ -28,7 +28,7 @@ include("test/runtests.jl")  # loads globals, then call e.g. network_tests()
 julia --project=docs docs/make.jl
 
 # Training script
-julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --use_cuda true
+julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend :cuda
 ```
 
 There is no linter or formatter configured. Julia 1.11+ is required.
@@ -147,6 +147,8 @@ the load-dependency order.
 | `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
 | `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch. (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
 | `attractor_ssm.jl` | `AttractorPhasorSSM`: selective SSM adding a Hopfield-style attractor pull toward learned phasor codes (`attractor_pull`); reduces to the linear SSM when pull strength α=0 |
+| `wave.jl` | `PhasorWaveSheet` dynamics |
+| `velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
 | `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
 | `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
@@ -204,7 +206,7 @@ All public API functions must be listed in the `export` block in `src/PhasorNetw
 
 ## Testing
 
-Test globals defined in `test/runtests.jl`: `n_x=101, n_y=101, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. CUDA tests run conditionally when `CUDA.functional()` is true. Use appropriate tolerances for floating-point phase comparisons.
+Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. CUDA tests run conditionally when `CUDA.functional()` is true. Use appropriate tolerances for floating-point phase comparisons.
 
 ## Code Style
 

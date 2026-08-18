@@ -72,6 +72,14 @@ Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
 | **Spiking** | `src/spiking.jl` | ODE-mode utilities: `oscillator_bank`, `spike_current`, `bias_current`, `neuron_constant`, spike detection |
 | **GPU** | `src/gpu.jl` | CUDA kernels and GPU-optimised paths for spike processing, scatter-add, interference, `oscillator_bank`, `similarity_outer` |
 | **Metrics** | `src/metrics.jl` | Evaluation: `arc_error`, `angular_mean`, `evaluate_loss`, `evaluate_accuracy`, `confusion_matrix`, ROC curves |
+| **Backend** | `src/backend.jl` | Backend-agnostic GPU helpers (`select_device`, `on_gpu`) for `:cuda`/`:cpu`/`:oneapi` |
+| **Activations** | `src/activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`) |
+| **Attractor SSM** | `src/attractor_ssm.jl` | `AttractorPhasorSSM`: Hopfield-style attractor pull toward learned phasor codes |
+| **Datasets** | `src/datasets.jl` | Dataset loaders (`fashion_mnist_data`) with Scratch.jl caching |
+| **HEP** | `src/hep.jl` | Holomorphic Equilibrium Propagation (`hep_train`, `hep_energy`) |
+| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `StaticEP`/`LockinEP`) |
+| **Wave** | `src/wave.jl` | `PhasorWaveSheet` dynamics |
+| **Velocity** | `src/velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
 | **Constants** | `src/constants.jl` | Global constants: `N_THREADS` (CUDA), `pi_f32`, device handles |
 | **Imports** | `src/imports.jl` | Centralised `using`/`import` statements |
 
@@ -98,14 +106,24 @@ PhasorNetworks.jl/
 │   ├── PhasorNetworks.jl       # Module definition and exports
 │   ├── imports.jl              # Centralised dependency imports
 │   ├── constants.jl            # Global constants (N_THREADS, pi_f32, devices)
-│   ├── types.jl                # Core type definitions
-│   ├── domains.jl              # Domain conversion functions
+│   ├── backend.jl                  # Backend-agnostic GPU helpers
+│   ├── types.jl                    # Core data structures (`Phase`, `Args`, spiking types)
+│   ├── domains.jl                  # Domain conversion functions
 │   ├── kernels.jl              # Discrete phasor kernels, causal convolution, HiPPO
 │   ├── network.jl              # Neural network layers and training
 │   ├── ssm.jl                  # SSM readout, attention, encoding, spiking helpers
 │   ├── vsa.jl                  # Vector Symbolic Architecture operations
 │   ├── spiking.jl              # ODE-mode utilities (oscillator_bank, spike_current)
 │   ├── gpu.jl                  # CUDA kernels and GPU-optimised operations
+│   ├── metrics.jl              # Evaluation metrics and analysis
+│   ├── activations.jl          # Complex-domain layer activations
+│   ├── attractor_ssm.jl        # Attractor SSM
+│   ├── datasets.jl             # Dataset loaders
+│   ├── hep.jl                  # Holomorphic EP
+│   ├── ep.jl                   # Equilibrium Propagation
+│   ├── wave.jl                 # Wave dynamics
+│   ├── velocity_bank.jl        # Velocity-bank extensions
+│   ├── velocity_bank_hw.jl     # Hardware-specific velocity bank helpers
 │   └── metrics.jl              # Evaluation metrics and analysis
 ├── test/                       # Test suite
 │   ├── runtests.jl             # Test entry point
@@ -118,7 +136,7 @@ PhasorNetworks.jl/
 │   ├── test_phase_type.jl      # Phase scalar type tests
 │   ├── metrics_tests.jl        # Metrics tests
 │   ├── test_cuda.jl            # CUDA-specific tests
-│   └── PROPOSED_spiking_operations_tests.jl  # Proposed spiking tests (not yet active)
+│   └── spiking_operations_tests.jl  # Spiking operations tests (active)
 ├── scripts/                    # Training scripts
 │   ├── train_fashionmnist.jl   # FashionMNIST training script (CLI)
 │   ├── train_fashionmnist_conv.jl  # Convolutional variant
@@ -179,7 +197,7 @@ Pkg.instantiate()
 using PhasorNetworks
 
 # Run a training script from the command line
-julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --use_cuda true
+julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend :cuda
 ```
 
 ### Testing
@@ -195,7 +213,7 @@ Pkg.test()
 
 The test suite covers: domain conversions, VSA operations (binding, bundling, similarity, orthogonality), network forward/backward passes, individual layer behaviour (PhasorDense, PhasorConv, ComplexBias, Codebook, MinPool, ResidualBlock, etc.), metrics, and optionally CUDA-specific tests.
 
-**Note:** Many test sets in `runtests.jl` are currently commented out; only `network_tests()` is active by default. Uncomment others as needed: `domain_tests()`, `vsa_tests()`, `metrics_tests()`, `network_layers_tests()`.
+**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `phase_type_tests`, `ssm_tests`, `local_attention_tests`, `transformer_block_tests`, `multimode_tests`, `attractor_ssm_tests`, `wave_tests`, `hep_tests`, `ep_tests`, `spiking_operations_tests`). GPU tests (`test_cuda.jl`) run conditionally when `CUDA.functional()` is true.
 
 ### Documentation
 
@@ -214,6 +232,10 @@ Documentation is auto-deployed to GitHub Pages via CI on pushes to `main`.
 - **Type annotations:** Use `Float32` throughout for GPU compatibility. The `LuxParams = Union{NamedTuple, AbstractArray}` type alias is used for layer parameters.
 - **Multiple dispatch:** Each operation typically has methods for `AbstractArray` (phase mode), `SpikingCall` (spike mode), and `CurrentCall` (current mode), plus CPU and GPU specialisations.
 - **Exports:** All public API functions must be listed in the `export` block in `src/PhasorNetworks.jl`.
+
+### Phase Scalar Type
+
+`Phase <: Real` — scalar type wrapping `Float32`, representing phase angles in [-1, 1] (units of pi). Network layers dispatch on `AbstractArray{<:Phase}` for phase-mode forward passes.
 
 ### HPC Deployment
 
