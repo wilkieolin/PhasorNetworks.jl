@@ -130,6 +130,11 @@ wave_transport,
 matched_conduction_speed,
 emission_threshold,
 wave_homeostat_trace,
+ExcitableWaveSheet,
+excitable_simulate,
+excitable_emit,
+excitable_regime,
+front_speed,
 moe_gate,
 update_moe_bias,
 WaveExpertSheet,
@@ -200,6 +205,7 @@ include("network.jl")
 include("ssm.jl")
 include("attractor_ssm.jl")
 include("wave.jl")
+include("excitable.jl")
 include("metrics.jl")
 include("datasets.jl")
 include("hep.jl")
