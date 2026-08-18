@@ -13,7 +13,7 @@ import ChainRulesCore
 import Random
 using Random: GLOBAL_RNG, AbstractRNG
 using Interpolations: linear_interpolation
-using Statistics: cor, mean
+using Statistics: cor, mean, std
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
 using NNlib: batched_mul, softmax

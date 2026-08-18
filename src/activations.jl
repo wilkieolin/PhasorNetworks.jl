@@ -67,10 +67,15 @@ selected by `ε`:
 
 # Arguments
 - `z::AbstractArray{<:Complex}`: complex input array.
-- `ε::Real = 1.0f-8`: safe-mode regularization. Set `ε = 0` to recover
-  the hard `z/|z|` projection. The transition from `magnitude ≈ 1` to
-  `magnitude ≈ |z|/√ε` happens around `|z| ≈ √ε ≈ 1e-4`. The Jacobian
-  magnitude near `z = 0` scales as `1/√ε`.
+- `ε::Union{Real,AbstractArray{<:Real}} = 1.0f-8`: safe-mode regularization.
+  Set `ε = 0` (scalar only) to recover the hard `z/|z|` projection. The
+  transition from `magnitude ≈ 1` to `magnitude ≈ |z|/√ε` happens around
+  `|z| ≈ √ε ≈ 1e-4`. The Jacobian magnitude near `z = 0` scales as `1/√ε`.
+
+  An **array** `ε` broadcasts against `z`, giving a per-element (and
+  differentiable) threshold `√ε`. [`PhasorWaveSheet`](@ref) uses this for its
+  emission threshold `θ = √ε`, which is a firing threshold rather than a
+  numerical guard — see [`emission_threshold`](@ref).
 - `threshold::Real = 1.0f-10`: only used when `ε = 0`; sub-threshold
   inputs map to `1 + 0im` and receive zero cotangent.
 
@@ -87,12 +92,12 @@ For a soft, magnitude-preserving variant that smoothly interpolates the
 [`soft_normalize_to_unit_circle`](@ref).
 """
 function normalize_to_unit_circle(z::AbstractArray{<:Complex};
-                                   ε::Real = 1.0f-8,
+                                   ε::Union{Real,AbstractArray{<:Real}} = 1.0f-8,
                                    threshold::Real = 1.0f-10)
-    if Float32(ε) == 0.0f0
+    if ε isa Real && Float32(ε) == 0.0f0
         return _normalize_to_unit_circle_hard(z; threshold = threshold)
     else
-        return z ./ sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ Float32(ε))
+        return z ./ sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ Float32.(ε))
     end
 end
 

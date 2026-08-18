@@ -12,12 +12,16 @@
 #   4. Inhibition ablation (B_inh=0 shifts the fastest-growing mode toward DC)
 #   5. Gradient flow through every trainable parameter (Zygote AD)
 #   6. wave_simulate batch handling + autonomous vs driven
+#   7. Emission threshold θ + homeostatic regulation (the :spike firing threshold)
+#   8. Spectral occupancy → transport forecast (report §4.6: a code's own
+#      spatial-frequency content decides how far it survives)
 
 function wave_tests()
     @testset "PhasorWaveSheet" begin
         @info "Running PhasorWaveSheet tests..."
         test_wave_forward_sanity()
         test_wave_dispersion_criticality()
+        test_wave_transport_regime()
         test_wave_propagation()
         test_wave_inhibition_ablation()
         test_wave_gradient_flow()
@@ -31,6 +35,7 @@ function wave_tests()
         test_wave_route_features()
         test_wave_aniso_coupling()
         test_wave_shift_coupling()
+        test_wave_spectral_transport()
         # ---- Tier 2: continuous ODE mode (needs the ODE stack from runtests.jl)
         test_wave_continuous_dispersion()
         test_wave_ode_equivalence()
@@ -38,6 +43,7 @@ function wave_tests()
         test_wave_chain_integration()
         test_wave_stencil_coupling()
         test_wave_spike_transmission()
+        test_wave_emission_threshold()
         test_soliton_wave_sheet()
     end
 end
@@ -160,6 +166,51 @@ function test_wave_dispersion_criticality()
 end
 
 # ---- 3. Wave propagation ----------------------------------------------
+
+function test_wave_transport_regime()
+    @testset "transport diagnostic: standing vs traveling" begin
+        H = W = 48
+        # The design rule: c = 2σ_I/T puts the delay phase across the surround at π.
+        @test matched_conduction_speed(3.0, 1.0) ≈ 6.0f0
+        @test matched_conduction_speed(6.0, 1.0) ≈ 12.0f0
+        @test matched_conduction_speed(3.0, 0.5) ≈ 12.0f0
+
+        crit(l, ps, st) = begin
+            sr(g) = dispersion(l, merge(ps, (log_g = Float32[log(g)],)), st).spectral_radius
+            lo, hi = 1f-5, 1f3
+            for _ in 1:50; m = sqrt(lo*hi); sr(m) < 1 ? (lo = m) : (hi = m); end
+            merge(ps, (log_g = Float32[log(sqrt(lo*hi))],))
+        end
+        mk(c) = PhasorWaveSheet(H, W; transmit = :potential, saturating = false,
+                                init_log_speed = log(c))
+
+        # Weak delay (the old default): the gain peak sits on the phase-band
+        # extremum, so the selected mode carries ~none of the band's transport.
+        lw = mk(40.0); pw, sw = Lux.setup(Xoshiro(1), lw)
+        tw = wave_transport(lw, crit(lw, pw, sw), sw)
+        @test tw.delay_phase < 0.3 * pi
+        @test tw.transport_ratio < 0.15
+        @test tw.verdict === :standing
+
+        # Matched delay (the derived default): selected mode ≈ fastest-transporting.
+        lm = PhasorWaveSheet(H, W; transmit = :potential, saturating = false)
+        pm, sm = Lux.setup(Xoshiro(1), lm)
+        @test exp(pm.log_speed[1]) ≈ 6.0f0 rtol=1f-5           # derived, not 40
+        tm = wave_transport(lm, crit(lm, pm, sm), sm)
+        @test tm.delay_phase ≈ Float32(pi) rtol=1f-3
+        @test tm.transport_ratio > 0.5
+        @test tm.verdict === :traveling
+        @test abs(tm.v_r_star) > 20 * abs(tw.v_r_star)          # ~0.72 vs ~0.002
+
+        # radial_band: the vector average is identically zero at every |q| — the
+        # trap the radial projection avoids — while v_r itself is not.
+        rb = radial_band(lm, crit(lm, pm, sm), sm)
+        @test length(rb.q) == length(rb.v_r) == length(rb.v_vec)
+        @test maximum(rb.v_vec) < 1f-5
+        @test maximum(abs.(rb.v_r)) > 0.5
+        @test all(isfinite, rb.gain)
+    end
+end
 
 function test_wave_propagation()
     @testset "seeded pulse spreads (traveling wave)" begin
@@ -982,10 +1033,19 @@ function test_wave_aniso_coupling()
         #     row-centroid. Drift follows the sign of β_h, is ~0 at β=0, monotone.
         ctr = 20
         centroid_row(z) = (w = abs2.(z); sum((1:H) .* vec(sum(w; dims = 2))) / (sum(w) + 1f-12))
+        # NOTE the explicit init_log_speed. The β sign convention ("+β_h drifts
+        # toward +h") is only well-defined in the WEAK-DELAY regime, where the DoG
+        # contributes no group velocity of its own and advection is the sole source
+        # of drift. At the matched speed c = 2σ_I/T (now the layer default) the DoG
+        # is a backward wave — v_g points opposite to q — so β still biases growth
+        # toward +q_h but those modes travel toward −h, and the measured drift
+        # inverts (verified: drift(+0.8) = −1.01 at c=6 vs +0.67 at c=40). Pinning c
+        # keeps this test on the mechanism it is actually testing.
         function drift(beta)
             l = PhasorWaveSheet(H, W; coupling = :aniso, transmit = :potential,
                                 init_beta_h = Float32(beta), init_beta_w = 0.0,
-                                init_log_g = log(0.5), saturating = false)
+                                init_log_g = log(0.5), saturating = false,
+                                init_log_speed = log(40.0))
             p, s = Lux.setup(Xoshiro(2), l)
             z0 = zeros(ComplexF32, H, W)
             for i in ctr-2:ctr+2, j in ctr-2:ctr+2
@@ -1063,5 +1123,256 @@ function test_wave_shift_coupling()
         p0, s0 = Lux.setup(Xoshiro(1), l0)
         Y0 = PhasorNetworks._wave_rollout(l0, p0, s0, reshape(z0, H, W, 1), nothing, 12)
         @test abs(crow(Y0[:, :, end, 1]) - crow(Y0[:, :, 1, 1])) < 0.5     # no drift
+    end
+end
+
+# ---- The symbol's spectrum sets its transport (report §4.6) -----------
+#
+# `spectral_occupancy` / `transport_forecast` evaluate the band against a code's
+# OWN spatial-frequency content, so the report's concentrated-vs-extended claim
+# becomes computable rather than hand-drawn. The tests pin the reduction against
+# a case with a known exact answer (a plane wave, where the forecast must return
+# the band value at that single mode), then the monotone trend the claim rests
+# on, then the two degenerate media where the answer is analytic.
+
+function test_wave_spectral_transport()
+    @testset "spectral occupancy → transport forecast (§4.6)" begin
+        H = W = 48
+        l = PhasorWaveSheet(H, W; transmit = :potential)
+        p, s = Lux.setup(Xoshiro(1), l)
+        d = dispersion_diagnostics(l, p, s; mode = :potential)
+
+        # (1) EXACTNESS on a single mode. A pure plane wave at q_k occupies one
+        #     bin, so the forecast must collapse to the band's own value there —
+        #     zero spread, vg_mean = v_g(q_k). This is the reduction check: it
+        #     fails loudly if the marginal, the q-grid ordering, or the FFT
+        #     convention ever drift apart from `dispersion_diagnostics`.
+        for k in (3, 5, 8)
+            qk = 2f0 * Float32(pi) * k / H
+            pw = ComplexF32[cis(qk * (i - 1)) for i in 1:H, j in 1:W]
+            so = spectral_occupancy(pw)
+            f = transport_forecast(l, p, s, pw; axis = :h, mode = :potential)
+            idx = findfirst(q -> isapprox(q, qk; atol = 1f-4), d.q)
+            @test isapprox(so.q_dom, qk; atol = 1f-4)
+            @test so.q_width < 1f-4
+            @test isapprox(f.vg_mean, d.v_g[idx]; atol = 1f-4)
+            @test f.vg_spread < 1f-4
+            # the 2-D path must agree on a code that only varies along one axis
+            fb = transport_forecast(l, p, s, pw; axis = :both, mode = :potential)
+            @test isapprox(fb.vg_mean, d.v_g[idx]; atol = 1f-3)
+        end
+        @test isapprox(sum(spectral_occupancy(randn(Xoshiro(3), Float32, H, W)).p), 1f0;
+                       atol = 1f-5)                                   # p is a normalised pmf
+
+        # (1b) ℓ vs w_x — the distinction the forecast turns on. A random FHRR
+        #      payload filling the sheet has uniform intensity, so its ENVELOPE
+        #      width is sheet-scale while its COHERENCE length is one site; a
+        #      smooth field has both large. Scoring survival off w_x would
+        #      predict the random payload is the most robust code there is.
+        φr = 2f0 .* rand(Xoshiro(9), Float32, W) .- 1f0
+        rnd = ComplexF32[cis(Float32(pi) * φr[j]) for i in 1:H, j in 1:W]
+        sr = spectral_occupancy(rnd; axis = :w)
+        @test sr.w_x > 0.2f0 * W                                      # envelope: sheet-wide
+        @test sr.ell <= 2f0                                           # coherence: ~a site
+        smoothf = ComplexF32[cis(Float32(pi) * cos(2f0 * Float32(pi) * j / W)) for i in 1:H, j in 1:W]
+        @test spectral_occupancy(smoothf; axis = :w).ell > 3f0 * sr.ell
+
+        # (2) THE CLAIM: concentrated ⇒ broadband ⇒ short coherence; extended ⇒
+        #     narrowband ⇒ long. Monotone in the code's spatial width.
+        ctr = H ÷ 2
+        wrapd(a, b, n) = min(abs(a - b), n - abs(a - b))
+        disc(r) = ComplexF32[wrapd(i, ctr, H)^2 + wrapd(j, ctr, W)^2 <= r^2 ? 1 : 0
+                             for i in 1:H, j in 1:W]
+        gabor(sg) = ComplexF32[exp(-((i - ctr)^2 + (j - ctr)^2) / (2f0 * sg^2)) *
+                               cis(d.q_star * (i - ctr)) for i in 1:H, j in 1:W]
+        delta = (c = zeros(ComplexF32, H, W); c[ctr, ctr] = 1; c)
+
+        codes = [delta, disc(2), disc(4), disc(8), gabor(6.0), gabor(10.0)]
+        occ = [spectral_occupancy(c) for c in codes]
+        fc = [transport_forecast(l, p, s, c; axis = :h, mode = :potential) for c in codes]
+
+        @test issorted([o.w_x for o in occ])                          # widening ladder
+        @test issorted([o.q_width for o in occ]; rev = true)          # ⇒ narrowing spectrum
+        @test issorted([f.vg_spread for f in fc]; rev = true)         # ⇒ tighter v_g spread
+        @test issorted([f.t_half_pred for f in fc])                   # ⇒ longer survival
+        # The contrast is large, not marginal — the whole point of §4.6.
+        @test fc[1].vg_spread > 4f0 * fc[end].vg_spread
+        @test fc[end].t_half_pred > 10f0 * fc[1].t_half_pred
+        @test all(f -> f.limiter in (:gvd, :gain), fc)
+
+        # (3) RIGID CONVEYOR: :shift has |Ŵ|≡1 and exactly linear phase, so both
+        #     spreading channels vanish and any code survives indefinitely.
+        ls = PhasorWaveSheet(H, W; coupling = :shift, transmit = :potential,
+                             init_shift_h = 1.0, init_shift_w = 0.0,
+                             init_log_neg_lambda = log(5.0), init_log_g = log(0.99))
+        p2, s2 = Lux.setup(Xoshiro(1), ls)
+        fs = transport_forecast(ls, p2, s2, disc(4); axis = :h, mode = :potential)
+        @test fs.vg_spread < 1f-2 && fs.gamma_spread < 1f-2
+        @test isapprox(fs.vg_mean, 1f0; atol = 0.05)                  # drift = the shift
+        @test fs.t_half_pred > 100f0                                  # ≫ any diffusive medium
+        @test fs.d_half_pred > 100f0
+
+        # (4) ISOTROPIC ⇒ d_half_pred = 0 EXACTLY, and that is the right answer:
+        #     a reflection-symmetric band is even, so v̄_g = 0 and the sheet
+        #     carries a symbol nowhere however long it stays coherent. The
+        #     coherence TIME is still finite and positive.
+        fd = fc[4]                                                     # disc(8) on the :dog sheet
+        @test abs(fd.vg_mean) < 1f-3
+        @test fd.d_half_pred < 1f-2
+        @test 0f0 < fd.t_half_pred < Inf32
+
+        # (5) TWO-AXIS: a code whose payload varies across the OTHER axis must be
+        #     scored as fragile, and `axis = :h` alone must miss it. This is the
+        #     correction the measured benchmark forced — the single-axis forecast
+        #     correlated with measured survival at r = +0.12 because it never
+        #     looked at the axis the payload actually lived on.
+        φrand = 2f0 .* rand(Xoshiro(5), Float32, W) .- 1f0
+        smooth_env = Float32[exp(-wrapd(i, ctr, H)^2 / (2f0 * 10f0^2)) for i in 1:H]
+        carry(φ) = ComplexF32[smooth_env[i] * cis(Float32(pi) * φ[j]) for i in 1:H, j in 1:W]
+        f_h = transport_forecast(l, p, s, carry(φrand); axis = :h, mode = :potential)
+        f_b = transport_forecast(l, p, s, carry(φrand); axis = :both, mode = :potential)
+        @test f_b.t_half_pred < f_h.t_half_pred            # the column axis binds
+        # the same envelope carrying a SMOOTH payload must survive longer
+        φsm = Float32[cos(2f0 * Float32(pi) * j / W) for j in 1:W]
+        f_sm = transport_forecast(l, p, s, carry(φsm); axis = :both, mode = :potential)
+        @test f_sm.t_half_pred > f_b.t_half_pred
+
+        # (6) argument validation: the code has to live on the sheet.
+        @test_throws DimensionMismatch transport_forecast(l, p, s, zeros(ComplexF32, H + 2, W))
+        @test_throws ArgumentError transport_forecast(l, p, s, disc(4); axis = :bogus)
+        @test_throws ArgumentError spectral_occupancy(disc(4); axis = :bogus)
+    end
+end
+
+# ---- Emission threshold + homeostasis ---------------------------------
+#
+# `:spike` transmission is `z/√(|z|²+θ²)`. θ used to be a hardcoded numerical
+# guard (`√1e-8 = 1e-4`); it is really the sheet's FIRING THRESHOLD, and at that
+# value it was ~5 orders of magnitude below the scale the coupling actually
+# operates at, so every site above 1e-4 emitted a full spike. These tests pin
+# the three things that fixes:
+#
+#   1. θ has a derived scale, `g·max|Ŵ|`, that tracks `g` exactly.
+#   2. Below threshold the spike sheet IS the linear medium at gain `g/θ`, so
+#      the whole `dispersion` toolchain becomes valid for it.
+#   3. Homeostasis regulates θ to a target firing rate, which is what keeps the
+#      sheet in the (only ≈1.3× wide) usable band as `g` moves.
+#
+# Note on strength: before this test existed, the whole suite passed unchanged
+# with θ moved by five orders of magnitude — the spike-mode coverage was all
+# shape/finiteness. These assertions are on dynamics.
+
+function test_wave_emission_threshold()
+    @testset "emission threshold + homeostasis" begin
+        rng = Xoshiro(23)
+
+        # ---- 1. θ_ref = g·max|Ŵ| scales EXACTLY with g -------------------
+        base = PhasorWaveSheet(32, 32)
+        p0, s0 = Lux.setup(rng, base)
+        θ1 = emission_threshold(base, p0, s0)
+        for f in (0.3f0, 3f0, 10f0)
+            lg = PhasorWaveSheet(32, 32; init_log_g = log(f))
+            pg, sg = Lux.setup(rng, lg)
+            @test emission_threshold(lg, pg, sg) ≈ f * θ1 rtol=1f-4
+        end
+
+        # ---- 2. derived default = init_theta_frac × θ_ref -----------------
+        @test exp(only(p0.log_theta)) ≈ 1.4f0 * θ1 rtol=1f-4
+        lf = PhasorWaveSheet(32, 32; init_theta_frac = 2.0)
+        pf, _ = Lux.setup(rng, lf)
+        @test exp(only(pf.log_theta)) ≈ 2f0 * θ1 rtol=1f-4
+        le = PhasorWaveSheet(32, 32; init_log_theta = log(3.0))
+        pe, _ = Lux.setup(rng, le)
+        @test exp(only(pe.log_theta)) ≈ 3f0 rtol=1f-5
+
+        # :potential carries no threshold, so homeostasis has nothing to regulate.
+        lp = PhasorWaveSheet(32, 32; transmit = :potential)
+        pp, _ = Lux.setup(rng, lp)
+        @test !haskey(pp, :log_theta)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; homeostasis = :bogus)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential,
+                                                   homeostasis = :global)
+
+        # ---- 3. subthreshold linearization: spike at θ ≡ potential at g/θ --
+        # For |z| ≪ θ the emit is z/θ, so the sheet IS the linear medium at
+        # effective gain g/θ. Seed far below threshold and compare rollouts.
+        θbig = 200f0
+        lsp = PhasorWaveSheet(24, 24; transmit = :spike, init_log_theta = log(θbig))
+        lpo = PhasorWaveSheet(24, 24; transmit = :potential,
+                              init_log_g = log(1.0 / θbig))
+        psp, ssp = Lux.setup(rng, lsp); ppo, spo = Lux.setup(rng, lpo)
+        z0 = zeros(ComplexF32, 24, 24); z0[1,1] = 1f-3
+        tsp = wave_simulate(lsp, psp, ssp; z0 = z0, L = 20)
+        tpo = wave_simulate(lpo, ppo, spo; z0 = z0, L = 20)
+        @test maximum(abs.(tsp .- tpo)) / maximum(abs.(tpo)) < 1f-3
+        # ...and `dispersion` reports that effective gain, which is what makes
+        # radial_band / wave_transport meaningful on a spike sheet at all.
+        @test dispersion(lsp, psp, ssp).spectral_radius ≈
+              dispersion(lpo, ppo, spo).spectral_radius rtol=1f-4
+
+        # ---- 4. the legacy threshold floods; the derived one does not ------
+        N = 48
+        zi = zeros(ComplexF32, N, N); zi[1,1] = 1f0
+        lold = PhasorWaveSheet(N, N; init_log_theta = log(1f-4))
+        pold, sold = Lux.setup(rng, lold)
+        Zold = wave_simulate(lold, pold, sold; z0 = zi, L = 60)
+        @test mean(abs.(Zold[:, :, 60]) .> 1f-4) > 0.99     # whole sheet ignited
+
+        lnew = PhasorWaveSheet(N, N)
+        pnew, snew = Lux.setup(rng, lnew)
+        Znew = wave_simulate(lnew, pnew, snew; z0 = zi, L = 400)
+        θnew = exp(only(pnew.log_theta))
+        @test mean(abs.(Znew[:, :, 400]) .> θnew) < 0.5     # sparse, not flooded
+        # Structure survives. Collapse to a spatially uniform sheet is the
+        # failure mode a rate-only check cannot see.
+        @test std(abs.(Znew[:, :, 400])) > 0.5f0
+
+        # ---- 5. :global regulates the rate and tracks g -------------------
+        tr_g = Dict{Float32,Any}()
+        for g in (0.1f0, 1f0, 10f0)
+            lh = PhasorWaveSheet(N, N; homeostasis = :global, init_log_g = log(g))
+            ph, sh = Lux.setup(Xoshiro(5), lh)
+            tr_g[g] = wave_homeostat_trace(lh, ph, sh; z0 = zi, L = 500)
+        end
+        for (g, tr) in tr_g
+            @test 0.005f0 < mean(tr.fire[401:500]) < 0.05f0        # target is 0.02
+            @test 8f0 < tr.theta_g[end] / g < 16f0                 # θ ∝ g
+            @test mean(tr.std_abs[401:500]) /
+                  mean(tr.mean_abs[401:500]) > 0.2f0               # still structured
+        end
+        # A fixed θ cannot do this: it is calibrated at one g and the usable
+        # band is only ≈1.3× wide.
+        @test tr_g[10f0].theta_g[end] / tr_g[0.1f0].theta_g[end] > 50f0
+
+        # ---- 6. :local builds refractoriness the global term cannot -------
+        ll = PhasorWaveSheet(N, N; homeostasis = :local)
+        pl, sl = Lux.setup(Xoshiro(5), ll)
+        tr_l = wave_homeostat_trace(ll, pl, sl; z0 = zi, L = 500)
+        @test tr_l.theta_l_spread[end] > 1.2f0                     # per-site spread built up
+        @test tr_g[1f0].theta_l_spread[end] == 1f0                 # :global leaves it flat
+        @test 0.005f0 < mean(tr_l.fire[401:500]) < 0.05f0          # still on target
+
+        # ---- 7. gradients reach every new parameter -----------------------
+        # L must be long enough for the sheet to charge past θ: below threshold
+        # `fire ≡ 0`, so the homeostat parameters get exactly no signal. This is
+        # correct (refractoriness has nothing to modulate) but it means short
+        # rollouts on a fresh sheet will not train them.
+        S = 24; L = 60
+        lg2 = PhasorWaveSheet(S, S; homeostasis = :local)
+        pg2, sg2 = Lux.setup(Xoshiro(3), lg2)
+        x = Phase.(2f0 .* rand(Xoshiro(4), Float32, S*S, L, 2) .- 1f0)
+        val, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(lg2(x, p, sg2)))), pg2)
+        @test isfinite(val)
+        for k in (:log_theta, :log_eta_g, :log_eta_l, :logit_target, :log_theta_beta)
+            gk = getproperty(gs[1], k)
+            @test all(isfinite, gk)
+            @test any(abs.(gk) .> 0)
+        end
+
+        # ---- 8. the DEQ fixed point is incompatible with a moving θ -------
+        ld = PhasorWaveSheet(16, 16; homeostasis = :global)
+        pd, sd = Lux.setup(rng, ld)
+        @test_throws ArgumentError wave_simulate(ld, pd, sd;
+            z0 = zeros(ComplexF32, 16, 16), L = 6, mode = :deq)
     end
 end
