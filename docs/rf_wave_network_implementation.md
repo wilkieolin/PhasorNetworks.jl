@@ -36,9 +36,10 @@ biophysical spec maps onto algebra we already have:
 | R&F unit `(−λ+iω)z` | `k = -exp(log_neg_lambda) + i·ω` | already the SSM eigenvalue |
 | Distance kernel `W(r)` (DoG) | recurrent `W_rec·z`; translation-invariant ⇒ a **spatial convolution** | new: `_build_coupling` in `wave.jl` |
 | Conduction delay `τ_ij` | **complex phase factor `e^{-iωτ}`** on the shared carrier (§2.1) | folded into the complex kernel |
-| Spike-triggered adaptation `a_i` | slow real aux-state, `|z|`-driven (soft) | optional `use_adaptation` |
+| Spike-triggered adaptation `a_i` | slow real aux-state, `\|z\|`-driven (soft) | optional `use_adaptation` |
 | Short-term depression `d_j` | slow multiplicative gain (soft) | future work |
-| Threshold + reset | phase-only saturation (`normalize_to_unit_circle`) for training; hard threshold at demo time | `saturating` flag |
+| Threshold + reset | **emission threshold `θ`** on the transmitted spike, `z/√(\|z\|²+θ²)`; derived default, optionally homeostatic (§4-ter) | `init_log_theta`, `homeostasis` |
+| Intrinsic excitability homeostasis | per-site slow `θ` adaptation; the refractoriness that makes the packet travel | `homeostasis = :local` |
 | Balanced `∝ g/√K`, `∫W≈0` | zero-mean DoG + gain `g` | kernel construction |
 | Branching ratio σ≈1 | **spectral radius of the per-mode step multiplier ≈ 1** (§2.2) | `dispersion()` |
 
@@ -115,6 +116,22 @@ saturating sheet holds `|z| ≡ 1` yet keeps all its phase content.
 > symmetry-breaking (anisotropic coupling / directional delay) — which the plan
 > itself flags as the research frontier. That belongs to the amplitude-preserving
 > Tier-2 work, not this first milestone.
+>
+> *Update (matched-speed work, §4-bis):* the symmetry-breaking requirement applies
+> to **directional** transport. Radially expanding waves with a moving amplitude
+> envelope come out of the isotropic kernel alone once the conduction delay is
+> matched — no adaptation and no anisotropy. Adaptation remains the route to
+> refractoriness (no back-propagation), which the delay mechanism does not supply,
+> and the Muller et al. review does *not* rank it as the primary wave generator.
+>
+> *Update (threshold work, §4-ter):* refractoriness now has a second, better
+> implementation — `homeostasis = :local`, a slow per-site **firing threshold**.
+> It beats `use_adaptation` on two counts: it modulates *emission* rather than
+> adding `−ia` to the state, so it cannot spuriously rotate phase, and it is the
+> same mechanism as the activity regulation the sheet needs anyway. Measured, it
+> is what turns the standing localized blob that `:global` produces into a
+> traveling one (net drift ≈3×). `use_adaptation` is untouched but is now the
+> second-choice route.
 
 ---
 
@@ -180,7 +197,16 @@ layer = PhasorWaveSheet(H, W;
     use_adaptation   = false,    # slow negative feedback (bump → traveling wave)
     init_log_g       = log(1.0), # recurrent gain — the criticality knob
     init_A_exc, init_log_sigma_exc, init_B_inh, init_log_sigma_inh,  # DoG shape
-    init_log_speed   = log(8.0), # conduction speed c (pixels/period); τ(r)=r/c
+    init_log_speed   = nothing,  # conduction speed c (sites/period); τ(r)=r/c.
+                                 # DERIVED by default: c = 2σ_I/T (§4-bis)
+    # --- emission threshold (transmit = :spike only), §4-ter ---
+    init_log_theta   = nothing,  # firing threshold θ; emit = z/√(|z|²+θ²).
+                                 # DERIVED by default: θ = frac · g·max|Ŵ|
+    init_theta_frac  = 1.4,      # multiplier on that reference
+    homeostasis      = :none,    # :none | :global | :local  — regulate θ to a target rate
+    init_log_eta_g   = log(0.15), init_log_eta_l = log(0.02),
+    init_logit_target = log(0.02/0.98),   # target firing rate, logit-parameterized
+    init_log_theta_beta = log(0.05),
     spk_args         = SpikingArgs())   # supplies shared ω, T
 ```
 
@@ -198,7 +224,12 @@ layer = PhasorWaveSheet(H, W;
 - **`dispersion(layer, ps, st; mode=:discrete)`** — `(; M, spectral_radius,
   k_eff, W_hat, growth_rate)` per spatial mode (§2.2; full derivation in
   [`wave_dispersion_derivation.md`](wave_dispersion_derivation.md)).
-  `mode=:continuous` returns the exact ODE operator eigenvalue.
+  `mode=:continuous` returns the exact ODE operator eigenvalue. On a `:spike`
+  sheet it substitutes the subthreshold effective gain `g/θ` (§4-ter).
+- **`radial_band` / `wave_transport` / `matched_conduction_speed`** — the
+  standing-vs-traveling surface (§4-bis).
+- **`emission_threshold` / `wave_homeostat_trace`** — the firing-threshold
+  surface (§4-ter). The trace is the only way to see `θ`, which is rollout-local.
 
 Coupling defaults to a parametric difference-of-Gaussians (`coupling = :dog`, a
 handful of interpretable trainable scalars), so ablations are one-liners:
@@ -207,19 +238,124 @@ criticality. `coupling = :stencil` swaps in a free learnable kernel (§5-bis).
 
 ---
 
+## 4-bis. Conduction speed: the standing-vs-traveling knob
+
+A critical sheet is not automatically a *propagating* one. Because the kernel is
+reflection-symmetric, `±q` are amplified equally, so an impulse always launches
+counter-propagating pairs; whether they separate into a traveling ring or overlap
+into a standing pattern is decided by the group velocity at the selected mode.
+Weak conduction delay forces `v_g(q*) → 0` identically — see
+[`wave_dispersion_derivation.md`](wave_dispersion_derivation.md) §3-bis for the
+derivation. The escape is to match the delay phase across the surround to half a
+cycle:
+
+```
+φ = ω σ_I / c ≈ π    ⟺    c = 2 σ_I / T      # matched_conduction_speed(σ_I, T)
+```
+
+`init_log_speed` therefore **derives** this by default rather than taking a fixed
+value — a constant default silently drifts back into the standing regime whenever
+`σ_I` or `t_period` changes. At the default shape this gives `c = 6`, versus the
+`40` (and this document's earlier `8`) previously in use:
+
+| | `c` | `φ` | `g_crit` | transport ratio | verdict |
+|---|---|---|---|---|---|
+| previous | 40 | 0.15π | 0.026 | 0.028 | standing |
+| matched | 6 | 1.00π | 0.069 | 0.995 | **traveling** |
+
+Check any sheet with `wave_transport(l, ps, st).verdict` (evaluate at criticality —
+well above it the DC mode wins and everything reports `:standing`). The traveling
+window is narrow, `c ∈ [3.2, 6.8]`.
+
+Two caveats that matter for design, both detailed in §3-ter of the derivation:
+`c` is a **phase parameter on an instantaneous coupling**, not a transport delay,
+so `v/c` is not comparable to the cortical wave-speed/conduction-speed ratio; and
+this analysis reaches `:spike` only in its *subthreshold* regime (§4-ter). There
+is still no relay front in the axonal sense — the coupling is one instantaneous
+FFT convolution per step whatever `c` is.
+
+---
+
+## 4-ter. Emission threshold: the knob that makes `:spike` analysable
+
+`:spike` transmits `z/√(|z|²+θ²)`. Until recently `θ` was the hardcoded `ε` guard
+of `normalize_to_unit_circle` (`√1e-8 = 1e-4`) — five orders of magnitude below
+the scale the coupling operates at, so every site above `1e-4` emitted a *full*
+spike and an impulse became an ignition cascade rather than a wave. `θ` is now an
+exposed, trainable parameter. Full derivation and measurements in §3-quater of
+[`wave_dispersion_derivation.md`](wave_dispersion_derivation.md); the design
+consequences:
+
+**It interpolates between the two transmission modes.** For `|z| ≫ θ` the emit is
+`z/|z|` (hard spike); for `|z| ≪ θ` it is `z/θ` — *linear*, i.e. the `:potential`
+medium at gain `g/θ`. So a spike sheet now has an exact subthreshold dispersion,
+and `dispersion` / `radial_band` / `wave_transport` become valid for it. This is
+what `dispersion` reports.
+
+**The default is derived.** `θ_ref = g·max_q|Ŵ(q)|` — the drive a site receives
+when its whole neighbourhood emits unit spikes in phase, i.e. *fire only on
+near-maximal local coherence*. Measured `θ* ∝ g` **exactly**; the layer default is
+`1.4 × θ_ref`, because `θ_ref` itself sits just below the flood boundary.
+
+**A constant `θ` is not sufficient.** The usable band is only ≈1.3× wide and moves
+with `g`, so a fixed value falls out of regime as soon as `g` trains — the same
+failure mode as the old fixed `c = 40`.
+
+| `homeostasis` | what it does | measured |
+|---|---|---|
+| `:none` | fixed `θ` | correct only at the `g` it was derived for |
+| `:global` | scalar `θ_g` → target firing rate | tracks `g` over 100× (`θ_g/g` = 11.7 / 11.9 / 11.3); gives a **standing** localized blob |
+| `:local` | `:global` + slow zero-sum per-site `θ_l` | refractoriness; net drift ≈3× the standing case at `η_l ∈ [0.01, 0.02]` |
+
+Local-only is deliberately not offered — on its own the per-site term can only hit
+its target by silencing whoever just fired, giving rate-regulated flicker
+(step-to-step overlap of the active set measured at exactly 0).
+
+Three implementation points that are load-bearing rather than incidental:
+- The fire indicator is a **straight-through estimator** (hard `|z|>θ` forward,
+  sigmoid backward). Any smooth pointwise indicator lets the homeostat hit its
+  target with a *uniform subthreshold* sheet — measured: target met exactly, zero
+  sites firing.
+- `mode = :deq` **throws** with homeostasis on: a sweep-dependent `θ` breaks the
+  fixed point's exact-reproduction guarantee.
+- A real threshold means a **charging transient**. Unit drive alone saturates at
+  `1/(1−|A|) ≈ 7.2`, below the default `θ ≈ 10.6`, so firing needs ~50 steps of
+  recurrent build-up. Short rollouts see no spikes and `η_l` gets no gradient.
+
+> **Validated at the default `λ = 0.15` only**, across `g ∈ [0.3, 3]`,
+> `N ∈ [48, 96]`, couplings `:dog`/`:aniso`/`:stencil`. At `λ ≥ 0.5` the homeostat
+> still regulates the rate to target but with a synchronously bursting sheet.
+> Hitting the rate is necessary, not sufficient — check `std|z|` via
+> `wave_homeostat_trace`.
+
+---
+
 ## 5. Demos (in dependency order)
 
 1. **Dispersion, wave-speed & self-limiting (no training)** — *shipped*,
    `demos/wave_dispersion.jl`. Pure forward simulation, lowest risk, visual
    payoff. Demonstrates: (i) closed-form dispersion + a computed critical gain
-   (`spectral_radius = 1`); (ii) a seeded pulse propagating at a measurable
-   speed; and the plan's decisive ablations — (iii) remove inhibition → the
-   wavelength-selecting ring collapses to a uniform front (fastest mode → DC);
-   (iv) detune `g` → extinguish / sustain / saturate; (v) phase-only saturation
-   self-limits amplitude where the linear medium diverges; and (vi) **Tier-1 ↔
-   Tier-2 equivalence** — the discrete recurrence and the continuous ODE track
-   each other at field similarity 0.997–0.9997. *(The plan's "remove adaptation →
-   standing bump" ablation is deferred — see §2.3.)*
+   (`spectral_radius = 1`); (ii) the gain band `Γ(|q|)` and the propagation band
+   `v_r(|q|)` together, with the transport verdict (§4-bis) and a wavepacket
+   measurement overlaid as an independent check; and the plan's decisive
+   ablations — (iii) remove inhibition; (iv) detune `g` → extinguish / sustain /
+   saturate; (v) phase-only saturation self-limits amplitude where the linear
+   medium diverges; and (vi) Tier-1 ↔ Tier-2 comparison. *(The plan's "remove
+   adaptation → standing bump" ablation is deferred — see §2.3.)*
+
+   Two results here changed when the sheet moved to the matched conduction speed,
+   and the earlier wording overstated both:
+
+   - **The inhibition ablation is regime-dependent.** At weak delay the Mexican hat
+     is the only wavelength selector, so `B_inh = 0` collapses the peak to DC (a
+     uniform front) — that is what this document previously claimed flatly. At the
+     matched speed the delay phase varies by ~π across the kernel and selects a
+     wavelength on its own, so the ring *survives* the ablation (peak `|q|` moves
+     0.524 → 1.242 rather than → 0). The demo now computes both regimes.
+   - **Tier-1 ↔ Tier-2 agreement is not 0.997–0.9997 at this operating point.** The
+     `O(g·T)` splitting gap scales with `g_crit`, which the matched regime raises
+     2.7×; field similarity at `t=60` falls to 0.56. It tracks `g_crit`, not `c`.
+     See §4 of the derivation doc.
 2. **Trainable wave classifier on FashionMNIST** — *shipped*,
    `demos/wave_fashionmnist.jl`. Inject the image as a spatial drive on a
    28×28 sheet, propagate `L` steps, collapse to the last-step phase field, and
@@ -345,12 +481,38 @@ readout so the sheet's phase field is what gets classified.
 
 - **Criticality ≠ linear SSM** — train near-marginal (Tier 1); reserve
   avalanche/power-law claims for the nonlinear demo-mode.
-- **Delay-as-phase exact only on the carrier ω** — approximate for broadband.
-- **Traveling *bumps* (amplitude packets) need symmetry-breaking** — an
-  isotropic kernel + symmetric seed spreads rather than translates; a genuine
-  moving bump needs anisotropic coupling / directional delay (plan §06). The
-  shipped demo therefore demonstrates *traveling waves* (phase fronts) and
-  *self-limiting*, not moving bumps.
+- **Delay-as-phase exact only on the carrier ω** — approximate for broadband. And
+  note it is a *phase*, not a lag: the coupling is instantaneous, so `c` shapes the
+  band but does not gate how fast activity reaches a site (§4-bis, and §3-ter of
+  the derivation doc). A true relay mechanism would need real delayed coupling.
+- **Radial transport does *not* need symmetry-breaking — directional transport
+  does.** This item previously read "an isotropic kernel + symmetric seed spreads
+  rather than translates", and concluded the shipped demo showed traveling phase
+  fronts. Both need correction. An isotropic kernel *can* produce a genuine
+  radially-expanding wave with a moving amplitude envelope, provided the
+  conduction delay is matched (§4-bis); measured on 192², the radial-profile peak
+  marches at 0.71 sites/period. What the demo actually showed at the old `c = 40`
+  was a **standing** ring pattern whose crests are pinned for hundreds of steps —
+  only the *phase* advanced (at `v_p ≈ 0.08`), which is why a phase-coloured
+  animation read as a traveling wave. Symmetry-breaking (`:aniso`, `:shift`) is
+  what a *net-drift* wave needs, not an expanding one.
+  - Caveat on `:aniso` at the matched speed: the DoG becomes a backward wave
+    (`v_g` opposite to `q`), so `β_h > 0` biases growth toward `+q_h` while the
+    packet travels toward `−h` — the drift sign inverts relative to the weak-delay
+    convention (measured: `+0.67` at `c=40`, `−1.01` at `c=6`).
+- **The threshold work is calibrated at one damping.** §4-ter's derived default
+  and homeostat defaults were measured at `λ = 0.15`. At `λ ≥ 0.5` the homeostat
+  regulates the firing rate to target but the sheet bursts synchronously rather
+  than forming structure, and the `1.4` multiplier lands on the extinct side
+  (`θ*/θ_ref` falls to 0.71 by `λ = 1.5`). Anyone moving `λ` must re-measure. This
+  interacts with the open question of whether `λ` should move at all — the
+  matched-speed work found `v/c` improves with damping up to `λ ≈ 1.2`, which is
+  squarely in the un-validated region.
+- **Homeostat stability has sharp edges.** Measured failures, all recoverable but
+  none obvious: target `0.10` at `η_g = 0.15` collapses the sheet to uniform;
+  `η_l ≥ 0.05` decoheres the packet; and adding a restoring prior toward `θ_ref`
+  (which looks like an obvious robustness win, and is one at `λ = 0.15`)
+  permanently kills the sheet at other `λ`.
 - **Patchy connectivity** (Davis 2024 feature-selective motifs) breaks FFT
   diagonalization — keeps differentiability but loses the closed-form
   dispersion/criticality readout; budget sparse-conv cost.

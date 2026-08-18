@@ -204,6 +204,23 @@ genuine front-excited / rear-inhibited wave requires <em>breaking</em> that symm
 adaptation current that leaves a refractory wake, or an anisotropic (advective) coupling — which
 is the subject of §10. Until then, read "transport" as symmetric spreading plus interference,
 not a directed front.</p>
+
+<p class="small"><strong>Amendment (2026-08-14).</strong> The "either … or" above was written for
+the <em>linear</em> sheet and is wrong for the <strong>saturated spike branch</strong>, where the
+adaptation half of the disjunction buys nothing. In <code>:spike</code> the Kuramoto generator is
+built from \(RW=\tfrac12[\hat W(q)+\overline{\hat W(-q)}]=\mathcal F\{\operatorname{Re}W(d)\}\),
+and for an isotropic delayed kernel \(\operatorname{Re}W(d)=\mathrm{mag}(r)\cos(\omega r/c)\) is
+real and even — so its transform is real, \(\operatorname{Im}\Lambda\equiv0\) (measured
+\(6\times10^{-8}\), roundoff), and there is <em>no propagating branch at all</em> for an
+adaptation current to ride. Breaking the kernel's reflection symmetry is the only one of the two
+that works there. Two further routes also postdate this sentence: a slow zero-sum
+<strong>per-site homeostatic threshold</strong> (<code>homeostasis = :local</code>), which is
+what turns the standing localized blob that global homeostasis alone produces into a travelling
+packet; and the <strong>regenerative + refractory pair</strong> of
+<code>ExcitableWaveSheet</code>, which gives an autonomous front whose speed is
+amplitude-invariant to 1%. Note also that this whole caution is about <em>net</em> transport: the
+isotropic sheet does travel radially once the conduction delay is matched
+(\(c=2\sigma_I/T\), §10), it just carries a symbol nowhere on average.</p>
 </div>
 
 <p>This reframing fixes the properties we want from the substrate, and the order in which the
