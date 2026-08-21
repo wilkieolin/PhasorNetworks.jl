@@ -181,6 +181,8 @@ ep_gradient,
 ep_train,
 ep_loss,
 fd_gradient_phasor,
+codebook_logits,
+ep_predict,
 chain_hebbians,
 
 #metrics

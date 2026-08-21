@@ -77,7 +77,7 @@ Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
 | **Attractor SSM** | `src/attractor_ssm.jl` | `AttractorPhasorSSM`: Hopfield-style attractor pull toward learned phasor codes |
 | **Datasets** | `src/datasets.jl` | Dataset loaders (`fashion_mnist_data`) with Scratch.jl caching |
 | **HEP** | `src/hep.jl` | Holomorphic Equilibrium Propagation (`hep_train`, `hep_energy`) |
-| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `StaticEP`/`LockinEP`) |
+| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `ep_predict`, `StaticEP`/`LockinEP`); minibatched |
 | **Wave** | `src/wave.jl` | `PhasorWaveSheet` dynamics |
 | **Velocity** | `src/velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
 | **Constants** | `src/constants.jl` | Global constants: `N_THREADS` (CUDA), `pi_f32`, device handles |

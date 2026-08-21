@@ -9,12 +9,29 @@
 # (no holomorphic activation, so Liouville does not apply — see
 # docs/phasor_ep_design.md).
 #
-# Phase 1 scope:
-#   * PhasorDense layers only
-#   * StaticEP method only (lock-in / contour follow later)
-#   * SimilarityCost only (codebook-cross-entropy follows later)
-#   * K = 0 self-energy (ignore log_neg_lambda / omega)
-#   * use_bias = false required
+# Current scope:
+#   * PhasorDense layers only. A new layer type needs methods for
+#     ep_drive / ep_feedback / ep_self_force / ep_hebbian (§2);
+#     ep_energy_contribution is diagnostic and optional. Note that
+#     phasor_settle also requires an `out_dims` field, so parameterless
+#     layers (e.g. Codebook) cannot sit inside an EP chain — pull their
+#     codes out and pass them to CodebookCost instead.
+#   * Gradient estimators: StaticEP (one-sided or centered finite
+#     difference) and LockinEP (temporal real-probe demodulation).
+#   * Costs: SimilarityCost and CodebookCost, both batched.
+#   * Self-energy: K_mode = :zero (default) or :stored. The :stored path
+#     needs dt <= 0.1 or an omega override to settle at all.
+#   * use_bias is supported and FD-verified, and is effectively required
+#     in practice — real W plus an entrywise unit projection is
+#     axis-preserving, so without a complex bias whole input classes stay
+#     locked to one axis (see demos/lockin_demo.ipynb §7.1).
+#
+# Batching: states are `(out_dims,)` for a single sample or
+# `(out_dims, B)` for a minibatch, on one code path. Every operation in
+# _phasor_step is column-separable, so a batched settle is exactly B
+# independent settles. The 1/B normalization lives on the Hebbian
+# (§ep_hebbian), NOT on nudge_force — each sample must see the full
+# per-sample nudge amplitude or the linear response shrinks by B.
 #
 # Energy function being descended:
 #   Phi = sum_l Re<W_l z_{l-1}, z_l>  -  beta * C(z_L, y)
@@ -26,6 +43,22 @@
 # ================================================================
 
 abstract type AbstractEPCost end
+
+# ---- batch-shape helpers ----------------------------------------
+# EP states are either a plain `(d,)` vector (single sample, the
+# original Phase-1 interface) or a `(d, B)` matrix (minibatch). Every
+# operation in `_phasor_step` is column-separable, so a batched settle
+# is exactly B independent settles; these helpers keep the two shapes
+# on one code path.
+_feature_dim(z::AbstractVector) = length(z)
+_feature_dim(z::AbstractMatrix) = size(z, 1)
+
+_batch_size(z::AbstractVector) = 1
+_batch_size(z::AbstractMatrix) = size(z, 2)
+
+# Sum over the batch dimension, returning a `(d,)` vector either way.
+_sum_batch(z::AbstractVector) = z
+_sum_batch(z::AbstractMatrix) = vec(sum(z; dims = 2))
 
 """
     SimilarityCost(y::AbstractVector{<:Complex})
@@ -39,7 +72,7 @@ The nudge force `(β/d) * y` uses the **real-parameter convention**
 weights — see `docs/phasor_ep_design.md`, section "Subtle convention
 point".
 """
-struct SimilarityCost{T<:AbstractVector{<:Complex}} <: AbstractEPCost
+struct SimilarityCost{T<:AbstractVecOrMat{<:Complex}} <: AbstractEPCost
     y::T
 end
 
@@ -60,8 +93,29 @@ function ep_loss end
 
 # Real-parameter convention: factor of 1/d, NOT 1/(2d).
 # Do not "fix" — see docs/phasor_ep_design.md.
-nudge_force(c::SimilarityCost, z_o, β) = (β / length(z_o)) .* c.y
-ep_loss(c::SimilarityCost, z_o)        = one(Float32) - real(dot(c.y, z_o)) / length(z_o)
+#
+# Batch convention (see `ep_hebbian`): the nudge is applied at FULL
+# per-sample amplitude β — it is NOT divided by the batch size. Each
+# column of `z_o` is an independent settle, and shrinking the nudge by
+# B would shrink the linear response by B and destroy the
+# finite-difference SNR the EP estimate depends on. The 1/B lives on
+# the Hebbian instead. `ep_loss` does average over the batch, since
+# that is a reporting quantity rather than a force.
+nudge_force(c::SimilarityCost, z_o, β) = (Float32(β) / _feature_dim(z_o)) .* c.y
+
+# Single-sample path keeps the original `dot` reduction verbatim. Both
+# this loss and `fd_gradient_phasor` are cancellation-sensitive in
+# Float32 (FD at ε=1e-5 against an O(1) loss), so changing the
+# summation algorithm here visibly moves the FD oracle. Do not merge
+# these two methods.
+ep_loss(c::SimilarityCost, z_o::AbstractVector) =
+    one(Float32) - real(dot(c.y, z_o)) / length(z_o)
+
+function ep_loss(c::SimilarityCost, z_o::AbstractMatrix)
+    d = size(z_o, 1)
+    s = real.(sum(conj.(c.y) .* z_o; dims = 1)) ./ Float32(d)
+    return one(Float32) - Float32(mean(s))
+end
 
 """
     CodebookCost(codes::AbstractMatrix{<:Complex}, y_onehot::AbstractVector)
@@ -86,7 +140,7 @@ Sign flip relative to the SimilarityCost case is correct: we're
 pulling z_o toward the target codeword, which means pulling AWAY
 from the wrongly-active codewords (`err > 0`).
 """
-struct CodebookCost{C<:AbstractMatrix{<:Complex}, T<:AbstractVector{<:Real}} <: AbstractEPCost
+struct CodebookCost{C<:AbstractMatrix{<:Complex}, T<:AbstractVecOrMat{<:Real}} <: AbstractEPCost
     codes::C
     y_onehot::T
 end
@@ -99,30 +153,69 @@ function CodebookCost(codes::AbstractMatrix{<:Complex}, y_class::Integer)
     return CodebookCost(codes, y_oh)
 end
 
+# Batched: a vector of 1-based class indices becomes a (n_classes, B)
+# one-hot matrix, one column per sample.
+function CodebookCost(codes::AbstractMatrix{<:Complex},
+                      y_classes::AbstractVector{<:Integer})
+    n_classes = size(codes, 2)
+    @assert all(1 .<= y_classes .<= n_classes) "y_classes out of range: expected 1..$n_classes"
+    y_oh = zeros(Float32, n_classes, length(y_classes))
+    for (b, cls) in enumerate(y_classes)
+        y_oh[cls, b] = one(Float32)
+    end
+    return CodebookCost(codes, y_oh)
+end
+
 function _codebook_logits(c::CodebookCost, z_o)
-    d = length(z_o)
+    d = _feature_dim(z_o)
     return real.(adjoint(c.codes) * z_o) ./ Float32(d)
 end
 
-function _softmax(s::AbstractVector{<:Real})
-    s_shift = s .- maximum(s)
-    e = exp.(s_shift)
-    return e ./ sum(e)
+# Column-wise softmax. `dims=1` matters: a global reduction would mix
+# samples across the batch.
+function _softmax(s::AbstractArray{<:Real})
+    e = exp.(s .- maximum(s; dims = 1))
+    return e ./ sum(e; dims = 1)
 end
 
 function ep_loss(c::CodebookCost, z_o)
     s = _codebook_logits(c, z_o)
-    s_shift = s .- maximum(s)
-    log_probs = s_shift .- log(sum(exp.(s_shift)))
-    return -sum(c.y_onehot .* log_probs)
+    s_shift = s .- maximum(s; dims = 1)
+    log_probs = s_shift .- log.(sum(exp.(s_shift); dims = 1))
+    return -sum(c.y_onehot .* log_probs) / Float32(_batch_size(z_o))
 end
 
+# Full per-sample nudge amplitude — no 1/B here; see the note on
+# `nudge_force(::SimilarityCost, ...)`.
 function nudge_force(c::CodebookCost, z_o, β)
     s   = _codebook_logits(c, z_o)
     err = _softmax(s) .- c.y_onehot
-    d   = length(z_o)
+    d   = _feature_dim(z_o)
     return -(Float32(β) / d) .* (c.codes * err)
 end
+
+# Cost placeholder for inference-only settles. `phasor_settle` requires
+# an AbstractEPCost, but at β = 0 the cost is never consulted for the
+# settle direction — this makes that explicit rather than passing a
+# throwaway target.
+struct NullCost <: AbstractEPCost end
+nudge_force(::NullCost, z_o, β) = zero(z_o)
+ep_loss(::NullCost, z_o)        = zero(Float32)
+
+"""
+    codebook_logits(codes::AbstractMatrix{<:Complex}, z_o) -> AbstractArray
+
+Per-class similarity logits `s_c = (1/d)·Re⟨code_c, z_o⟩` for a settled
+output state `z_o` (a `(d,)` vector or a `(d, B)` batch). Returns
+`(n_classes,)` or `(n_classes, B)`.
+
+This is the same kernel `CodebookCost` nudges against, exposed so that
+a settled network can be scored without constructing a cost. Feeds
+`predict(·, :similarity)` and `evaluate_accuracy` directly — note those
+return **1-based** class indices.
+"""
+codebook_logits(codes::AbstractMatrix{<:Complex}, z_o) =
+    real.(adjoint(codes) * z_o) ./ Float32(_feature_dim(z_o))
 
 # ================================================================
 # 2. Per-layer EP interface
@@ -237,10 +330,17 @@ with zero gradients on `log_neg_lambda` (and `omega` if trainable)
 since EP does not update per-channel dynamics in this Phase 2.
 """
 function ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
-    g = (weight = real.(z_self * adjoint(z_in)),)
+    # Batch normalization: `z_self * adjoint(z_in)` is a matmul, so for
+    # `(out,B) * (B,in)` it already SUMS the per-sample outer products.
+    # Dividing by B here turns that sum into the mean-over-batch
+    # gradient. B = 1 for the single-sample path, so this is a no-op
+    # for the original interface.
+    invB = one(Float32) / Float32(_batch_size(z_self))
+    g = (weight = real.(z_self * adjoint(z_in)) .* invB,)
     if haskey(ps, :bias_real)
-        g = merge(g, (bias_real = Float32.(real.(z_self)),
-                      bias_imag = Float32.(imag.(z_self))))
+        zb = _sum_batch(z_self)   # (out,) either way
+        g = merge(g, (bias_real = Float32.(real.(zb)) .* invB,
+                      bias_imag = Float32.(imag.(zb)) .* invB))
     end
     # Match ps shape exactly so Optimisers.update doesn't warn /
     # silently skip. Dynamics params are not EP-updated.
@@ -302,18 +402,44 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
     dt_f = Float32(dt)
     β_f  = Float32(β)
 
+    z0 = _phase_input_to_complex(x)
+
     states = init === nothing ?
-        [zeros(ComplexF32, chain.layers[k].out_dims) for k in layer_keys] :
+        _init_states(chain, layer_keys, z0) :
         [ComplexF32.(s) for s in init]
 
-    z0 = _phase_input_to_complex(x)
+    # Hoist the input drive: layer 1's `ep_drive` is `W₁·z₀ (+ bias)`,
+    # and both `ps` and `z₀` are fixed for the whole settle — yet the
+    # original loop recomputed it every step. At MLP width this is the
+    # single largest term in the step (2.6x on the per-step linear
+    # algebra at 784→256, B=128).
+    drive0 = _input_drive(chain, ps, st, layer_keys, z0)
 
     for _ in 1:T
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_f, dt_f, states; K_mode=K_mode,
-                              omega_override=omega_override)
+                              omega_override=omega_override, drive0=drive0)
     end
     return states
+end
+
+# Zero-initialized per-layer states, matching the input's batch shape.
+# A `(d,)` input gives `(out,)` states; a `(d,B)` input gives `(out,B)`.
+# These must agree — a 1-D init against a 2-D drive would silently
+# broadcast in the damping term rather than erroring.
+function _init_states(chain::Lux.Chain, layer_keys, z0::AbstractVector)
+    return [zeros(ComplexF32, chain.layers[k].out_dims) for k in layer_keys]
+end
+
+function _init_states(chain::Lux.Chain, layer_keys, z0::AbstractMatrix)
+    B = size(z0, 2)
+    return [zeros(ComplexF32, chain.layers[k].out_dims, B) for k in layer_keys]
+end
+
+# The constant first-layer drive, computed once per settle.
+function _input_drive(chain::Lux.Chain, ps, st, layer_keys, z0)
+    k = layer_keys[1]
+    return ep_drive(chain.layers[k], ps[k], st[k], z0)
 end
 
 # Single damped projected update step across all layers, with the
@@ -326,19 +452,32 @@ end
 function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                       cost::AbstractEPCost, β::Float32, dt::Float32, states;
                       K_mode::Symbol = :zero,
-                      omega_override::Union{Nothing, Vector} = nothing)
+                      omega_override::Union{Nothing, Vector} = nothing,
+                      drive0 = nothing)
     n = length(layer_keys)
-    new_states = Vector{Vector{ComplexF32}}(undef, n)
-    for l in 1:n
+    # `map` (rather than a preallocated `Vector{Vector{ComplexF32}}`)
+    # lets the element type be inferred, so the same code path yields
+    # `Vector` states for a single sample and `Matrix` states for a
+    # batch.
+    return map(1:n) do l
         key  = layer_keys[l]
         ps_l = ps[key]; st_l = st[key]
-        z_in   = (l == 1) ? z0 : states[l-1]
         z_self = states[l]
         ω_l    = omega_override === nothing ? nothing : omega_override[l]
 
-        grad_l = ep_drive(chain.layers[key], ps_l, st_l, z_in)
-        grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self;
-                                          K_mode=K_mode, omega_override=ω_l)
+        grad_l = if l == 1
+            drive0 === nothing ?
+                ep_drive(chain.layers[key], ps_l, st_l, z0) : drive0
+        else
+            ep_drive(chain.layers[key], ps_l, st_l, states[l-1])
+        end
+
+        # Skip the self-force entirely under K_mode=:zero rather than
+        # allocating a zero array and broadcasting it in every step.
+        if K_mode != :zero
+            grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self;
+                                              K_mode=K_mode, omega_override=ω_l)
+        end
 
         if l < n
             key_n = layer_keys[l+1]
@@ -351,10 +490,8 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
 
         # Hard projection (ε = 0) — matches prototype, avoids
         # sub-threshold magnitude bias from the safe-mode default.
-        new_states[l] = (1 - dt) .* z_self .+
-                        dt .* normalize_to_unit_circle(grad_l; ε = 0)
+        (1 - dt) .* z_self .+ dt .* normalize_to_unit_circle(grad_l; ε = 0)
     end
-    return new_states
 end
 
 # Convert any phase-typed input (Phase array, raw real array
@@ -467,11 +604,44 @@ end
 abstract type AbstractEPMethod end
 
 """
-    StaticEP(; β=0.1, T_free=100, T_nudge=50, dt=0.5, K_mode=:zero)
+    StaticEP(; β=0.1, T_free=100, T_nudge=50, dt=0.5, K_mode=:zero, centered=false)
 
 Vanilla EP gradient extraction with a single static real β. The
 nudged phase warm-starts from the free equilibrium for tighter
 linear-response sampling.
+
+`centered = false` (default) is the original one-sided estimator
+`-(h_β - h_0)/β`, which carries an O(β) bias. `centered = true` also
+settles at `-β` and uses the symmetric difference `-(h_₊ - h_₋)/(2β)`,
+cancelling the O(β) term at the cost of one extra nudged settle. Use
+the centered form when `StaticEP` is serving as a gradient *oracle*
+(e.g. calibrating `LockinEP` at a width where `fd_gradient_phasor` is
+unaffordable), where its own bias would otherwise confound the
+comparison.
+
+!!! warning "Gradient fidelity degrades at large ‖W‖"
+    EP assumes the nudged settle is a smooth deformation of the *same*
+    fixed point as the free settle. On a 784→256→64 chain that holds at
+    the usual init scale (‖W₁‖ ≈ 8: cosine 0.995 against a small-β
+    reference, flat in β) but fails once ‖W₁‖ grows past roughly 15 —
+    and ‖W₁‖ does grow, unbounded, because `normalize_to_unit_circle`
+    makes the states scale-invariant so nothing in the loss penalizes it.
+
+    The signature is diagnostic: the one-sided relative error scales as
+    1/β (measured 28.7, 96.9, 292, 976 at β = 0.1, 0.03, 0.01, 0.003 for
+    ‖W₁‖ = 31), meaning `h_nudge - h_free` retains a β-INDEPENDENT term.
+    That is a basin hop — the two settles converge to different fixed
+    points — not a linearization error, so shrinking β does not help and
+    actively makes the estimate worse. The free settle is still perfectly
+    stationary throughout (residual ≲1e-6), so this is invisible to a
+    convergence check.
+
+    `centered = true` recovers a substantial part of it (cosine 0.07 →
+    0.38 at ‖W₁‖ = 31, 0.25 → 0.68 at ‖W₁‖ = 126) and is recommended for
+    any long training run. Caveat: these numbers come from randomly
+    initialized matrices rescaled to the given norm; trained weights of
+    the same norm appear better behaved, since training at ‖W₁‖ ≈ 27
+    still makes progress.
 
 `K_mode = :zero` (default) ignores the layer's stored
 `log_neg_lambda` / `omega` for self-energy — matches the
@@ -487,6 +657,7 @@ Base.@kwdef struct StaticEP <: AbstractEPMethod
     T_nudge::Int    = 50
     dt::Float32     = 0.5f0
     K_mode::Symbol  = :zero
+    centered::Bool  = false
 end
 
 """
@@ -508,16 +679,28 @@ function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x,
     s_free  = phasor_settle(chain, ps, st, x, cost, 0f0;
                             T=m.T_free,  dt=m.dt, K_mode=m.K_mode,
                             omega_override=omega_override)
-    s_nudge = phasor_settle(chain, ps, st, x, cost, m.β;
+    s_pos   = phasor_settle(chain, ps, st, x, cost, m.β;
                             T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode,
                             omega_override=omega_override)
 
-    h_free  = chain_hebbians(chain, ps, st, x, s_free)
-    h_nudge = chain_hebbians(chain, ps, st, x, s_nudge)
+    h_free = chain_hebbians(chain, ps, st, x, s_free)
+    h_pos  = chain_hebbians(chain, ps, st, x, s_pos)
 
-    # EP estimate: -(hebb_nudge - hebb_free) / β. Sign flip because
-    # Φ contains -β·C and we want dL/dW.
-    grads = _ep_diff_gradient(ps, h_free, h_nudge, m.β)
+    if m.centered
+        # Symmetric (centered) estimator: settle at -β as well and use
+        # -(h₊ - h₋)/(2β). The one-sided difference carries an O(β)
+        # bias; the symmetric one cancels it, leaving O(β²). Costs one
+        # extra nudged settle.
+        s_neg = phasor_settle(chain, ps, st, x, cost, -m.β;
+                              T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode,
+                              omega_override=omega_override)
+        h_neg = chain_hebbians(chain, ps, st, x, s_neg)
+        grads = _ep_diff_gradient(ps, h_neg, h_pos, 2f0 * m.β)
+    else
+        # EP estimate: -(hebb_nudge - hebb_free) / β. Sign flip because
+        # Φ contains -β·C and we want dL/dW.
+        grads = _ep_diff_gradient(ps, h_free, h_pos, m.β)
+    end
     return grads, s_free
 end
 
@@ -673,47 +856,59 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     T_lockin = m.n_cycles        * period_steps
 
     states = [copy(s) for s in s_free]
+    drive0 = _input_drive(chain, ps, st, layer_keys, z0)
 
     # 3. Warm-up — drive the probe but don't accumulate (transients die).
     for t in 1:T_warmup
         β_t = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
-                              omega_override=omega_override)
+                              omega_override=omega_override, drive0=drive0)
     end
 
-    # 4. Per-layer complex Hebbian accumulator. Weight + bias_real
-    #    + bias_imag entries when present.
-    H_W = Dict{Symbol, Matrix{ComplexF32}}()
-    H_b = Dict{Symbol, Vector{ComplexF32}}()
-    for key in layer_keys
-        haskey(ps[key], :weight) || continue
-        H_W[key] = zeros(ComplexF32, size(ps[key].weight))
-        if haskey(ps[key], :bias_real)
-            H_b[key] = zeros(ComplexF32, size(ps[key].bias_real))
-        end
+    # 4. Accumulators.
+    #
+    # `Ẑ[l] = Σ_t z_l(t)·e^{-iω_p t}` — the demodulated state of every
+    # layer, `(out_l, B)`. This gives the bias gradient for every layer
+    # directly, and for layer 1 it also gives the WEIGHT gradient
+    # without ever forming a per-step outer product: layer 1's `z_in`
+    # is `z₀`, which is constant in t, so it factors out of the sum
+    #
+    #     Σ_t z₁(t)·z₀' ·e^{-iω_p t} = (Σ_t z₁(t)e^{-iω_p t})·z₀'
+    #
+    # turning ~10⁴ full `(out×in)` complex outer products into ~10⁴
+    # cheap `(out×B)` accumulations plus one matmul at the end (19x at
+    # 784→256, B=128).
+    #
+    # `HW[l]` for l > 1 still needs per-step accumulation because
+    # `z_in = states[l-1]` varies in t — but via the 5-arg `mul!`, which
+    # fuses scale-and-add into one BLAS call with no temporaries.
+    #
+    # `c = Σ_t e^{-iω_p t}` carries the DC subtraction out of the loop
+    # too: `Σ_t (h(t) - h_dc)·e^{-iω_p t} = Σ_t h(t)e^{-iω_p t} - c·h_dc`.
+    # It is ≈0 over integer cycles but is kept exact.
+    Zhat = [zeros(ComplexF32, size(states[l])) for l in 1:length(layer_keys)]
+    HW   = Vector{Union{Nothing, Matrix{ComplexF32}}}(nothing, length(layer_keys))
+    for (l, key) in enumerate(layer_keys)
+        (l > 1 && haskey(ps[key], :weight)) || continue
+        HW[l] = zeros(ComplexF32, size(ps[key].weight))
     end
+    c = zero(ComplexF32)
 
-    # 5. Integration: settle + DC-subtracted, demodulated accumulation.
+    # 5. Integration: settle + demodulated accumulation.
     for t in 1:T_lockin
         β_t   = m.ε * cos(m.ω_p * t * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
-                              omega_override=omega_override)
-        demod = exp(-im * m.ω_p * t * m.dt)
-        for (l, key) in enumerate(layer_keys)
-            haskey(ps[key], :weight) || continue
-            z_in   = (l == 1) ? z0 : states[l-1]
-            z_self = states[l]
-            # Weight outer product
-            h_W = z_self * adjoint(z_in)
-            H_W[key] .+= (h_W .- ComplexF32.(h_dc[key].weight)) .* demod
-            # Bias hebbians (per-channel z_self real / imag) packaged
-            # as complex so the demodulation is consistent.
-            if haskey(H_b, key)
-                h_b_complex = z_self
-                H_b[key] .+= (h_b_complex .- ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)) .* demod
-            end
+                              omega_override=omega_override, drive0=drive0)
+        demod = ComplexF32(exp(-im * m.ω_p * t * m.dt))
+        c += demod
+        for l in 1:length(layer_keys)
+            Zhat[l] .+= states[l] .* demod
+            HW[l] === nothing && continue
+            # H += demod · z_l · z_{l-1}'  (adjoint, not transpose —
+            # the energy derivative requires conjugation; see ep_hebbian)
+            mul!(HW[l], states[l], adjoint(states[l-1]), demod, one(ComplexF32))
         end
     end
 
@@ -723,13 +918,34 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     #    real/imag parts of H_b give the bias_real / bias_imag grads
     #    respectively (since H_b's "complex" packaging is z_self and
     #    Re(z_self), Im(z_self) are independent params).
+    H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
     grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin, m.ε)
     return grads, s_free
 end
 
+# Close out the lock-in accumulators into DC-subtracted, batch-normalized
+# complex Hebbians keyed by layer. `h_dc` entries are already divided by
+# B (see `ep_hebbian`), so the raw accumulators get the same treatment
+# before the DC term is subtracted.
+function _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
+    H_W = Dict{Symbol, AbstractMatrix{ComplexF32}}()
+    H_b = Dict{Symbol, AbstractVector{ComplexF32}}()
+    for (l, key) in enumerate(layer_keys)
+        haskey(ps[key], :weight) || continue
+        invB = one(Float32) / Float32(_batch_size(Zhat[l]))
+        raw  = l == 1 ? Zhat[1] * adjoint(z0) : HW[l]
+        H_W[key] = raw .* invB .- c .* ComplexF32.(h_dc[key].weight)
+        if haskey(ps[key], :bias_real)
+            dc_b = ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)
+            H_b[key] = _sum_batch(Zhat[l]) .* invB .- c .* dc_b
+        end
+    end
+    return H_W, H_b
+end
+
 function _ep_lockin_gradient(ps,
-                              H_W::Dict{Symbol,Matrix{ComplexF32}},
-                              H_b::Dict{Symbol,Vector{ComplexF32}},
+                              H_W::AbstractDict{Symbol,<:AbstractMatrix{ComplexF32}},
+                              H_b::AbstractDict{Symbol,<:AbstractVector{ComplexF32}},
                               T_lockin::Int, ε)
     norm_factor = Float32(T_lockin) * Float32(ε)
     pairs = Pair{Symbol,Any}[]
@@ -774,27 +990,77 @@ whatever your `cost_fn` consumes (a complex vector for the default
 For codebook-style classification, pass
 `cost_fn = y -> CodebookCost(codes_complex, y)`.
 
-`args` is the global `Args` struct (see `test/runtests.jl`); only
-`lr` and `epochs` are read.
+`args` is the global `Args` struct (see `test/runtests.jl`); `lr`,
+`epochs`, and `weight_decay` are read.
+
+`optimiser` is a constructor (not an instance), matching [`train`](@ref).
+The default `Optimisers.Descent` is kept for backward compatibility, but
+it is a poor choice at scale — on FashionMNIST at 217K parameters it
+plateaus near 0.50 accuracy at any learning rate while `Optimisers.Adam`
+reaches 0.80 (see `demos/ep_fashionmnist.jl`, `EP_MODE=sweep`).
+
+`callback(epoch, ps, st, epoch_loss)` runs after each epoch — use it for
+test-set evaluation, checkpointing, or tracking the settle residual.
 """
 function ep_train(model::Lux.Chain, ps, st, train_loader, args;
                   method::AbstractEPMethod = StaticEP(),
                   cost_fn::Function = _default_cost_fn,
+                  optimiser = Optimisers.Descent,
+                  callback = nothing,
+                  omega_override::Union{Nothing, Vector} = nothing,
                   verbose::Bool = false)
-    opt_state = Optimisers.setup(Optimisers.Descent(Float32(args.lr)), ps)
+    opt_state = Optimisers.setup(optimiser(Float32(args.lr)), ps)
     losses = Float32[]
     for epoch in 1:args.epochs
+        epoch_start = length(losses) + 1
         for (x, y) in train_loader
             cost = cost_fn(y)
-            grads, s_free = ep_gradient(method, model, ps, st, x, cost)
+            grads, s_free = ep_gradient(method, model, ps, st, x, cost;
+                                        omega_override=omega_override)
+            # Weight decay is read here (ep_train previously ignored it).
+            # It measurably helps EP training on FashionMNIST at 1e-4, but
+            # NOT by bounding ‖W‖ — measured, 1e-4 leaves the weight-norm
+            # trajectory almost unchanged while clearly improving accuracy,
+            # and a larger 1e-3 bounds ‖W‖ much more while performing
+            # worse. Treat it as ordinary regularization; the EP-specific
+            # large-‖W‖ failure is described under `StaticEP`.
+            if args.weight_decay > 0
+                grads = _apply_weight_decay(grads, ps, args.weight_decay)
+            end
             opt_state, ps = Optimisers.update(opt_state, ps, grads)
             push!(losses, ep_loss(cost, s_free[end]))
             if verbose
                 println("epoch=$epoch loss=$(losses[end])")
             end
         end
+        if callback !== nothing
+            epoch_loss = mean(@view losses[epoch_start:end])
+            callback(epoch, ps, st, epoch_loss)
+        end
     end
     return losses, ps, st
+end
+
+"""
+    ep_predict(chain, ps, st, x, codes; T=100, dt=0.5, K_mode=:zero) -> logits
+
+Settle `chain` to its free (β = 0) equilibrium on input `x` and score the
+output state against a complex codebook, returning `(n_classes,)` or
+`(n_classes, B)` similarity logits.
+
+This is the inference counterpart to training with `CodebookCost`. It
+exists because `loss_and_accuracy` (`src/metrics.jl`) assumes a
+feedforward `model(x, ps, st)` call, which an EP-settled network cannot
+provide. The returned matrix feeds `predict(·, :similarity)` and
+`evaluate_accuracy` unchanged — both of which return **1-based** class
+indices, while `fashion_mnist_data` targets are 0-based.
+"""
+function ep_predict(chain::Lux.Chain, ps, st, x, codes::AbstractMatrix{<:Complex};
+                    T::Int = 100, dt::Real = 0.5f0, K_mode::Symbol = :zero,
+                    omega_override::Union{Nothing, Vector} = nothing)
+    s = phasor_settle(chain, ps, st, x, NullCost(), 0f0;
+                      T=T, dt=dt, K_mode=K_mode, omega_override=omega_override)
+    return codebook_logits(codes, s[end])
 end
 
 _default_cost_fn(y) = SimilarityCost(ComplexF32.(y))

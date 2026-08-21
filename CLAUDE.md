@@ -152,7 +152,7 @@ the load-dependency order.
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
 | `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
 | `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
-| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `StaticEP`/`LockinEP`, `SimilarityCost`/`CodebookCost` |
+| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge |
 
 ### Key Type Aliases
 

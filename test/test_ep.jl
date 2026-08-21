@@ -29,6 +29,10 @@ function ep_tests()
         ep_codebook_cost_tests()
         ep_codebook_training_tests()
         ep_kmode_stored_tests()
+        ep_centered_tests()
+        ep_batched_cost_tests()
+        ep_batch_equivalence_tests()
+        ep_mlp_proxy_fd_tests()
     end
 end
 
@@ -459,5 +463,216 @@ function ep_kmode_stored_tests()
         Δ = norm(s_stored_ω[end] .- s_zero_ω[end])
         @test Δ > 1e-3
         @info "K_mode :zero vs :stored with ω=0.3: Δ = $(round(Δ, digits=4))"
+    end
+end
+
+
+# ----------------------------------------------------------------
+# 11. Centered (symmetric-β) StaticEP
+# ----------------------------------------------------------------
+function ep_centered_tests()
+    @testset "StaticEP(centered=true) matches FD" begin
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+
+        fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT)
+
+        # At a deliberately LARGE β the one-sided estimator's O(β) bias
+        # is visible; the centered estimator cancels it. Compare both
+        # against the same FD oracle.
+        β_big = 0.5f0
+        g_one, _ = ep_gradient(StaticEP(β=β_big, T_free=200, T_nudge=100, dt=EP_DT),
+                               chain, ps, st, x, y)
+        g_ctr, _ = ep_gradient(StaticEP(β=β_big, T_free=200, T_nudge=100, dt=EP_DT,
+                                        centered=true),
+                               chain, ps, st, x, y)
+
+        re_one = norm(g_one.layer_1.weight - fd.layer_1.weight) / norm(fd.layer_1.weight)
+        re_ctr = norm(g_ctr.layer_1.weight - fd.layer_1.weight) / norm(fd.layer_1.weight)
+        @info "Centered vs one-sided at β=$β_big: one-sided rel-err=$(round(re_one, digits=4)) centered rel-err=$(round(re_ctr, digits=4))"
+        @test re_ctr < re_one
+
+        # At small β both should agree with FD; centered must not regress.
+        g_ctr_s, _ = ep_gradient(StaticEP(β=EP_BETA, T_free=200, T_nudge=100, dt=EP_DT,
+                                          centered=true),
+                                 chain, ps, st, x, y)
+        for key in (:layer_1, :layer_2)
+            re = norm(g_ctr_s[key].weight - fd[key].weight) / norm(fd[key].weight)
+            @test re < EP_FD_TOL
+        end
+    end
+end
+
+# ----------------------------------------------------------------
+# 12. Batched cost identities
+# ----------------------------------------------------------------
+function ep_batched_cost_tests()
+    @testset "Batched cost identities" begin
+        rng = Xoshiro(3)
+        d, K, B = 6, 4, 5
+        Z = ComplexF32.(exp.(im .* 2π .* rand(rng, Float32, d, B)))
+        codes = ComplexF32.(angle_to_complex(orthogonal_codes(rng, d, K)))
+        labels = [1, 3, 2, 4, 2]
+
+        cb = CodebookCost(codes, labels)
+        @test size(cb.y_onehot) == (K, B)
+
+        # Loss is the mean over the batch of the per-sample losses.
+        l_batch = ep_loss(cb, Z)
+        l_mean  = sum(ep_loss(CodebookCost(codes, labels[i]), Z[:, i]) for i in 1:B) / B
+        @test isapprox(l_batch, l_mean; rtol=1e-5)
+
+        # Nudge is column-wise and carries the FULL per-sample β — no
+        # 1/B. Each column must equal the single-sample nudge exactly.
+        β = 0.1f0
+        F = PhasorNetworks.nudge_force(cb, Z, β)
+        @test size(F) == (d, B)
+        for i in 1:B
+            f_i = PhasorNetworks.nudge_force(CodebookCost(codes, labels[i]), Z[:, i], β)
+            @test isapprox(F[:, i], f_i; rtol=1e-5)
+        end
+
+        # Softmax must reduce over dims=1, not globally: columns sum to 1.
+        s = PhasorNetworks._codebook_logits(cb, Z)
+        p = PhasorNetworks._softmax(s)
+        @test all(isapprox.(vec(sum(p; dims=1)), 1f0; atol=1e-5))
+
+        # SimilarityCost batched: shared target broadcast across columns.
+        y = ComplexF32.(exp.(im .* 2π .* rand(rng, Float32, d)))
+        sc = SimilarityCost(y)
+        @test isapprox(ep_loss(sc, Z),
+                       sum(ep_loss(sc, Z[:, i]) for i in 1:B) / B; rtol=1e-5)
+
+        # codebook_logits agrees with the private cost kernel.
+        @test codebook_logits(codes, Z) ≈ s
+    end
+end
+
+# ----------------------------------------------------------------
+# 13. Batched gradient == mean of per-sample gradients
+# ----------------------------------------------------------------
+#
+# This is exact by construction: every operation in `_phasor_step` is
+# column-separable, so a batched settle is B independent settles. The
+# tolerance is therefore tight — it is a roundoff budget, not a
+# modelling allowance. The 1/β division in the EP estimate amplifies
+# Float32 state noise, which sets the 1e-3 floor.
+const EP_BATCH_TOL = 1e-3
+
+function ep_batch_equivalence_tests()
+    @testset "Batched EP == mean of per-sample EP" begin
+        rng = Xoshiro(42)
+        chain = Chain(
+            PhasorDense(4 => 8, normalize_to_unit_circle, use_bias=true),
+            PhasorDense(8 => 3, normalize_to_unit_circle, use_bias=true),
+        )
+        ps, st = Lux.setup(rng, chain)
+        ps = (
+            layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+            layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)),
+        )
+
+        B = 5
+        X = Phase.(2f0 .* rand(rng, Float32, 4, B) .- 1f0)
+        codes = ComplexF32.(angle_to_complex(orthogonal_codes(rng, 3, 3)))
+        labels = [1, 3, 2, 2, 1]
+
+        methods = (
+            ("StaticEP",          StaticEP(β=0.01f0, T_free=150, T_nudge=80, dt=0.5f0)),
+            ("StaticEP centered", StaticEP(β=0.01f0, T_free=150, T_nudge=80, dt=0.5f0,
+                                           centered=true)),
+            ("LockinEP",          LockinEP(ε=0.01f0, ω_p=0.05f0, n_cycles=3,
+                                           T_warmup_cycles=2, T_free=200, dt=0.1f0)),
+        )
+
+        for (name, method) in methods
+            g_batch, s_free = ep_gradient(method, chain, ps, st, X,
+                                          CodebookCost(codes, labels))
+            g_single = [ep_gradient(method, chain, ps, st, X[:, i],
+                                    CodebookCost(codes, labels[i]))[1] for i in 1:B]
+
+            # Batched settle produces (out, B) states.
+            @test size(s_free[1]) == (8, B)
+            @test size(s_free[2]) == (3, B)
+
+            worst = 0.0
+            for key in (:layer_1, :layer_2), pn in (:weight, :bias_real, :bias_imag)
+                g_mean = sum(g[key][pn] for g in g_single) ./ B
+                re = norm(g_batch[key][pn] - g_mean) / norm(g_mean)
+                worst = max(worst, re)
+                @test re < EP_BATCH_TOL
+            end
+            @info "Batched vs mean-of-singles ($name): worst rel-err=$(round(worst, sigdigits=3))"
+        end
+    end
+end
+
+# ----------------------------------------------------------------
+# 14. Downscaled FD oracle on image-like input
+# ----------------------------------------------------------------
+#
+# `fd_gradient_phasor` runs n_params + 1 settles, so it cannot touch the
+# 217K-parameter FashionMNIST MLP. This proxy keeps the things that
+# actually differ from the toy chains — a 10-class CodebookCost readout,
+# and sparse image-like input where ~80% of pixels are exactly zero
+# (a large common-mode drive) — at a size FD can afford.
+#
+# The input is synthetic rather than real FashionMNIST so the suite
+# stays hermetic and offline; it matches the sparsity and range of a
+# 7x7-downsampled garment image.
+function ep_mlp_proxy_fd_tests()
+    @testset "Downscaled MLP proxy matches FD (10-class codebook)" begin
+        rng = Xoshiro(9)
+        n_in, n_hid, n_cls = 49, 12, 10
+        chain = Chain(
+            PhasorDense(n_in  => n_hid, normalize_to_unit_circle, use_bias=true),
+            PhasorDense(n_hid => n_cls, normalize_to_unit_circle, use_bias=true),
+        )
+        ps, st = Lux.setup(rng, chain)
+        ps = (
+            layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+            layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)),
+        )
+
+        # Sparse image-like pixels: ~80% zero, remainder in (0,1].
+        pix = rand(rng, Float32, n_in)
+        pix[rand(rng, Float32, n_in) .< 0.8f0] .= 0f0
+        # Half-plane encoding: phase in [-0.5, 0.5], injective (no wrap
+        # collapse at Phase(±1)).
+        x = Phase.(0.5f0 .* (2f0 .* pix .- 1f0))
+
+        codes = ComplexF32.(angle_to_complex(orthogonal_codes(rng, n_cls, n_cls)))
+        cost  = CodebookCost(codes, 4)
+
+        # Equilibrium is exactly stationary by T=100 here (measured:
+        # ||z(T+1)-z(T)|| == 0 in Float32), so T=150 is ample.
+        #
+        # FD step size: the default ε=1e-5 is tuned for the toy chains'
+        # O(1) SimilarityCost. The 10-class cross-entropy loss is O(2.4)
+        # with O(1) gradients, so at ε=1e-5 the FD difference falls below
+        # Float32 resolution and the ORACLE — not EP — becomes noise
+        # (measured rel-err 0.24 at 1e-5, 0.027 at 1e-4, 0.004 at 1e-3,
+        # 0.036 at 1e-2: the classic cancellation/truncation U-curve).
+        # 1e-3 sits at the bottom of that curve.
+        fd = fd_gradient_phasor(chain, ps, st, x, cost; ε=1f-3, T=150, dt=EP_DT)
+        g, _ = ep_gradient(StaticEP(β=EP_BETA, T_free=150, T_nudge=80, dt=EP_DT,
+                                    centered=true),
+                           chain, ps, st, x, cost)
+
+        for key in (:layer_1, :layer_2)
+            g_ep = vec(g[key].weight); g_fd = vec(fd[key].weight)
+            re = norm(g_ep - g_fd) / norm(g_fd)
+            cs = dot(g_ep, g_fd) / (norm(g_ep) * norm(g_fd) + 1e-10)
+            @info "MLP proxy EP vs FD on $key: cos=$(round(cs, digits=4)) rel-err=$(round(re, digits=4))"
+            @test cs > 0.999
+            @test re < 0.02
+        end
+
+        # Inference path: ep_predict must reproduce the cost's own logits.
+        s = phasor_settle(chain, ps, st, x, cost, 0f0; T=150, dt=EP_DT)
+        @test ep_predict(chain, ps, st, x, codes; T=150, dt=EP_DT) ≈
+              PhasorNetworks._codebook_logits(cost, s[end])
     end
 end

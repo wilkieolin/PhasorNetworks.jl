@@ -1,0 +1,201 @@
+# Phasor EP on FashionMNIST — first scale-up past toy problems
+
+**Question.** Vanilla phasor EP (`src/ep.jl`) had only ever been run on a single
+fixed pattern and the 4-corner XOR (`demos/lockin_demo.ipynb` §7, a 2→16→1 chain).
+Does it work on a real dataset — and specifically, does **`LockinEP`** (one settle
+plus one driven trajectory, demodulated at the probe frequency) match **`StaticEP`**
+(two equilibria, finite difference) at MLP scale? Lock-in is the hardware-relevant
+estimator: a synchronous demodulator is an analog primitive, and it needs no second
+equilibrium computation.
+
+**Setup.** 784 → 256 → 64, two `PhasorDense` layers, `normalize_to_unit_circle`,
+complex bias on both, `K_mode = :zero`, 217,728 parameters. Readout is
+`CodebookCost` over 64×10 `orthogonal_codes`. Full 60K train / 10K test, batch 128,
+Adam 3e-3, weight decay 1e-4, `centered = true`. Harness: `demos/ep_fashionmnist.jl`.
+CPU only (10 BLAS threads).
+
+Pixels → phase via `0.5·tanh(standardize(x))` → `[-0.5, 0.5]`. The half-plane range
+is deliberate: phases wrap, so `Phase(1) ≡ Phase(-1) ≡ -1+0i` and a full-range map
+is not injective. The repo's usual static path `Phase.(tanh.(LayerNorm(x)))`
+saturates *toward* that collapse point.
+
+## Headline result
+
+| estimator | epochs | best acc | final acc | steps/gradient | wall clock |
+|---|---|---|---|---|---|
+| `StaticEP` (centered, β=0.1) | 20 | **0.8361** | 0.8268 | 400 | 31.4 min |
+| `LockinEP` (ε=0.03, ω_p=0.02) | 10 | **0.8423** | 0.8301 | 3968 | 172.3 min |
+
+**Lock-in matches static on a real 10-class problem at 217K parameters**, slightly
+ahead on peak accuracy in half the epochs, at 5.5× the wall clock. Both are stable
+across the whole run. Chance is 0.10; accuracy at init is 0.134.
+
+Note the loss floor: `CodebookCost` logits are `(1/d)·Re⟨code_c, z⟩ ∈ [-1,1]`, so
+softmax CE cannot go much below ~0.8 even with perfect separation. Loss around 1.67
+is not a plateau in the usual sense — read accuracy.
+
+Raw data: `epoch_curves.csv`, `run_final.txt`, `run_baseline_nodecay.txt`.
+
+## Three things that had to be fixed, and one that didn't matter
+
+### 1. The optimizer, not EP, was the first bottleneck
+
+`ep_train` hardcoded `Optimisers.Descent`. That is what the XOR demo used with four
+training patterns; at 217K parameters on 60K images it does not work at any learning
+rate (`hyperparam_sweeps.csv`, 10K subset, 5 epochs):
+
+| optimiser | lr | final acc |
+|---|---|---|
+| Descent | 0.05 / 0.02 / 0.005 | 0.476 / 0.462 / 0.493 |
+| Adam | 0.01 / **0.003** / 0.001 | 0.763 / **0.798** / 0.772 |
+
+`ep_train` now takes an `optimiser` kwarg (a constructor, matching `train`).
+
+### 2. Lock-in adiabaticity had to be recalibrated at width — the toy defaults are wrong
+
+The package default `ω_p = 0.05` is **not adiabatic** at this width. The relevant
+quantity is the relaxation rate, fitted from the settle residual decay:
+
+    R_relax ≈ 0.081–0.134 /time-unit   at 784→256→64
+
+not ≈1. The damped iteration `z ← (1-dt)z + dt·unit(grad)` would relax at rate 1
+only if the drive were independent of `z`; the inter-layer feedback puts the
+coupling Jacobian's slowest mode near 1, and that mode sets the rate. So `ω_p=0.05`
+is a ratio of ~0.4, not ~0.05.
+
+The fix costs nothing. Lock-in cost is `period_steps = 2π/(ω_p·dt)`, so **ω_p and dt
+trade off directly**: moving the lock-in settle from `dt=0.1` to `dt=0.5` buys a 5×
+slower probe *in time units* at identical step count. `dt=0.5` is the same step the
+static settle already uses, and the probe increment `ω_p·dt = 0.01` rad/step is far
+from aliasing.
+
+Calibration against centered `StaticEP` at small β (`lockin_calibration.csv`; FD is
+unaffordable at 217K params — it needs `n_params + 1` settles):
+
+| ε | ω_p | steps/grad | cos(L1) | rel-err(L1) |
+|---|---|---|---|---|
+| 0.03 | 0.005 | 15278 | 0.9999 | 0.015 |
+| 0.03 | 0.010 | 7742 | 0.9987 | 0.052 |
+| **0.03** | **0.020** | **3968** | **0.9983** | **0.062** |
+| 0.03 | 0.050 | 1706 | 0.9811 | 0.197 |
+
+ε=0.03/ω_p=0.02 gives width-8 gradient quality (the toy chain's reference is
+rel-err 0.054) at half the original step count.
+
+**Larger ε is better here** — the opposite of the width-8 guidance in
+`lockin_demo.ipynb` §4 ("wider chains need a smaller ε"). At this width the
+demodulator noise floor dominates over the O(ε²) nonlinearity: ε = 0.01/0.03/0.10 at
+ω_p=0.02 give rel-err 0.078/0.062/0.059.
+
+### 3. EP's gradient decorrelates as ‖W‖ grows — basin hopping, not linearization error
+
+Without weight decay, accuracy peaks at epoch 3 (0.791) and decays to 0.726 by epoch
+20 while `‖W₁‖` grows 26.7 → 108.9, roughly linearly and unbounded. Nothing in the
+loss penalizes weight scale, because `normalize_to_unit_circle` makes the states
+scale-invariant.
+
+**The settle is not the problem.** The stationarity residual stays ≲1e-6 (often
+exactly 0) throughout the decay. A convergence check cannot see this failure.
+
+Direct probe (`gradient_fidelity_vs_weightnorm.csv`), EP against a small-β centered
+reference on the same parameters:
+
+| ‖W₁‖ | β | cos(L1), one-sided | cos(L1), centered |
+|---|---|---|---|
+| 7.9 | any (0.003–0.3) | 0.995 | 0.995 |
+| 31.4 | 0.1 | 0.104 | 0.380 |
+| 125.8 | 0.1 | 0.254 | 0.684 |
+
+At the init scale everything agrees and is flat in β. Past ‖W₁‖ ≈ 15 the one-sided
+estimate decorrelates entirely, and the **relative error scales as 1/β** — 28.7,
+96.9, 292, 976 at β = 0.1, 0.03, 0.01, 0.003 for ‖W₁‖ = 31.4.
+
+That 1/β scaling is the diagnostic: it means `h_nudge - h_free` retains a
+**β-independent** term. The free and nudged settles are converging to *different
+fixed points*. This is a basin hop, not a failure to linearize — which is why
+shrinking β does not help and actively makes the estimate worse. EP's premise is
+that the nudged equilibrium is a smooth deformation of the free one; at large ‖W‖
+that premise fails.
+
+`centered = true` (settle at ±β, use `-(h₊-h₋)/(2β)`) recovers a substantial part of
+it and is now recommended for any long run. Added as a `StaticEP` field.
+
+**Caveat.** These numbers come from randomly initialized matrices rescaled to the
+stated norm. Trained weights of the same norm behave better — training at ‖W₁‖ ≈ 27
+still makes progress — so the probe likely overstates the effect in practice.
+
+### 4. Weight decay helps, but not for the reason we assumed
+
+wd = 1e-4 clearly helps (10K/8-epoch probe: peak 0.771 → 0.793, final 0.721 → 0.775).
+The obvious explanation — that it bounds ‖W‖ and so keeps EP in the good regime — is
+**not supported**:
+
+- wd=1e-4 leaves the weight-norm trajectory nearly unchanged (13.9→30.4 vs 13.1→27.1)
+  while clearly improving accuracy.
+- wd=1e-3 bounds ‖W‖ much harder (→15.7) and performs *worse* (0.699).
+
+So the benefit at 1e-4 is not from bounding ‖W‖, and "more bounding" is not better.
+Mechanism unresolved; treat it as ordinary regularization. The large-‖W‖ mitigation
+is `centered`, not decay.
+
+**Attribution caveat on the headline run.** The final configuration changed
+`centered` and `weight_decay` together relative to the baseline, so the table below
+confirms the combination works but does not apportion credit between them. The β-sweep
+above is the evidence that `centered` specifically addresses the basin-hopping.
+
+| | baseline (Adam only) | + centered + wd=1e-4 |
+|---|---|---|
+| peak | 0.7908 (epoch 3) | 0.8361 (epoch 8) |
+| final | 0.7257 | 0.8268 |
+| ‖W₁‖ | 26.7 → 108.9 | 20.4 → 25.3 (plateaus) |
+| loss | 1.84, rising | 1.67, flat |
+
+Also worth noting: the good run's settle residual sits around 1e-4, the decaying
+baseline's around 1e-9. **Residual size on its own is not a quality signal.**
+
+## Implementation work this required
+
+`src/ep.jl` was strictly single-sample (`Vector{Vector{ComplexF32}}` states) and did
+per-example SGD — a documented accuracy cap in `docs/src/api/ep.md`.
+
+- **Batching.** States are `(out,)` or `(out, B)` on one code path (`map`-based type
+  inference in `_phasor_step`, shape-matched init). Every operation in the settle is
+  column-separable, so a batched settle is exactly B independent settles. The `1/B`
+  goes on the **Hebbian, not the nudge** — each sample must see the full per-sample
+  nudge amplitude or the linear response shrinks by B and the FD SNR collapses.
+  Verified: batched gradient == mean of per-sample gradients to ≤2.8e-4.
+- **Hoisting the input drive.** Layer 1's `ep_drive` is `W₁·z₀`, constant for the
+  whole settle, but was recomputed every step. 2.6× on the per-step linear algebra at
+  B=128 (4.8× at B=1).
+- **Lock-in factorization.** Layer 1's `z_in` is `z₀`, constant in `t`, so it factors
+  out of the demodulation sum:
+  `Σₜ z₁(t)·z₀'·e^{-iω_p t} = (Σₜ z₁(t)e^{-iω_p t})·z₀' - c·H_dc`, with
+  `c = Σₜ e^{-iω_p t}` a closed-form scalar. Turns ~10⁴ full `(256×784)` complex
+  outer products into ~10⁴ `(256×B)` accumulations plus one matmul. **19× at B=128**;
+  verified rel-err 3.4e-7 against the original loop. Layer 2 cannot be factorized
+  (its `z_in` varies) and uses 5-arg `mul!` instead.
+- Also: `centered` on `StaticEP`, `weight_decay` honored in `ep_train`, `callback`
+  hook, `ep_predict`/`codebook_logits` (needed because `loss_and_accuracy` assumes a
+  feedforward `model(x, ps, st)` call an EP-settled network cannot provide).
+
+Tests 69 → 112 in `test/test_ep.jl`; full suite 1464/1464.
+
+New in the test suite: batched-vs-looped equivalence for all three estimators, batched
+cost identities, and a 49→12→10 FD proxy with a 10-class codebook (cos = 1.0,
+rel-err 0.004).
+
+**Aside — `fd_gradient_phasor`'s default ε is under-conditioned for this cost.**
+ε=1e-5 is tuned for the toy chains' O(1) `SimilarityCost`. Against a 10-class
+cross-entropy in Float32 the difference falls below machine resolution and the
+*oracle* becomes the noisy party: EP-vs-FD relative error runs 0.24 at ε=1e-5, 0.027
+at 1e-4, **0.004 at 1e-3**, 0.036 at 1e-2. Tune ε to the loss scale before drawing
+conclusions about gradient quality.
+
+## Open
+
+- Attribute the final run's gain between `centered` and `weight_decay`.
+- Why does wd=1e-4 help without bounding ‖W‖?
+- Does the basin-hopping onset differ for trained vs randomly-scaled weights of equal
+  norm? The probe suggests it should.
+- GPU: `src/ep.jl` is host-allocating. See the GPU characterization section for
+  whether it is worth porting.
