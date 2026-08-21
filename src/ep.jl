@@ -150,7 +150,17 @@ function CodebookCost(codes::AbstractMatrix{<:Complex}, y_class::Integer)
     y_oh = zeros(Float32, n_classes)
     @assert 1 <= y_class <= n_classes "y_class out of range: got $y_class, expected 1..$n_classes"
     y_oh[y_class] = one(Float32)
-    return CodebookCost(codes, y_oh)
+    return CodebookCost(codes, _match_device(codes, y_oh))
+end
+
+# Move a host-built array onto whatever device `ref` lives on. The one-hot
+# target is assembled with scalar indexing (illegal on a GPU array), so it
+# is always built on the host and then copied across.
+_match_device(ref::AbstractArray, A::AbstractArray) = A
+function _match_device(ref::AbstractGPUArray, A::AbstractArray)
+    D = similar(ref, eltype(A), size(A))
+    copyto!(D, A)
+    return D
 end
 
 # Batched: a vector of 1-based class indices becomes a (n_classes, B)
@@ -163,7 +173,7 @@ function CodebookCost(codes::AbstractMatrix{<:Complex},
     for (b, cls) in enumerate(y_classes)
         y_oh[cls, b] = one(Float32)
     end
-    return CodebookCost(codes, y_oh)
+    return CodebookCost(codes, _match_device(codes, y_oh))
 end
 
 function _codebook_logits(c::CodebookCost, z_o)
@@ -345,7 +355,7 @@ function ep_hebbian(::PhasorDense, ps, st, z_in, z_self)
     # Match ps shape exactly so Optimisers.update doesn't warn /
     # silently skip. Dynamics params are not EP-updated.
     if haskey(ps, :log_neg_lambda)
-        g = merge(g, (log_neg_lambda = zeros(Float32, size(ps.log_neg_lambda)),))
+        g = merge(g, (log_neg_lambda = zero(ps.log_neg_lambda),))
     end
     return g
 end
@@ -428,12 +438,12 @@ end
 # These must agree — a 1-D init against a 2-D drive would silently
 # broadcast in the damping term rather than erroring.
 function _init_states(chain::Lux.Chain, layer_keys, z0::AbstractVector)
-    return [zeros(ComplexF32, chain.layers[k].out_dims) for k in layer_keys]
+    return [gpu_zeros(z0, ComplexF32, chain.layers[k].out_dims) for k in layer_keys]
 end
 
 function _init_states(chain::Lux.Chain, layer_keys, z0::AbstractMatrix)
     B = size(z0, 2)
-    return [zeros(ComplexF32, chain.layers[k].out_dims, B) for k in layer_keys]
+    return [gpu_zeros(z0, ComplexF32, chain.layers[k].out_dims, B) for k in layer_keys]
 end
 
 # The constant first-layer drive, computed once per settle.
@@ -772,7 +782,7 @@ end
 # spk_args), so no :omega slot needs padding.
 function _pad_dynamics_zeros(entry::NamedTuple, layer_ps::NamedTuple)
     if haskey(layer_ps, :log_neg_lambda)
-        entry = merge(entry, (log_neg_lambda = zeros(Float32, size(layer_ps.log_neg_lambda)),))
+        entry = merge(entry, (log_neg_lambda = zero(layer_ps.log_neg_lambda),))
     end
     return entry
 end
@@ -887,11 +897,11 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     # `c = Σ_t e^{-iω_p t}` carries the DC subtraction out of the loop
     # too: `Σ_t (h(t) - h_dc)·e^{-iω_p t} = Σ_t h(t)e^{-iω_p t} - c·h_dc`.
     # It is ≈0 over integer cycles but is kept exact.
-    Zhat = [zeros(ComplexF32, size(states[l])) for l in 1:length(layer_keys)]
-    HW   = Vector{Union{Nothing, Matrix{ComplexF32}}}(nothing, length(layer_keys))
+    Zhat = [gpu_zeros(states[l], ComplexF32, size(states[l])...) for l in 1:length(layer_keys)]
+    HW   = Vector{Any}(nothing, length(layer_keys))
     for (l, key) in enumerate(layer_keys)
         (l > 1 && haskey(ps[key], :weight)) || continue
-        HW[l] = zeros(ComplexF32, size(ps[key].weight))
+        HW[l] = gpu_zeros(ps[key].weight, ComplexF32, size(ps[key].weight)...)
     end
     c = zero(ComplexF32)
 
@@ -928,8 +938,8 @@ end
 # B (see `ep_hebbian`), so the raw accumulators get the same treatment
 # before the DC term is subtracted.
 function _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
-    H_W = Dict{Symbol, AbstractMatrix{ComplexF32}}()
-    H_b = Dict{Symbol, AbstractVector{ComplexF32}}()
+    H_W = Dict{Symbol, Any}()
+    H_b = Dict{Symbol, Any}()
     for (l, key) in enumerate(layer_keys)
         haskey(ps[key], :weight) || continue
         invB = one(Float32) / Float32(_batch_size(Zhat[l]))
@@ -943,9 +953,7 @@ function _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
     return H_W, H_b
 end
 
-function _ep_lockin_gradient(ps,
-                              H_W::AbstractDict{Symbol,<:AbstractMatrix{ComplexF32}},
-                              H_b::AbstractDict{Symbol,<:AbstractVector{ComplexF32}},
+function _ep_lockin_gradient(ps, H_W::AbstractDict, H_b::AbstractDict,
                               T_lockin::Int, ε)
     norm_factor = Float32(T_lockin) * Float32(ε)
     pairs = Pair{Symbol,Any}[]

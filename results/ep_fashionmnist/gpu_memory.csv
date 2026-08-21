@@ -1,0 +1,8 @@
+batch,settle_steps,hard_limit_gib,peak_gib,per_sample_kib,note
+2048,25,40,0.053,27.1,flat in T
+2048,100,40,0.053,27.1,flat in T
+2048,400,40,0.052,26.9,flat in T
+8192,400,40,2.911,372.6,pool headroom
+8192,400,2,1.966,251.6,completes under 2GiB cap
+8192,400,4,1.231,157.6,completes under 4GiB cap
+32768,400,6,1.801,57.6,completes under 6GiB cap

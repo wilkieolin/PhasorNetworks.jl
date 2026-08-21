@@ -49,6 +49,10 @@ function cuda_core_tests()
         return
     end
 
+    # Phasor-EP device parity (defined in test_ep.jl, which runtests.jl
+    # includes before reaching here).
+    ep_gpu_parity_tests(gpu_device())
+
     @testset "CUDA Core Functionality Tests" begin
         sol_cpu, err_cpu = bundling_test(spk_args_cuda, "cpu")
         sol_gpu, err_gpu = bundling_test(spk_args_cuda, "gpu")

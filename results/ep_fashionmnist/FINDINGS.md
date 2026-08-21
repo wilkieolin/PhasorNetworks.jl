@@ -191,11 +191,104 @@ cross-entropy in Float32 the difference falls below machine resolution and the
 at 1e-4, **0.004 at 1e-3**, 0.036 at 1e-2. Tune ε to the loss scale before drawing
 conclusions about gradient quality.
 
+## GPU port and characterization
+
+`src/ep.jl` was host-allocating and would not run on a GPU at all. Making it
+device-agnostic was a contained change — the math was already fine; only the
+allocations were wrong:
+
+- `_init_states` and the lock-in accumulators (`Zhat`, `HW`) now go through
+  `gpu_zeros(ref, T, dims...)` (`src/backend.jl`) instead of bare `zeros`.
+- `ep_hebbian` / `_pad_dynamics_zeros` use `zero(ps.log_neg_lambda)` rather than
+  `zeros(Float32, size(...))`, preserving the array type.
+- `CodebookCost` moves its one-hot target onto the codebook's device. The one-hot
+  is assembled with scalar indexing, which is illegal on a GPU array, so it is
+  built on the host and copied (`_match_device`).
+- The lock-in accumulator `Dict`s and `_ep_lockin_gradient`'s signature were
+  concretely typed to host `Matrix`/`Vector`; loosened.
+
+`fd_gradient_phasor` stays CPU-only by design — it perturbs parameters with scalar
+`Pp[i] += ε` indexing. It is a test oracle, not a training path.
+
+Parity is verified in CI (`ep_gpu_parity_tests`, called from `test_cuda.jl`):
+worst CPU-vs-GPU relative error **3.2e-5 (StaticEP), 7.0e-5 (LockinEP)**.
+
+### Was the "GPU probably won't help" prediction right?
+
+Partly. The prediction was that the settle is a long chain of *small sequential*
+matmuls (after hoisting the input drive, each step is only 256×64 and 64×256), so
+GPU would be launch-latency-bound and might even lose. Measured throughput in
+samples/s, `StaticEP` at 400 steps/gradient (`gpu_throughput.csv`):
+
+| B | CPU | GPU | speedup |
+|---|---|---|---|
+| 32 | 344 | 337 | 0.98× |
+| 128 | 605 | 898 | 1.5× |
+| 512 | 537 | 1663 | 3.1× |
+| 2048 | 426 | 8546 | 20× |
+| 8192 | 460 | 9559 | 21× |
+| 32768 | — | 8342 | — |
+
+Right about the small-batch regime: at B=32 it is a dead heat, confirming
+launch-bound behaviour, and the crossover lands at B≈512–2048, close to the
+predicted ~1024. Wrong that GPU would be *slower* — it ties at worst.
+
+The more useful finding is about **CPU**, not GPU: CPU throughput peaks at B=128
+(605 samples/s) and then *declines* with larger batches. So the batch size the
+training runs used was already at the CPU optimum, and there is no CPU-side win
+available from batching harder. All the headroom is on the device: **~16× at each
+platform's best batch** (605 → 9559), ~21× at matched B=8192.
+
+GPU timing is mildly non-monotonic (B=512 measured slower than B=2048) — treat
+individual points as ±30%; the trend is what matters.
+
+Caveat: `LockinEP` numbers in the CSV use a reduced 289-step configuration so the
+sweep was affordable, not the 3968-step production setting. Per-gradient times are
+therefore not comparable across the two methods; compare each method to itself
+across devices.
+
+### Memory
+
+Comfortably within bounds, and the interesting part is that it is **flat in settle
+length** (`gpu_memory.csv`):
+
+| B | T | peak | per-sample |
+|---|---|---|---|
+| 2048 | 25 | 0.053 GiB | 27.1 KiB |
+| 2048 | 100 | 0.053 GiB | 27.1 KiB |
+| 2048 | 400 | 0.052 GiB | 26.9 KiB |
+
+The settle allocates fresh state arrays every step and never reuses buffers, so a
+400-step settle at large batch looked alarming at first — naive readings suggested
+8.6 GiB at B=2048. That was **pool reservation, not live data**: `CUDA.used_memory()`
+sampled after the fact reflects what the allocator is holding, not the working set.
+Sampling the true high-water mark concurrently shows ~27 KiB/sample independent of
+T, which matches the analytic working set (z₀ at 6.3 KiB/sample plus a handful of
+320-channel state temporaries).
+
+The pool will opportunistically expand to fill whatever headroom it is given, so
+set a hard limit. It respects one:
+
+| B | cap | peak | outcome |
+|---|---|---|---|
+| 8192 | 2 GiB | 1.97 GiB | completes |
+| 8192 | 4 GiB | 1.23 GiB | completes |
+| 32768 | 6 GiB | 1.80 GiB | completes |
+
+B=32768 — 16× the training batch — fits in under 2 GiB when capped. Against this
+machine's ~110 GiB usable, there is no risk from EP at any batch size worth using.
+The full encoded 60K training set resident on device is 0.175 GiB.
+
+**Recommendation.** Keep training on CPU at B=128 unless you want large-batch runs;
+the GPU path is now available and correct, and becomes worth using from B≈512 up,
+where it is 3–21×. Always run it under `JULIA_CUDA_HARD_MEMORY_LIMIT`.
+
 ## Open
 
 - Attribute the final run's gain between `centered` and `weight_decay`.
 - Why does wd=1e-4 help without bounding ‖W‖?
 - Does the basin-hopping onset differ for trained vs randomly-scaled weights of equal
   norm? The probe suggests it should.
-- GPU: `src/ep.jl` is host-allocating. See the GPU characterization section for
-  whether it is worth porting.
+- Buffer reuse in `_phasor_step` (currently allocates fresh state arrays per step).
+  Not a memory problem — peak is flat in T — but it is the likely reason GPU
+  throughput plateaus around 9.5K samples/s instead of scaling further.

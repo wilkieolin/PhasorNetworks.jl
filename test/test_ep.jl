@@ -676,3 +676,70 @@ function ep_mlp_proxy_fd_tests()
               PhasorNetworks._codebook_logits(cost, s[end])
     end
 end
+
+
+# ----------------------------------------------------------------
+# 15. GPU parity (CUDA only — called from test_cuda.jl)
+# ----------------------------------------------------------------
+#
+# `src/ep.jl` allocates through `gpu_zeros`/`similar` rather than bare
+# `zeros`, so the whole settle-and-gradient path runs on-device. The
+# tolerance is a Float32 roundoff budget: the GPU reduces in a different
+# order than CPU BLAS, and the 1/β division in the EP estimate amplifies
+# that difference.
+const EP_GPU_TOL = 5e-3
+
+function ep_gpu_parity_tests(dev)
+    @testset "EP GPU parity with CPU" begin
+        rng = Xoshiro(42)
+        chain = Chain(
+            PhasorDense(32 => 16, normalize_to_unit_circle, use_bias=true),
+            PhasorDense(16 => 8,  normalize_to_unit_circle, use_bias=true),
+        )
+        ps, st = Lux.setup(rng, chain)
+        ps = (
+            layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+            layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)),
+        )
+        B = 8
+        x = Phase.(0.5f0 .* (2f0 .* rand(rng, Float32, 32, B) .- 1f0))
+        codes = ComplexF32.(angle_to_complex(orthogonal_codes(rng, 8, 5)))
+        y = rand(rng, 1:5, B)
+
+        ps_d, st_d, x_d = ps |> dev, st |> dev, x |> dev
+        codes_d = codes |> dev
+
+        # The one-hot target must follow the codebook onto the device.
+        cost_d = CodebookCost(codes_d, y)
+        @test !(cost_d.y_onehot isa Array)
+
+        methods = (
+            ("StaticEP", StaticEP(β=0.1f0, T_free=100, T_nudge=50, dt=0.5f0, centered=true)),
+            ("LockinEP", LockinEP(ε=0.03f0, ω_p=0.2f0, n_cycles=2,
+                                  T_warmup_cycles=1, T_free=80, dt=0.5f0)),
+        )
+        for (name, m) in methods
+            g_cpu, _ = ep_gradient(m, chain, ps,   st,   x,   CodebookCost(codes, y))
+            g_gpu, _ = ep_gradient(m, chain, ps_d, st_d, x_d, cost_d)
+            worst = 0.0
+            for key in (:layer_1, :layer_2), pn in (:weight, :bias_real, :bias_imag)
+                a = vec(Array(g_cpu[key][pn])); b = vec(Array(g_gpu[key][pn]))
+                re = norm(a - b) / norm(a)
+                worst = max(worst, re)
+                @test re < EP_GPU_TOL
+            end
+            @info "EP GPU parity ($name): worst rel-err=$(round(worst, sigdigits=3))"
+        end
+
+        # Settled states stay on-device rather than silently falling back.
+        s_d = phasor_settle(chain, ps_d, st_d, x_d, cost_d, 0f0; T=50, dt=0.5f0)
+        @test !(s_d[1] isa Array)
+        @test size(s_d[1]) == (16, B)
+
+        # Inference path.
+        logits_cpu = ep_predict(chain, ps,   st,   x,   codes;   T=100, dt=0.5f0)
+        logits_gpu = ep_predict(chain, ps_d, st_d, x_d, codes_d; T=100, dt=0.5f0)
+        @test !(logits_gpu isa Array)
+        @test isapprox(Array(logits_gpu), logits_cpu; rtol=EP_GPU_TOL, atol=1e-5)
+    end
+end
