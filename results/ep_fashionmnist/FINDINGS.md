@@ -242,10 +242,64 @@ platform's best batch** (605 → 9559), ~21× at matched B=8192.
 GPU timing is mildly non-monotonic (B=512 measured slower than B=2048) — treat
 individual points as ±30%; the trend is what matters.
 
+**These are pre-fusion numbers.** The step-fusion work below supersedes them; see
+that table for current throughput. The CPU/GPU crossover point is unchanged.
+
 Caveat: `LockinEP` numbers in the CSV use a reduced 289-step configuration so the
 sweep was affordable, not the 3968-step production setting. Per-gradient times are
 therefore not comparable across the two methods; compare each method to itself
 across devices.
+
+### Step fusion (the "buffer reuse" follow-up)
+
+The settle allocated **2.8 MiB per step** at B=128 — 1.1 GiB of garbage per
+400-step settle. Profiling the step (784→256→64, B=128) put the cost in three
+places: the layer drive (92 µs), the feedback matmul (80 µs), and
+normalize-plus-damping (73 µs) out of 335 µs total.
+
+A full buffer-reuse rewrite — states split into real/imag `Float32` pairs so every
+matmul is a `mul!` real gemm, zero allocation — was prototyped and measured at only
+**1.44×**. That is not worth the churn: it would change the state representation
+that `chain_hebbians`, `ep_hebbian` and the lock-in accumulators all consume.
+
+Most of the available win turned out not to be buffer reuse at all:
+
+1. **Promote the weights to complex once per settle** (`_weight_cache`). `ps.weight`
+   is real and the states are complex, so the `PhasorDense` functor splits into
+   `W*real(x)` and `W*imag(x)` — two real gemms plus five array temporaries.
+   A single `cgemm` on a pre-promoted weight is 2.3× faster on the drive and 1.4×
+   on the feedback, despite nominally doing 2× the arithmetic. The win is memory
+   traffic, not flops.
+2. **Fuse projection and damping into one broadcast** (`_project_damp`). The
+   expression `(1-dt).*z .+ dt.*normalize_to_unit_circle(g; ε=0)` materializes four
+   temporaries and computes `|g|` twice; the scalar kernel does one pass.
+
+Both are non-mutating, so the code stays functional and GPU-clean. Results are
+**bit-identical** — every EP-vs-FD figure in the test suite is unchanged to four
+decimals.
+
+Throughput before → after (samples/s, `StaticEP`, 400 steps/gradient):
+
+| B | CPU before | CPU after | GPU before | GPU after |
+|---|---|---|---|---|
+| 32 | 344 | 528 (1.5×) | 337 | 706 (2.1×) |
+| 128 | 605 | **1055** (1.7×) | 898 | 1985 (2.2×) |
+| 512 | 537 | 977 (1.8×) | 1663 | 4086 (2.5×) |
+| 2048 | 426 | 851 (2.0×) | 8546 | **27555** (3.2×) |
+| 8192 | 460 | 776 (1.7×) | 9559 | 25028 (2.6×) |
+| 32768 | — | — | 8342 | 25243 (3.0×) |
+
+The end-to-end gain (1.7–2.0× CPU, 2.1–3.2× GPU) exceeds the 1.55× measured on a
+single isolated step, because the fusion also removes GC pressure across the whole
+gradient and, on GPU, collapses several kernel launches per layer into one.
+
+Memory also improved, 27 → ~20 KiB/sample, and now scales cleanly (B=8192 measures
+0.149 GiB rather than the previously noisy 2.9 GiB).
+
+**Trap worth recording.** Do not "finish the job" by calling `mul!` with a real
+`transpose(W)` against a complex operand. That combination misses BLAS entirely and
+hits a generic fallback measured at **1561 µs vs 80 µs** for the allocating
+`transpose(W) * z` — a 19× pessimization. Promote the transpose to complex too.
 
 ### Memory
 
@@ -289,6 +343,7 @@ where it is 3–21×. Always run it under `JULIA_CUDA_HARD_MEMORY_LIMIT`.
 - Why does wd=1e-4 help without bounding ‖W‖?
 - Does the basin-hopping onset differ for trained vs randomly-scaled weights of equal
   norm? The probe suggests it should.
-- Buffer reuse in `_phasor_step` (currently allocates fresh state arrays per step).
-  Not a memory problem — peak is flat in T — but it is the likely reason GPU
-  throughput plateaus around 9.5K samples/s instead of scaling further.
+- Full buffer reuse in `_phasor_step` was measured at 1.44× on top of a functional
+  implementation and rejected as not worth the state-representation change; the
+  cheaper fusion above captured 1.7–3.2× instead. Revisit only if the remaining
+  per-step state allocation shows up in a profile.
