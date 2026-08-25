@@ -77,8 +77,9 @@ Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
 | **Attractor SSM** | `src/attractor_ssm.jl` | `AttractorPhasorSSM`: Hopfield-style attractor pull toward learned phasor codes |
 | **Datasets** | `src/datasets.jl` | Dataset loaders (`fashion_mnist_data`) with Scratch.jl caching |
 | **HEP** | `src/hep.jl` | Holomorphic Equilibrium Propagation (`hep_train`, `hep_energy`) |
-| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `ep_predict`, `StaticEP`/`LockinEP`); minibatched, CPU or GPU |
+| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `ep_predict`, `StaticEP`/`LockinEP`); minibatched, CPU or GPU. Carrier (rotating/R&F) support via `phasor_settle(carrier=ω)`; see `docs/ep_rotating_extension.md` |
 | **Wave** | `src/wave.jl` | `PhasorWaveSheet` dynamics |
+| **Excitable** | `src/excitable.jl` | Excitable dynamics |
 | **Velocity** | `src/velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
 | **Constants** | `src/constants.jl` | Global constants: `N_THREADS` (CUDA), `pi_f32`, device handles |
 | **Imports** | `src/imports.jl` | Centralised `using`/`import` statements |
@@ -115,7 +116,6 @@ PhasorNetworks.jl/
 │   ├── vsa.jl                  # Vector Symbolic Architecture operations
 │   ├── spiking.jl              # ODE-mode utilities (oscillator_bank, spike_current)
 │   ├── gpu.jl                  # CUDA kernels and GPU-optimised operations
-│   ├── metrics.jl              # Evaluation metrics and analysis
 │   ├── activations.jl          # Complex-domain layer activations
 │   ├── attractor_ssm.jl        # Attractor SSM
 │   ├── datasets.jl             # Dataset loaders
@@ -124,6 +124,7 @@ PhasorNetworks.jl/
 │   ├── wave.jl                 # Wave dynamics
 │   ├── velocity_bank.jl        # Velocity-bank extensions
 │   ├── velocity_bank_hw.jl     # Hardware-specific velocity bank helpers
+│   ├── excitable.jl            # Excitable dynamics
 │   └── metrics.jl              # Evaluation metrics and analysis
 ├── test/                       # Test suite
 │   ├── runtests.jl             # Test entry point
@@ -132,15 +133,28 @@ PhasorNetworks.jl/
 │   ├── vsa_tests.jl            # VSA operation tests
 │   ├── network_tests.jl        # Network forward/backward pass tests
 │   ├── network_layers_tests.jl # Individual layer tests
-│   ├── test_ssm.jl             # SSM kernel, causal conv, readout, attention tests
 │   ├── test_phase_type.jl      # Phase scalar type tests
+│   ├── test_ssm.jl             # SSM kernel, causal conv, readout, attention tests
+│   ├── test_local_attention.jl # Local attention tests
+│   ├── test_local_attention_extras.jl # Local attention extras
+│   ├── test_transformer_block.jl # Transformer block tests
+│   ├── test_multimode.jl       # Multimode tests
+│   ├── test_attractor_ssm.jl   # Attractor SSM tests
+│   ├── test_wave.jl            # Wave dynamics tests
+│   ├── test_excitable.jl       # Excitable dynamics tests
+│   ├── test_hep.jl             # HEP tests
+│   ├── test_ep.jl              # EP tests
 │   ├── metrics_tests.jl        # Metrics tests
+│   ├── test_backend.jl         # Backend abstraction tests
 │   ├── test_cuda.jl            # CUDA-specific tests
 │   └── spiking_operations_tests.jl  # Spiking operations tests (active)
-├── scripts/                    # Training scripts
-│   ├── train_fashionmnist.jl   # FashionMNIST training script (CLI)
+├── scripts/                    # Training and experiment scripts
+│   ├── train_fashionmnist.jl       # FashionMNIST training script (CLI)
 │   ├── train_fashionmnist_conv.jl  # Convolutional variant
-│   └── dispatch_polaris.sh     # HPC job submission (PBS/Polaris)
+│   ├── dispatch_polaris.sh         # HPC job submission (PBS/Polaris)
+│   ├── dispatch_aurora.sh          # Aurora HPC dispatch
+│   ├── attractor_sweep.jl          # Attractor sweep script
+│   └── ...                         # Additional experiment scripts
 ├── demos/                      # Jupyter notebooks demonstrating features
 │   ├── binding.ipynb           # VSA binding demos
 │   ├── bundling.ipynb          # VSA bundling demos
@@ -158,12 +172,18 @@ PhasorNetworks.jl/
 │   ├── make.jl                 # Doc build script
 │   └── src/                    # Doc source (index.md, api/*.md)
 ├── runs/                       # Saved training run results (.jld2)
+├── results/                    # Additional experiment outputs
+├── .claude/                    # Claude project files
+├── ext/                        # Extension files
+├── CLAUDE.md                   # Claude documentation
 ├── Project.toml                # Julia package manifest (deps + compat)
 ├── Manifest.toml               # Locked dependency versions
-└── .github/workflows/          # CI configuration
-    ├── CI.yml                  # Tests + docs deployment
-    ├── CompatHelper.yml        # Dependency compat auto-updates
-    └── TagBot.yml              # Auto-tagging releases
+└── .github/                    # CI and automation
+    ├── workflows/              # CI configuration
+    │   ├── CI.yml              # Tests + docs deployment
+    │   ├── CompatHelper.yml    # Dependency compat auto-updates
+    │   └── TagBot.yml          # Auto-tagging releases
+    └── dependabot.yml          # Dependabot configuration
 ```
 
 ### Key Entry Points
@@ -213,7 +233,7 @@ Pkg.test()
 
 The test suite covers: domain conversions, VSA operations (binding, bundling, similarity, orthogonality), network forward/backward passes, individual layer behaviour (PhasorDense, PhasorConv, ComplexBias, Codebook, MinPool, ResidualBlock, etc.), metrics, and optionally CUDA-specific tests.
 
-**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `phase_type_tests`, `ssm_tests`, `local_attention_tests`, `transformer_block_tests`, `multimode_tests`, `attractor_ssm_tests`, `wave_tests`, `hep_tests`, `ep_tests`, `spiking_operations_tests`). GPU tests (`test_cuda.jl`) run conditionally when `CUDA.functional()` is true.
+**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `test_phase_type`, `test_ssm`, `test_local_attention`, `test_local_attention_extras`, `test_transformer_block`, `test_multimode`, `test_attractor_ssm`, `test_wave`, `test_excitable`, `test_hep`, `test_ep`, `spiking_operations_tests`, `test_backend`). GPU tests (`test_cuda.jl`) run conditionally when `CUDA.functional()` is true.
 
 ### Documentation
 

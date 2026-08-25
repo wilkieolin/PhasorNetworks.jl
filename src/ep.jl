@@ -19,8 +19,15 @@
 #   * Gradient estimators: StaticEP (one-sided or centered finite
 #     difference) and LockinEP (temporal real-probe demodulation).
 #   * Costs: SimilarityCost and CodebookCost, both batched.
-#   * Self-energy: K_mode = :zero (default) or :stored. The :stored path
-#     needs dt <= 0.1 or an omega override to settle at all.
+#   * Self-energy: K_mode = :zero (default) or :stored. :stored adds the
+#     dissipative half-lambda*z only; it settles fine at the default
+#     dt = 0.5 and the layer's default omega = 2*pi. (It used to need
+#     dt <= 0.1 or an omega override, because the force wrongly carried
+#     an extra half-i-omega*z — see ep_self_force.)
+#   * Carrier: phasor_settle(carrier=omega) runs the lab frame for a
+#     rotating (resonate-and-fire) substrate. Exactly equivalent to the
+#     default co-rotating frame for one shared omega, so it is a
+#     verification tool rather than a different model.
 #   * use_bias is supported and FD-verified, and is effectively required
 #     in practice — real W plus an entrywise unit projection is
 #     axis-preserving, so without a complex bias whole input classes stay
@@ -302,23 +309,33 @@ function ep_feedback(layer::PhasorDense, ps, st, z_out)
     return transpose(ps.weight) * z_out
 end
 
-# ep_self_force: half-K times z_self. K_mode = :zero ignores the
-# stored per-channel dynamics (matches the prototype's K=0
-# settling); K_mode = :stored pulls λ = -exp(log_neg_lambda) and ω
-# from the layer's spk_args (via _get_omega). With ω ≈ 0 (e.g. by
-# passing omega_override = zeros(...) or constructing the layer
-# with SpikingArgs(t_period = Inf)) the equilibrium remains close
-# to the unit circle; with the layer's default ω = 2π and dt = 0.5
-# the per-step rotation is too large for damped fixed-point
-# iteration to settle, so :stored mode typically requires a smaller
-# dt or an ω override.
+# ep_self_force: the DISSIPATIVE half of the per-channel dynamics,
+# ½·λ·z. K_mode = :zero skips it entirely (the K = 0 phase-consensus
+# settle); K_mode = :stored pulls λ = -exp(log_neg_lambda).
+#
+# ω is deliberately NOT here. The self-energy term of Φ is
+# ½·Re⟨z, K·z⟩ with K = λ + iω, and
+#
+#     Re⟨z, (λ + iω)z⟩ = Re((λ + iω)|z|²) = λ|z|²
+#
+# — the rotation contributes NOTHING to the energy. ω is symplectic,
+# not dissipative: it generates the U(1) flow rather than descending Φ.
+# An earlier version added ½(λ + iω)z into the pre-projection drive,
+# which made the force inconsistent with `ep_energy_contribution` (where
+# ω cancels automatically) and mixed the rotation into the nonlinear
+# unit projection. That is why `:stored` used to need dt ≪ 0.5 or an ω
+# override to settle at all.
+#
+# The carrier is instead applied as an EXACT multiplicative rotation
+# after the projection — see the `carrier` kwarg of `phasor_settle`.
+# `omega_override` is accepted and ignored, kept so existing call sites
+# and the `ep_energy_contribution` signature stay source-compatible.
 function ep_self_force(layer::PhasorDense, ps, st, z_self;
                        K_mode::Symbol = :zero,
                        omega_override::Union{Nothing, AbstractVector} = nothing)
     K_mode == :zero && return zero(z_self)
     λ = -exp.(ps.log_neg_lambda)
-    ω = omega_override === nothing ? _get_omega(layer) : omega_override
-    return Float32(0.5) .* ComplexF32.(λ .+ im .* ω) .* z_self
+    return Float32(0.5) .* λ .* z_self
 end
 
 """
@@ -372,7 +389,13 @@ function ep_energy_contribution(layer::PhasorDense, ps, st, z_in, z_self;
         λ = -exp.(ps.log_neg_lambda)
         ω = omega_override === nothing ? _get_omega(layer) : omega_override
         K = ComplexF32.(λ .+ im .* ω)
-        # Energy contribution: ½·Re<z, K·z>
+        # Energy contribution: ½·Re⟨z, K·z⟩. Note this is ALREADY blind to
+        # ω — `dot(z, K.*z) = Σ K_i|z_i|²`, so `real(...)` keeps only λ.
+        # `ep_self_force` returning ½λz is therefore exactly this term's
+        # gradient; the two agree by construction. (They did not before: the
+        # force carried an extra ½iωz with no counterpart here. See
+        # `ep_self_force` and docs/phasor_ep_design.md.) ω is retained in the
+        # expression only so the arithmetic mirrors the SSM eigenvalue.
         e += Float32(0.5) * Float32(real(dot(z_self, K .* z_self)))
     end
     return e
@@ -383,10 +406,41 @@ end
 # ================================================================
 
 """
-    phasor_settle(chain, ps, st, x, cost, β; T=100, dt=0.5, init=nothing)
+    phasor_settle(chain, ps, st, x, cost, β; T=100, dt=0.5, init=nothing,
+                  carrier=nothing, t0=0)
 
 Damped projected fixed-point iteration on a `Lux.Chain` of
 EP-compatible layers. Returns one complex-state vector per layer.
+
+# Frames
+
+By default the settle runs in the **co-rotating frame**: states are
+relative phases and there is no carrier. This is the frame EP is defined
+in, and it is the one to use.
+
+`carrier = ω` instead runs the **lab frame**, where every state spins at
+the shared carrier ω, as a resonate-and-fire neuron physically does. Pass
+`t0` to continue an existing trajectory (e.g. a nudged settle warm-started
+from a free equilibrium must resume at `t0 = T_free·dt`, not 0).
+
+The two frames are **exactly equivalent**, not approximately. Under
+`z_l = w_l·e^{iωt}` applied to every layer including the input,
+
+    ż_l = (λ + iω)z_l + W_l·z_{l-1}   ⟹   ẇ_l = λw_l + W_l·w_{l-1}
+
+because Φ = Σ_l Re⟨W_l z_{l-1}, z_l⟩ is U(1)-invariant and the hard
+projection is U(1)-equivariant (`û(e^{iθ}g) = e^{iθ}û(g)`), so the
+*discrete* step commutes with the rotation too. The only terms that break
+the symmetry are the bias and the cost target, and in this package both
+physically co-rotate — `bias_current` (`src/spiking.jl`) injects a
+`periodic_raised_cosine_kernel` pulse once per period at a fixed phase, so
+its fundamental is `b·e^{iωt}`, and the codebook is made of neurons at the
+same ω. The lab-frame path therefore puts both on the carrier and the
+equivalence is exact.
+
+Consequence: the lab frame is a **validation tool**, not a cheaper or a
+truer model. Running a sweep in it buys nothing — see
+`scripts/ep_rotating_gates.jl`, which asserts the equivalence.
 
 * Initializes states at zero by default. The hard branch of
   `normalize_to_unit_circle(·; ε=0)` returns `1+0im` for
@@ -407,10 +461,16 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
                        T::Int = 100, dt::Real = 0.5f0,
                        init::Union{Nothing,Vector} = nothing,
                        K_mode::Symbol = :zero,
-                       omega_override::Union{Nothing, Vector} = nothing)
+                       omega_override::Union{Nothing, Vector} = nothing,
+                       carrier::Union{Nothing, Real} = nothing,
+                       t0::Real = 0,
+                       project::Symbol = :hard,
+                       soft_ε::Real = 0.1f0)
     layer_keys = collect(keys(ps))
     dt_f = Float32(dt)
     β_f  = Float32(β)
+    carrier_f = carrier === nothing ? nothing : Float32(carrier)
+    t_f = Float32(t0)
 
     z0 = _phase_input_to_complex(x)
 
@@ -430,7 +490,9 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_f, dt_f, states; K_mode=K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache)
+                              cache=cache, carrier=carrier_f, t_now=t_f,
+                              project=project, soft_ε=Float32(soft_ε))
+        t_f += dt_f
     end
     return states
 end
@@ -458,16 +520,44 @@ end
 # given time-varying nudge β. Factored out so phasor_settle and the
 # lock-in gradient extraction share the per-step logic. `K_mode`
 # selects the self-energy treatment (see `ep_self_force`).
-# `omega_override` is a Vector of per-layer overrides (each either
-# `nothing` to use the layer's spk_args ω, or an AbstractVector to
-# replace it) — or `nothing` to use defaults for every layer.
+# `omega_override` is VESTIGIAL in this path: ω no longer enters the
+# self-force at all (it is symplectic — see `ep_self_force`), so the value
+# threaded here is accepted and ignored. It is still live in
+# `ep_energy_contribution`, and the kwarg is retained so existing call
+# sites keep working. To actually rotate, use `carrier` below.
 function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                       cost::AbstractEPCost, β::Float32, dt::Float32, states;
                       K_mode::Symbol = :zero,
                       omega_override::Union{Nothing, Vector} = nothing,
-                      drive0 = nothing, cache = nothing)
+                      drive0 = nothing, cache = nothing,
+                      carrier::Union{Nothing, Float32} = nothing,
+                      t_now::Float32 = 0f0,
+                      project::Symbol = :hard,
+                      soft_ε::Float32 = 0.1f0)
     n = length(layer_keys)
     th = 1.0f-10
+    # Lab-frame carrier (see `phasor_settle`). `c_t` puts the two
+    # symmetry-BREAKING terms — the bias and the cost target — onto the
+    # carrier at the current time; `rot` advances the state by one exact
+    # carrier step after the projection. Everything else (W·z_in, the
+    # feedback, ½λz) is U(1)-covariant and co-rotates for free.
+    # With carrier === nothing both are absent and the loop below is the
+    # original co-rotating hot path, unchanged.
+    # Argument reduction in Float64 before rounding to ComplexF32. `ω·t`
+    # grows without bound over a long settle while the phase only matters
+    # mod 2π, so a naive Float32 `cis(ω*t)` loses absolute precision in the
+    # ARGUMENT: at ω·t ≈ 380 the Float32 spacing is ~3e-5 rad, which shows
+    # up as a ~1e-5 relative error against the co-rotating frame — small,
+    # but it is drift, and it grows with run length. The co-rotating frame
+    # never accumulates it at all, which is one more reason to prefer it.
+    c_t = carrier === nothing ? nothing :
+          ComplexF32(cis(mod(Float64(carrier) * Float64(t_now), 2π)))
+    # `rot` is applied T times in a row, so any deviation of |rot| from 1
+    # compounds into a steady-state magnitude offset. Renormalize once here
+    # (free — it is a scalar) so the carrier is a pure rotation.
+    rot = carrier === nothing ? nothing :
+          (r = ComplexF32(cis(mod(Float64(carrier) * Float64(dt), 2π)));
+           r / abs(r))
     # `map` (rather than a preallocated `Vector{Vector{ComplexF32}}`)
     # lets the element type be inferred, so the same code path yields
     # `Vector` states for a single sample and `Matrix` states for a
@@ -479,10 +569,16 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
         ω_l    = omega_override === nothing ? nothing : omega_override[l]
 
         grad_l = if l == 1
-            drive0 === nothing ?
+            # Both W₁·z₀ and the bias sit on the carrier together, so the
+            # hoisted co-rotating drive stays valid and only needs the
+            # single scalar `c_t` applied to the whole thing.
+            d = drive0 === nothing ?
                 _cached_drive(cache, l, chain, key, ps_l, st_l, z0) : drive0
+            c_t === nothing ? d : c_t .* d
         else
-            _cached_drive(cache, l, chain, key, ps_l, st_l, states[l-1])
+            # `states[l-1]` already carries the carrier; the bias does not.
+            _cached_drive(cache, l, chain, key, ps_l, st_l, states[l-1];
+                          carrier_phase=c_t)
         end
 
         # Skip the self-force entirely under K_mode=:zero rather than
@@ -498,13 +594,26 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                                                 ps[key_n], st[key_n], states[l+1])
         end
         if l == n && β != 0f0
-            grad_l = grad_l .+ nudge_force(cost, z_self, β)
+            # Evaluate the cost on the DEMODULATED state and put the
+            # resulting force back on the carrier. Doing it this way keeps
+            # every cost type working unchanged — including CodebookCost,
+            # whose softmax is nonlinear and could not simply be rotated.
+            grad_l = grad_l .+ (c_t === nothing ?
+                nudge_force(cost, z_self, β) :
+                c_t .* nudge_force(cost, z_self .* conj(c_t), β))
         end
 
         # Hard projection (ε = 0) — matches prototype, avoids
         # sub-threshold magnitude bias from the safe-mode default. Fused
         # into a single broadcast; see `_project_damp`.
-        _project_damp.(z_self, grad_l, dt, th)
+        if project === :soft
+            rot === nothing ?
+                _project_damp_soft.(z_self, grad_l, dt, soft_ε) :
+                _project_damp_soft_rot.(z_self, grad_l, dt, soft_ε, rot)
+        else
+            rot === nothing ? _project_damp.(z_self, grad_l, dt, th) :
+                              _project_damp_rot.(z_self, grad_l, dt, th, rot)
+        end
     end
 end
 
@@ -519,6 +628,76 @@ end
     r = abs(g)
     u = ifelse(r > th, g / max(r, th), ComplexF32(1, 0))
     return (1 - dt) * z + dt * u
+end
+
+# Lab-frame variant: the same projected damp, followed by ONE exact
+# carrier step. Written multiplicatively (`rot = cis(ω·dt)`), never as an
+# additive `iω·z` in the drive — that is what makes the lab frame exactly
+# conjugate to the co-rotating frame. Substituting z_n = w_n·cis(ω·n·dt):
+#
+#     cis(ω(n+1)dt)·w_{n+1} = cis(ω·dt)·[(1-dt)·cis(ω·n·dt)·w_n + dt·û(g)]
+#
+# and since g is U(1)-covariant, g = cis(ω·n·dt)·g_w and
+# û(g) = cis(ω·n·dt)·û(g_w), so the carrier divides straight out:
+#
+#     w_{n+1} = (1-dt)·w_n + dt·û(g_w)
+#
+# which is `_project_damp` verbatim. Exact at any dt — no Nyquist limit,
+# because the rotation is never discretized. Kept as a separate kernel so
+# the co-rotating path pays nothing for it.
+@inline function _project_damp_rot(z::ComplexF32, g::ComplexF32,
+                                   dt::Float32, th::Float32, rot::ComplexF32)
+    return rot * _project_damp(z, g, dt, th)
+end
+
+# Soft-projection variant. `_project_damp`'s hard branch,
+# `ifelse(r > th, g/r, 1+0im)`, is DISCONTINUOUS: as |g| → 0 the output
+# jumps to 1+0im rather than approaching it. Near-zero drives are not
+# exotic — `test/test_ep.jl` downscales its weights by 0.4 precisely
+# because "the default glorot is wide enough that some initial drives can
+# have small magnitude during settling".
+#
+# That discontinuity is a candidate explanation for the bimodal
+# lock-in failures in results/ep_adiabatic/ANTICORRELATED_GRADIENT_NOTE.md,
+# which concluded the fix was "operational, not structural" (use a smaller
+# ε). Bimodality across draws is the signature of a threshold being
+# crossed, not of an amplitude being too large — so this offers the
+# structural alternative as something measurable rather than argued.
+#
+# Softening is `u = g / sqrt(|g|² + ε²)`: exactly `g/|g|` for |g| ≫ ε,
+# smoothly → 0 as |g| → 0, and continuous everywhere.
+#
+# NOTE — `soft_normalize_to_unit_circle` (src/activations.jl) is NOT reused
+# here, deliberately. It interpolates the PHASE from 0 toward angle(g),
+#
+#     u = exp(i · blend(|g|) · angle(g))
+#
+# which is not U(1)-equivariant: `blend·angle(e^{iφ}g) ≠ φ + blend·angle(g)`.
+# Phase 0 is a fixed point of that compression, i.e. it installs a preferred
+# direction in the complex plane. For a feedforward activation that is
+# harmless; here it is fatal twice over — it breaks the carrier cancellation
+# that makes the rotating case tractable at all (`phasor_settle`'s
+# docstring), and it breaks the U(1) invariance of the Hebbian that lets a
+# spiking substrate read the gradient off relative spike times.
+#
+# Measured, on the toy chain: the phase-interpolating form settles perfectly
+# (residual 0) but degrades EP-vs-FD from 0.023 to 0.198 (K=:zero) and 0.011
+# to 0.318 (K=:stored). The form below is equivariant by construction —
+# `u(e^{iφ}g) = e^{iφ}u(g)` — so it keeps both properties.
+#
+# Unlike the hard branch, this does not force |z| = 1: a weakly driven
+# neuron settles to a small amplitude rather than snapping to 1+0im in an
+# arbitrary direction. The Hebbian then weights by amplitude, which is the
+# physically sensible reading of a neuron that barely fired.
+@inline function _project_damp_soft(z::ComplexF32, g::ComplexF32, dt::Float32,
+                                    εs::Float32)
+    u = g / sqrt(abs2(g) + εs * εs)
+    return (1 - dt) * z + dt * u
+end
+
+@inline function _project_damp_soft_rot(z::ComplexF32, g::ComplexF32, dt::Float32,
+                                        εs::Float32, rot::ComplexF32)
+    return rot * _project_damp_soft(z, g, dt, εs)
 end
 
 # Per-settle weight cache. `ps.weight` is real, but the states are complex:
@@ -555,12 +734,18 @@ end
 
 # Cached drive/feedback with a fallback to the generic per-layer interface
 # for any layer the cache could not handle.
-@inline function _cached_drive(cache, l, chain, key, ps_l, st_l, z_in)
+# `carrier_phase` (lab frame only) multiplies the BIAS and nothing else:
+# `z_in` already carries the carrier, but the stored bias is a
+# co-rotating-frame quantity. `nothing` leaves the expression bit-identical
+# to the original so the co-rotating hot path is unaffected.
+@inline function _cached_drive(cache, l, chain, key, ps_l, st_l, z_in;
+                               carrier_phase::Union{Nothing, ComplexF32} = nothing)
     Wc = cache === nothing ? nothing : cache.drive[l]
     Wc === nothing && return ep_drive(chain.layers[key], ps_l, st_l, z_in)
     y = Wc * z_in
     if haskey(ps_l, :bias_real)
-        y = y .+ (ps_l.bias_real .+ 1f0im .* ps_l.bias_imag)
+        b = ps_l.bias_real .+ 1f0im .* ps_l.bias_imag
+        y = y .+ (carrier_phase === nothing ? b : carrier_phase .* b)
     end
     return y
 end
@@ -607,13 +792,14 @@ function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
                             cost::AbstractEPCost;
                             ε::Real = 1e-5, T::Int = 200, dt::Real = 0.5f0,
                             K_mode::Symbol = :zero,
-                            omega_override::Union{Nothing, Vector} = nothing)
+                            omega_override::Union{Nothing, Vector} = nothing,
+                            project::Symbol = :hard)
     ε_f  = Float32(ε)
 
     function loss_at(ps_perturbed)
         s = phasor_settle(chain, ps_perturbed, st, x, cost, 0f0;
                           T=T, dt=dt, K_mode=K_mode,
-                          omega_override=omega_override)
+                          omega_override=omega_override, project=project)
         return ep_loss(cost, s[end])
     end
 
@@ -720,13 +906,13 @@ comparison.
     the same norm appear better behaved, since training at ‖W₁‖ ≈ 27
     still makes progress.
 
-`K_mode = :zero` (default) ignores the layer's stored
-`log_neg_lambda` / `omega` for self-energy — matches the
-prototype's K = 0 phase-consensus settling. `K_mode = :stored` adds
-the `½·(λ + iω)·z` self-force; in this mode the equilibrium reflects
-the layer's per-channel SSM dynamics, but settling is sensitive to
-the per-step rotation `dt·ω`, so a smaller `dt` and / or chain with
-zeroed `ω` is typically required (see `docs/phasor_ep_design.md`).
+`K_mode = :zero` (default) skips the self-force entirely — the K = 0
+phase-consensus settle. `K_mode = :stored` adds `½·λ·z`, so the
+equilibrium reflects the layer's per-channel decay. It settles at the
+default `dt = 0.5` and the layer's default `ω = 2π`; ω does not enter
+(it is symplectic — see [`ep_self_force`](@ref)), so `omega_override`
+has no effect on either mode. To actually rotate, pass `carrier` to
+[`phasor_settle`](@ref).
 """
 Base.@kwdef struct StaticEP <: AbstractEPMethod
     β::Float32      = 0.1f0
@@ -735,6 +921,9 @@ Base.@kwdef struct StaticEP <: AbstractEPMethod
     dt::Float32     = 0.5f0
     K_mode::Symbol  = :zero
     centered::Bool  = false
+    # :hard (default) is the discontinuous unit projection; :soft blends
+    # phase in with a sigmoid in |g|. See `_project_damp_soft`.
+    project::Symbol = :hard
 end
 
 """
@@ -755,10 +944,10 @@ function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x,
                      omega_override::Union{Nothing, Vector} = nothing)
     s_free  = phasor_settle(chain, ps, st, x, cost, 0f0;
                             T=m.T_free,  dt=m.dt, K_mode=m.K_mode,
-                            omega_override=omega_override)
+                            omega_override=omega_override, project=m.project)
     s_pos   = phasor_settle(chain, ps, st, x, cost, m.β;
                             T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode,
-                            omega_override=omega_override)
+                            omega_override=omega_override, project=m.project)
 
     h_free = chain_hebbians(chain, ps, st, x, s_free)
     h_pos  = chain_hebbians(chain, ps, st, x, s_pos)
@@ -770,7 +959,7 @@ function ep_gradient(m::StaticEP, chain::Lux.Chain, ps, st, x,
         # extra nudged settle.
         s_neg = phasor_settle(chain, ps, st, x, cost, -m.β;
                               T=m.T_nudge, dt=m.dt, init=s_free, K_mode=m.K_mode,
-                              omega_override=omega_override)
+                              omega_override=omega_override, project=m.project)
         h_neg = chain_hebbians(chain, ps, st, x, s_neg)
         grads = _ep_diff_gradient(ps, h_neg, h_pos, 2f0 * m.β)
     else
@@ -906,6 +1095,75 @@ the deep-adiabatic regime visible in
 `demos/phasor_ep_demo.ipynb` Section 6 (matches FD to a few
 percent on a 2-layer chain).
 """
+# ---- spike-timing readout floor ---------------------------------
+#
+# On a real spiking substrate a neuron's phase is not read off a complex
+# number — it is inferred from WHEN the neuron spiked, and that time is
+# resolvable only to about the spike-kernel width. `SpikingArgs` defaults
+# to `t_window = 0.01` against `t_period = 1.0`, and `bias_current` smears
+# each pulse over `±2·t_window`, so the readout quantum is a few percent
+# of a full turn.
+#
+# That matters because it puts a LOWER bound on the probe amplitude ε: the
+# lock-in has to resolve a response of order ε·χ above this floor. The
+# usual advice for the estimator's other failure mode — the hard
+# projection basin-hopping at large ε — is to shrink ε, which drives
+# straight into this floor from the other side. The usable zone for a
+# spiking implementation is therefore TWO-SIDED, and a sweep on exact
+# complex states can only ever see the upper edge of it.
+#
+# Note this is not a foregone conclusion: the lock-in integrates over many
+# probe cycles, and the state sweeps across bin boundaries as it goes, so
+# the probe dithers the quantizer and time-averaging recovers some
+# sub-quantum resolution. How much is exactly what the sweep measures.
+#
+# Modelled here as readout-only: the dynamics stay analog (a membrane
+# potential is continuous) and only the value entering the Hebbian is
+# quantized. Quantizing inter-layer communication as well is a strictly
+# stronger constraint and is not attempted here.
+@inline function _quantize_phase(z::ComplexF32, inv_δ::Float32)
+    turns = angle(z) * (1f0 / (2f0 * pi_f32))
+    q     = round(turns * inv_δ) / inv_δ
+    return abs(z) * ComplexF32(cis(2f0 * pi_f32 * q))
+end
+
+# Dithered readout: jitter the phase (in turns) BEFORE quantizing.
+#
+# This matters more than it looks. A deterministic quantizer is the
+# *no-dither* limit: if the probe response is smaller than one bin, the
+# observed value never changes, the demodulated sum is identically zero,
+# and the estimated gradient is zero — not noisy, ZERO. Measured on the
+# 784→256→64 grid, a 0.005-turn quantum takes the best median cos from
+# 0.999 to 0.07 with 100% failure at every (ε, ω_p, n_cycles).
+#
+# But real spike timing is noisy, and noise dithers a quantizer: it
+# converts a dead zone into a biased coin whose mean tracks the sub-bin
+# value, which time-averaging over the lock-in window can then recover.
+# So the honest question is not "does quantization hurt" (it does,
+# catastrophically) but "does the jitter that accompanies it in any real
+# device buy the resolution back". `readout_jitter` is what measures that.
+@inline function _dither_quantize(z::ComplexF32, inv_δ::Float32, n::Float32)
+    turns = angle(z) * (1f0 / (2f0 * pi_f32)) + n
+    q     = round(turns * inv_δ) / inv_δ
+    return abs(z) * ComplexF32(cis(2f0 * pi_f32 * q))
+end
+
+# `noise` must be pre-drawn by the caller: `ep_gradient` owns one RNG for
+# the whole estimate so the result is reproducible from the method's seed
+# and so no RNG is allocated per step.
+# `δ` and `jitter` are both in TURNS (so t_window/t_period, not radians).
+# δ = jitter = 0 returns the argument untouched and allocation-free.
+function _readout(z, δ::Float32, jitter::Float32, noise)
+    δ <= 0f0 && jitter <= 0f0 && return z          # exact
+    if δ <= 0f0                                     # jitter only, no grid
+        return abs.(z) .* ComplexF32.(cis.(angle.(z) .+ 2f0 .* pi_f32 .* noise))
+    end
+    # Quantized. `noise === nothing` is the undithered case and must route
+    # to the plain quantizer — the dither kernel takes a Float32 per element.
+    noise === nothing && return _quantize_phase.(z, 1f0 / δ)
+    return _dither_quantize.(z, 1f0 / δ, noise)
+end
+
 Base.@kwdef struct LockinEP <: AbstractEPMethod
     ε::Float32                 = 0.05f0
     ω_p::Float32               = 0.05f0
@@ -914,6 +1172,16 @@ Base.@kwdef struct LockinEP <: AbstractEPMethod
     T_free::Int                = 200
     dt::Float32                = 0.1f0
     K_mode::Symbol             = :zero
+    # Spike-timing phase quantum in turns (t_window / t_period). 0 = exact
+    # complex readout, i.e. the original estimator. See `_readout`.
+    readout_δ::Float32         = 0f0
+    # :hard (default) or :soft — see `_project_damp_soft`.
+    project::Symbol            = :hard
+    # Spike-time jitter, std in TURNS, applied before quantization. See
+    # `_dither_quantize` — this is what tests whether device noise buys
+    # back the resolution that `readout_δ` destroys.
+    readout_jitter::Float32    = 0f0
+    readout_seed::Int          = 1234
 end
 
 function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
@@ -922,8 +1190,21 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
     s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
                            T=m.T_free, dt=m.dt, K_mode=m.K_mode,
-                           omega_override=omega_override)
-    h_dc   = chain_hebbians(chain, ps, st, x, s_free)
+                           omega_override=omega_override, project=m.project)
+    # The DC Hebbian is subtracted from the demodulated accumulators, so it
+    # must be read through the SAME quantizer — otherwise the mismatch
+    # between an exact DC term and a quantized AC term would masquerade as
+    # a response.
+    # One RNG per gradient estimate: reproducible from `readout_seed`, and
+    # no allocation inside the integration loop.
+    ro_rng = Xoshiro(m.readout_seed)
+    _noise(a) = m.readout_jitter <= 0f0 ? nothing :
+                m.readout_jitter .* randn(ro_rng, Float32, size(a))
+    _ro(a)    = _readout(a, m.readout_δ, m.readout_jitter, _noise(a))
+
+    z0c    = _phase_input_to_complex(x)
+    z0_ro  = _ro(z0c)
+    h_dc   = chain_hebbians(chain, ps, st, z0_ro, [_ro(z) for z in s_free])
 
     # 2. Lock-in setup.
     layer_keys = collect(keys(ps))
@@ -942,7 +1223,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache)
+                              cache=cache, project=m.project)
     end
 
     # 4. Accumulators.
@@ -980,15 +1261,20 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache)
+                              cache=cache, project=m.project)
         demod = ComplexF32(exp(-im * m.ω_p * t * m.dt))
         c += demod
+        # Readout-only quantization: `states` keeps evolving in full
+        # precision (the membrane is analog); only what the synapse
+        # observes is snapped to the spike-time grid.
+        obs = (m.readout_δ <= 0f0 && m.readout_jitter <= 0f0) ? states :
+              [_ro(z) for z in states]
         for l in 1:length(layer_keys)
-            Zhat[l] .+= states[l] .* demod
+            Zhat[l] .+= obs[l] .* demod
             HW[l] === nothing && continue
             # H += demod · z_l · z_{l-1}'  (adjoint, not transpose —
             # the energy derivative requires conjugation; see ep_hebbian)
-            mul!(HW[l], states[l], adjoint(states[l-1]), demod, one(ComplexF32))
+            mul!(HW[l], obs[l], adjoint(obs[l-1]), demod, one(ComplexF32))
         end
     end
 
@@ -998,7 +1284,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     #    real/imag parts of H_b give the bias_real / bias_imag grads
     #    respectively (since H_b's "complex" packaging is z_self and
     #    Re(z_self), Im(z_self) are independent params).
-    H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
+    H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, HW, z0_ro, h_dc, c)
     grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin, m.ε)
     return grads, s_free
 end

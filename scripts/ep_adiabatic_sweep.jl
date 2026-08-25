@@ -62,6 +62,38 @@ const T_FREE  = _envi("EPS_TFREE",  200)
 const WARMUP  = _envi("EPS_WARMUP", 1)
 const THRESH  = parse(Float64, get(ENV, "EPS_THRESH", "0.99"))
 
+# Every grid axis is env-overridable, so a focused follow-up study does not
+# need a code edit (and so the code edit cannot silently disagree with what
+# the run actually swept — the axis values land in the CSV either way).
+_envfs_or(k, default) = haskey(ENV, k) ?
+    Tuple(parse(Float32, strip(x)) for x in split(ENV[k], ",")) : default
+
+# ---------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------
+# The schema guard below catches a CHANGED set of columns. It does not
+# catch the worse failure: the same columns, filled by different code.
+# That happened — a rotating variant of this harness was rewritten to
+# compute a different quantity while keeping the schema, and its output
+# landed in the same directory as the previous version's. Half the rows
+# said one thing, half said the opposite, and nothing in the files
+# distinguished them.
+#
+# So every row carries the commit it was produced at. Mixed `gitrev`
+# values in one CSV mean the file is not a single experiment.
+# A bare "-dirty" flag is not enough: during development `src/` changes
+# many times between runs and every one of them would stamp the same
+# token, which is exactly the ambiguity this column exists to remove. So
+# uncommitted work contributes a short hash OF THE DIFF, making two
+# different working states distinguishable.
+const GITREV = try
+    rev = strip(read(`git -C $(@__DIR__) rev-parse --short HEAD`, String))
+    d   = read(`git -C $(@__DIR__) diff HEAD -- ../src`, String)
+    isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
+catch
+    "unknown"
+end
+
 # ---------------------------------------------------------------------
 # Resumable CSV (same pattern as scripts/temporal_scaling_sweep.jl)
 # ---------------------------------------------------------------------
@@ -72,6 +104,7 @@ const THRESH  = parse(Float64, get(ENV, "EPS_THRESH", "0.99"))
 # produced the opposite conclusion.) Validate instead.
 function append_row(file::String, row::NamedTuple)
     isdir(dirname(file)) || mkpath(dirname(file))
+    row = merge(row, (gitrev = GITREV,))
     hdr = join(String.(keys(row)), ",")
     if isfile(file) && filesize(file) > 0
         existing = open(readline, file)
@@ -95,7 +128,13 @@ function read_rows(file::String)
     lines = readlines(file)
     length(lines) <= 1 && return Dict{String,String}[]
     hdr = String.(split(lines[1], ','))
-    [Dict(zip(hdr, String.(split(ln, ',')))) for ln in lines[2:end] if !isempty(strip(ln))]
+    rows = [Dict(zip(hdr, String.(split(ln, ',')))) for ln in lines[2:end] if !isempty(strip(ln))]
+    revs = Set(get(r, "gitrev", "unknown") for r in rows)
+    if length(revs) > 1
+        @warn """$file mixes $(length(revs)) code versions: $(join(sort(collect(revs)), ", ")).
+                 These rows are not one experiment — do not aggregate them.""" 
+    end
+    return rows
 end
 
 function done_keys(file::String, keyfields::Tuple)
@@ -147,13 +186,39 @@ period_steps(ω_p, dt) = round(Int, 2π / (ω_p * dt))
 lockin_steps(; ω_p, dt, n_cycles, T_warmup_cycles = WARMUP, T_free = T_FREE) =
     T_free + (T_warmup_cycles + n_cycles) * period_steps(ω_p, dt)
 
+# Settle steps are the wrong unit for a rule meant to run on live hardware:
+# what a physical network spends is CARRIER CYCLES. With t_period = 1 a step
+# of `dt` is `dt` carrier periods, so the conversion is trivial — and the
+# resulting number is the one that decides feasibility. At R_relax ≈ 0.1 the
+# network relaxes in ~10 carrier cycles, while ω_p = 0.02 makes one probe
+# period ~314 of them; a 4-cycle estimate is therefore ~1.5k carrier cycles
+# per gradient. At a 1 kHz carrier that is about 1.5 s per gradient.
+carrier_cycles(; ω_p, dt, n_cycles, T_warmup_cycles = WARMUP, T_free = T_FREE,
+                 t_period = 1.0f0) =
+    lockin_steps(; ω_p, dt, n_cycles, T_warmup_cycles, T_free) * dt / t_period
+
+# How far the free equilibrium is from actually being an equilibrium. Above
+# a locking threshold there is no fixed point at all, only drift — and a
+# cosine computed against a drifting snapshot reads as noise, which is
+# indistinguishable from "the estimator is broken" unless this is recorded
+# alongside it. Cheap: one extra step.
+function settle_residual(chain, ps, st, x, cost, s; dt = DT, K_mode = :zero,
+                         project = :hard)
+    s1 = phasor_settle(chain, ps, st, x, cost, 0f0;
+                       T = 1, dt = dt, init = s, K_mode = K_mode,
+                       project = project)
+    return maximum(maximum(abs.(a .- b)) for (a, b) in zip(s1, s))
+end
+
 # ---------------------------------------------------------------------
 # Fidelity of one lock-in configuration against a precomputed reference
 # ---------------------------------------------------------------------
 "Centered StaticEP at small β: the O(β) bias cancels, which matters because
 `fd_gradient_phasor` needs n_params+1 settles and is unaffordable here."
-reference_method(; β = 0.005f0, T_free = 400, T_nudge = 200) =
-    StaticEP(β = β, T_free = T_free, T_nudge = T_nudge, dt = DT, centered = true)
+reference_method(; β = 0.005f0, T_free = 400, T_nudge = 200,
+                   K_mode = :zero, project = :hard) =
+    StaticEP(β = β, T_free = T_free, T_nudge = T_nudge, dt = DT,
+             centered = true, K_mode = K_mode, project = project)
 
 function fidelity(g, ref)
     out = NamedTuple[]
@@ -341,16 +406,60 @@ end
 # surface is known analytically so there is nothing to learn about it; and an
 # evaluation is ~70 ms, so the whole grid is minutes. BO earns its complexity
 # when evaluations cost minutes to hours.
-const GRID_EPS      = (0.003f0, 0.01f0, 0.03f0, 0.1f0, 0.3f0)
-const GRID_OMEGA    = (0.005f0, 0.01f0, 0.02f0, 0.05f0, 0.1f0, 0.2f0)
+# Extended DOWNWARD from the original 0.003 floor. The upper boundary
+# (hard-projection basin hopping) was already mapped; the lower one is set
+# by the spike-timing readout quantum and has never been looked for. The
+# usable zone for a spiking implementation is two-sided, and the standing
+# advice to fix the upper failure by shrinking ε drives straight into the
+# lower one.
+const GRID_EPS      = _envfs_or("EPS_GRID_EPS",
+                        (0.0003f0, 0.001f0, 0.003f0, 0.01f0, 0.03f0, 0.1f0, 0.3f0))
+
+# Spike-timing phase quantum in TURNS. 0 is the exact complex readout (the
+# original sweep). SpikingArgs defaults to t_window = 0.01 against
+# t_period = 1.0, and `bias_current` smears each pulse over ±2·t_window, so
+# 0.01-0.02 is the physically relevant range and 0.005 brackets it below.
+const GRID_READOUT  = _envf("EPS_READOUT", -1f0) >= 0 ?
+    (_envf("EPS_READOUT", 0f0),) : (0f0, 0.005f0, 0.01f0, 0.02f0)
+const GRID_OMEGA    = _envfs_or("EPS_GRID_OMEGA",
+                        (0.005f0, 0.01f0, 0.02f0, 0.05f0, 0.1f0, 0.2f0))
 # Stage 0 measured mean cos essentially flat for n_cycles 1/2/4 (0.960/0.961/
 # 0.961) and WORSE at 8 and 16 (0.958/0.930) — more demodulation cycles do not
 # buy selectivity here, they just cost linearly more. So the grid includes 1.
-const GRID_NCYCLES  = (1, 2, 4, 8)
+const GRID_NCYCLES  = haskey(ENV, "EPS_GRID_NCYCLES") ?
+    Tuple(parse(Int, strip(x)) for x in split(ENV["EPS_GRID_NCYCLES"], ",")) :
+    (2, 8)                     # trimmed: see note above. The freed budget
+                               # pays for the ε and readout axes instead.
+
+# The two axes that close the gap between `phasor_settle` and a running
+# spiking network (ω, by contrast, is provably free — see
+# docs/ep_rotating_extension.md):
+#
+#   K_mode  — :zero drops the per-channel dynamics entirely; :stored adds
+#             the ½λz decay. Usable at dt=0.5 only since the λ/ω split.
+#   project — :hard is the discontinuous unit projection; :soft blends
+#             phase in with a sigmoid in |g|. Tests whether the bimodal
+#             lock-in failures are structural (a threshold being crossed)
+#             rather than merely an over-large ε.
+#
+# Both default to the full pair, which makes the grid 4x the single-axis
+# cost (~13.5M -> ~54M settle steps, roughly 50 min at 10 threads). Trim
+# with e.g. EPS_KMODE=zero EPS_PROJECT=hard.
+_envsyms(k, d) = Tuple(Symbol(strip(x)) for x in split(get(ENV, k, d), ","))
+const GRID_KMODE    = _envsyms("EPS_KMODE",   "zero,stored")
+const GRID_PROJECT  = _envsyms("EPS_PROJECT", "hard,soft")
+
+# Spike-time jitter std, in TURNS, applied before quantization. Expressed
+# as a MULTIPLE of the readout quantum so one setting means the same thing
+# across quanta: 0 = deterministic quantizer (the no-dither worst case),
+# ~1 = jitter comparable to the bin, which is the regime where dithering
+# classically buys back sub-quantum resolution.
+_envfs(k, d) = Tuple(parse(Float32, strip(x)) for x in split(get(ENV, k, d), ","))
+const GRID_JITTER = _envfs("EPS_JITTER", "0.0")
 
 function stage_grid()
     file = joinpath(OUT, "grid.csv")
-    done = done_keys(file, (:eps, :omega_p, :n_cycles, :rep))
+    done = done_keys(file, (:eps, :omega_p, :n_cycles, :readout, :jitter, :kmode, :project, :rep))
     codes = make_codes(8)
     chain, ps, st = build_chain(7)
 
@@ -359,15 +468,26 @@ function stage_grid()
     # is the difference between REPS references and 90*REPS of them.
     @info "Stage 1: precomputing $(REPS) references (shared across all configs)"
     inputs = [(make_input(100 + r), make_cost(codes, 100 + r)) for r in 1:REPS]
-    refs = Vector{Any}(undef, REPS)
-    Threads.@threads for r in 1:REPS
+    # One reference per (K_mode, project, replicate) — it is independent of
+    # every LOCK-IN knob, but not of how the settle itself is configured.
+    refkeys = [(km, pj, r) for km in GRID_KMODE, pj in GRID_PROJECT, r in 1:REPS]
+    refkeys = vec(refkeys)
+    refs = Dict{Tuple{Symbol,Symbol,Int},Any}()
+    reflk = ReentrantLock()
+    Threads.@threads :dynamic for rk in refkeys
+        km, pj, r = rk
         x, cost = inputs[r]
-        refs[r], _ = ep_gradient(reference_method(), chain, ps, st, x, cost)
+        g, _ = ep_gradient(reference_method(K_mode=km, project=pj),
+                           chain, ps, st, x, cost)
+        lock(reflk) do; refs[rk] = g; end
     end
 
-    jobs = [(ε, ω, nc, r) for ε in GRID_EPS, ω in GRID_OMEGA,
-                              nc in GRID_NCYCLES, r in 1:REPS]
-    jobs = [j for j in vec(jobs) if !(_key(j[1], j[2], j[3], j[4]) in done)]
+    jobs = [(ε, ω, nc, δ, jt, km, pj, r) for ε in GRID_EPS, ω in GRID_OMEGA,
+                                             nc in GRID_NCYCLES, δ in GRID_READOUT,
+                                             jt in GRID_JITTER,
+                                             km in GRID_KMODE, pj in GRID_PROJECT,
+                                             r in 1:REPS]
+    jobs = [j for j in vec(jobs) if !(_key(j...) in done)]
     # Cheapest first: cost varies ~40x across the grid, so this front-loads
     # coverage and leaves the expensive small-ω_p corner for last. A killed
     # run then still leaves a usable map.
@@ -376,18 +496,46 @@ function stage_grid()
     @info "Stage 1: $(length(jobs)) evaluations queued" total_settle_steps=total_steps
 
     lk = ReentrantLock(); ndone = Threads.Atomic{Int}(0)
-    Threads.@threads for j in jobs
-        ε, ω, nc, r = j
+    # `:dynamic`, NOT the default static schedule. Static scheduling hands
+    # each thread a CONTIGUOUS chunk of `jobs`, and `jobs` was just sorted
+    # cheapest-first — so the last thread receives the entire expensive
+    # tail and runs alone long after the others have finished. Measured on
+    # a 2688-job grid: the final ~120 jobs crawled at ~380 steps/s against
+    # 17.7k steps/s while genuinely parallel. The sort that exists to make
+    # a killed run leave a usable map was serializing the endgame.
+    Threads.@threads :dynamic for j in jobs
+        ε, ω, nc, δ, jt, km, pj, r = j
         x, cost = inputs[r]
-        g, _ = ep_gradient(LockinEP(ε=ε, ω_p=ω, n_cycles=nc,
-                                    T_warmup_cycles=WARMUP, T_free=T_FREE, dt=DT),
-                           chain, ps, st, x, cost)
-        f = fidelity(g, refs[r])
-        row = (eps=ε, omega_p=ω, n_cycles=nc, rep=r,
+        # Jitter is specified as a MULTIPLE OF THE QUANTUM, so one setting
+        # means the same thing across quanta. Careful reading the δ = 0 row
+        # of any jitter table: with no quantum there is nothing to scale
+        # against, so the value is an ABSOLUTE phase-noise std in turns —
+        # jt = 0.25 there is 90° of noise, not a small perturbation, and
+        # its collapse to cos ≈ 0 is a statement about the fixture rather
+        # than about dithering.
+        jitter_abs = δ > 0 ? jt * δ : jt
+        g, s_free = ep_gradient(LockinEP(ε=ε, ω_p=ω, n_cycles=nc,
+                                         T_warmup_cycles=WARMUP, T_free=T_FREE,
+                                         dt=DT, readout_δ=δ,
+                                         readout_jitter=jitter_abs,
+                                         readout_seed=1000 + r,
+                                         K_mode=km, project=pj),
+                                chain, ps, st, x, cost)
+        # The reference must share K_mode and projection, or the comparison
+        # measures the settle's configuration rather than the estimator.
+        ref = refs[(km, pj, r)]
+        f = fidelity(g, ref)
+        row = (eps=ε, omega_p=ω, n_cycles=nc, readout=δ, jitter=jt,
+               kmode=km, project=pj, rep=r,
                cos=worst_cos(f),
                cos_l1=f[1].cos, cos_l2=length(f) > 1 ? f[2].cos : NaN,
                relerr_l1=f[1].relerr,
-               steps=lockin_steps(ω_p=ω, dt=DT, n_cycles=nc))
+               # Distinguishes "estimator is wrong" from "there is no
+               # equilibrium to estimate at" — see `settle_residual`.
+               resid=settle_residual(chain, ps, st, x, cost, s_free;
+                                     K_mode=km, project=pj),
+               steps=lockin_steps(ω_p=ω, dt=DT, n_cycles=nc),
+               cycles=carrier_cycles(ω_p=ω, dt=DT, n_cycles=nc))
         lock(lk) do
             append_row(file, row)
             n = Threads.atomic_add!(ndone, 1) + 1
@@ -405,12 +553,19 @@ function report()
     rows = read_rows(file)
     isempty(rows) && (@warn "no grid rows at $file — run the grid stage first"; return)
 
-    agg = Dict{Tuple{String,String,String},Vector{Float64}}()
-    steps = Dict{Tuple{String,String,String},Int}()
+    agg   = Dict{NTuple{7,String},Vector{Float64}}()
+    resid = Dict{NTuple{7,String},Vector{Float64}}()
+    steps = Dict{NTuple{7,String},Int}()
+    cycs  = Dict{NTuple{7,String},Float64}()
     for r in rows
-        k = (r["eps"], r["omega_p"], r["n_cycles"])
+        k = (r["eps"], r["omega_p"], r["n_cycles"], get(r, "readout", "0.0"),
+             get(r, "jitter", "0.0"),
+             get(r, "kmode", "zero"), get(r, "project", "hard"))
         push!(get!(agg, k, Float64[]), parse(Float64, r["cos"]))
+        haskey(r, "resid") && push!(get!(resid, k, Float64[]),
+                                    parse(Float64, r["resid"]))
         steps[k] = parse(Int, r["steps"])
+        cycs[k]  = haskey(r, "cycles") ? parse(Float64, r["cycles"]) : NaN
     end
 
     # Summaries are QUANTILE-based, not mean±stderr. The per-draw fidelity
@@ -420,19 +575,59 @@ function report()
     # What matters operationally is RELIABILITY — how often the estimator is
     # usable — so feasibility is gated on a lower quantile.
     println("\n-- fidelity map: worst-layer cos over draws, threshold $(THRESH) --")
-    println("  eps      omega_p  cycles  n   median      p10        min    fail%  steps   feasible")
+    println("  `resid` is the free-settle stationarity residual: if it is not small,")
+    println("  `cos` is a snapshot of a drifting state and the low value says nothing")
+    println("  about the estimator. `cycles` is carrier periods per gradient — the unit")
+    println("  that decides whether this is runnable on live hardware.")
+    println()
+    println("  eps      omega_p  cyc  rdout  jit    kmode   proj   n   median      p10        min    fail%   resid     cycles  feasible")
     ok = Tuple[]
-    for k in sort(collect(keys(agg)), by = x -> (parse(Float64,x[1]), parse(Float64,x[2]), parse(Int,x[3])))
+    keyord(x) = (x[6], x[7], parse(Float64,x[4]), parse(Float64,x[5]),
+                 parse(Float64,x[1]), parse(Float64,x[2]), parse(Int,x[3]))
+    for k in sort(collect(keys(agg)), by = keyord)
         v = agg[k]
         med = quantile_(v, 0.5); p10 = quantile_(v, 0.1)
         failfrac = count(<(0.9), v) / length(v)
+        rs = get(resid, k, Float64[])
+        rmax = isempty(rs) ? NaN : maximum(rs)
         # Feasible = the 10th percentile clears the threshold, i.e. the
         # configuration is reliable across draws, not merely good on average.
         feas = length(v) >= 4 && p10 >= THRESH
-        feas && push!(ok, (k..., steps[k], med))
-        @printf("  %-8s %-8s %-6s %2d  %9.5f %9.5f %9.5f  %4.0f%%  %7d   %s\n",
-                k[1], k[2], k[3], length(v), med, p10, minimum(v),
-                100failfrac, steps[k], feas ? "yes" : "")
+        feas && push!(ok, (k..., steps[k], med, cycs[k]))
+        @printf("  %-8s %-8s %-4s %-6s %-6s %-6s %-6s %2d  %9.5f %9.5f %9.5f  %4.0f%%  %8.2g %8.0f   %s\n",
+                k[1], k[2], k[3], k[4], k[5], k[6], k[7], length(v), med, p10, minimum(v),
+                100failfrac, rmax, cycs[k], feas ? "yes" : "")
+    end
+
+    # The two-sided-ε question, answered directly: for each readout quantum,
+    # where does fidelity peak in ε? An exact readout should improve
+    # monotonically as ε shrinks (until the projection stops basin-hopping);
+    # a quantized one should turn over, because the response falls below the
+    # spike-timing floor. A turnover that MOVES with the quantum is the
+    # signature being looked for.
+    δs = sort(unique(k[4] for k in keys(agg)), by = x -> parse(Float64, x))
+    if length(δs) > 1
+        εs   = sort(unique(k[1] for k in keys(agg)), by = x -> parse(Float64, x))
+        cfgs = sort(unique((k[5], k[6], k[7]) for k in keys(agg)))
+        println("\n-- lower-ε boundary: best median cos per (readout quantum, ε) --")
+        for (jt, km, pj) in cfgs
+            println("  jitter=$jt  K_mode=:$km  project=:$pj")
+            @printf("  %-9s", "readout")
+            foreach(e -> @printf("%9s", e), εs); println()
+            for δ in δs
+                @printf("  %-9s", δ)
+                for e in εs
+                    vs = [agg[k] for k in keys(agg)
+                          if k[1] == e && k[4] == δ && k[5] == jt &&
+                             k[6] == km && k[7] == pj]
+                    @printf("%9s", isempty(vs) ? "-" :
+                            @sprintf("%.4f", maximum(quantile_(v, 0.5) for v in vs)))
+                end
+                println()
+            end
+            println()
+        end
+        println("  (monotone-in-ε rows = floor not reached; a turnover = floor found)")
     end
 
     if isempty(ok)
@@ -451,17 +646,19 @@ function report()
         end
         return
     end
-    sort!(ok, by = x -> x[4])
+    sort!(ok, by = x -> x[8])
     println("\n-- cheapest feasible configurations (the operating zone's efficient frontier) --")
-    println("  rank  eps      omega_p  cycles   steps   mean cos   speedup vs slowest feasible")
-    slowest = maximum(x -> x[4], ok)
+    println("  rank  eps      omega_p  cyc  rdout  jit    kmode  proj     steps  carrier-cyc  median cos   speedup")
+    slowest = maximum(x -> x[8], ok)
     for (i, o) in enumerate(ok[1:min(end, 8)])
-        @printf("  %4d  %-8s %-8s %-6s %7d   %8.5f   %.1fx\n",
-                i, o[1], o[2], o[3], o[4], o[5], slowest / o[4])
+        @printf("  %4d  %-8s %-8s %-4s %-6s %-6s %-6s %-6s %7d %11.0f   %9.5f   %.1fx\n",
+                i, o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], o[10], o[9], slowest / o[8])
     end
     best = ok[1]
-    @printf("\n  Recommended: ε=%s, ω_p=%s, n_cycles=%s, dt=%g  (%d steps/gradient)\n",
-            best[1], best[2], best[3], DT, best[4])
+    @printf("\n  Recommended: ε=%s, ω_p=%s, n_cycles=%s, readout_δ=%s, jitter=%s, K_mode=:%s, project=:%s, dt=%g\n",
+            best[1], best[2], best[3], best[4], best[5], best[6], best[7], DT)
+    @printf("               %d steps = %.0f carrier cycles per gradient\n",
+            best[8], best[10])
 end
 
 # ---------------------------------------------------------------------

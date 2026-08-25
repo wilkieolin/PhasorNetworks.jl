@@ -76,14 +76,35 @@ The inner product is the standard Hermitian one `⟨a, b⟩ = Σ_i a_i · b̄_i`
 ### Self-energy term
 
 `K_l = diag(λ_l + iω_l)` is the per-channel SSM eigenvalue matrix.
-Its Wirtinger gradient is
 
-    ∂(½ Re⟨z, Kz⟩) / ∂z̄ = ½ K z
+> **Correction (was wrong here, and the code inherited it).** This
+> section used to claim `∂(½ Re⟨z, Kz⟩)/∂z̄ = ½ K z`, "which reproduces
+> the `K · z` term of the ODE". It does not. Expanding with the Hermitian
+> product `⟨a,b⟩ = Σ a_i b̄_i`:
+>
+>     ⟨z, Kz⟩    = Σ_i z_i · conj(K_i z_i) = Σ_i conj(K_i)·|z_i|²
+>     Re⟨z, Kz⟩  = Σ_i Re(K_i)·|z_i|²      = Σ_i λ_i·|z_i|²
+>
+> so the imaginary part drops out **before** differentiating, and
+>
+>     ∂(½ Re⟨z, Kz⟩) / ∂z̄ = ½ λ z          ← real λ, no ω
+>
+> The self-energy is blind to ω. That is not a defect of this particular
+> energy: `Re⟨z, iωz⟩ = 0` for any z, so **no** real energy can produce a
+> rotation as its gradient. ω is symplectic — it generates the U(1) flow
+> rather than descending Φ — and a rotating network is a gradient system
+> *plus* a U(1) generator, not a gradient system.
 
-which reproduces the `K · z` term of the ODE. Without this term the
-EP gradient theorem cannot give the SSM dynamics; with it, the energy
-is "consistent" with the underlying dynamics in the same sense that
-hEP's energy is.
+So the self-energy supplies only the decay `λ · z`. The rotation must be
+supplied separately, and `phasor_settle(carrier=ω)` does it as an exact
+multiplicative step `cis(ω·dt)` applied after the projection, never as an
+additive `iω·z` in the drive.
+
+This is not a limitation in practice. Φ's coupling term is U(1)-invariant
+and the unit projection is U(1)-equivariant, so for a chain with one
+shared ω the carrier cancels identically and the rotating problem reduces
+*exactly* to the static one. See `docs/ep_rotating_extension.md` and the
+gates in `scripts/ep_rotating_gates.jl`.
 
 ### Cross-layer coupling
 
@@ -139,10 +160,15 @@ structural sources:
 1. **Unit-circle constraint** on `z`. Dynamics constrained to
    `|z| = 1` give a non-trivial nonlinear manifold without needing a
    saturating function.
-2. **Per-channel oscillation** via `K_l`. The `iω` part of `k_l`
-   rotates each channel at its own frequency — this is the analog of
-   "different neurons" but it's geometric (rotation in ℂ), not
-   "saturating" in the squashing sense.
+2. ~~**Per-channel oscillation** via `K_l`.~~ **Struck.** This said the
+   `iω` part rotates "each channel at its own frequency". Two problems:
+   ω is a single shared scalar, not per-channel (the per-channel ω rule
+   in `CLAUDE.md` — phase-locked communication needs one carrier), and a
+   global rotation is not a source of nonlinearity at all. It cancels
+   exactly in the co-rotating frame, so it contributes nothing to the
+   equilibrium structure. Cross-channel diversity comes from `λ` and
+   from `W`. See `docs/phasor_lockin_derivation.tex` §Rotating
+   Substrate.
 
 Because of (1), the natural variational principle is gradient flow on
 the **torus**, not on `ℂ^N`. In phase coordinates `z_l = e^{iπθ_l}`:
@@ -194,29 +220,42 @@ vanilla-EP demo notebook with two substitutions:
 
 For the very first prototype, set `K = 0` (no decay, no
 oscillation). Then the only forces are coupling and nudge, and the
-equilibrium is purely a "phase-consensus" fixed point. Add `λ` and
-then `ω` once that prototype is working.
+equilibrium is purely a "phase-consensus" fixed point. Add `λ` next
+(`K_mode=:stored`).
+
+`ω` never needs "adding" in the same sense: it is not part of the
+energy and cannot be, so it is not a later term in the same series. It
+enters as an exact carrier rotation applied outside the projection
+(`phasor_settle(carrier=ω)`), and for one shared ω it cancels
+identically — the rotating equilibrium is the static one, carried
+around at `e^{iωt}`.
 
 ## Subtlety: equilibrium isn't strictly on the unit circle
 
-The self-energy term `½ Re⟨z, Kz⟩` acts like a quadratic confinement
-toward `z = 0`. On the unit-circle constraint surface that's a
-degenerate force (zero perpendicular to the surface), but it
-interacts with the oscillation `iω · z`. In practice this means the
-EP equilibrium for phasor networks is a balance of magnitude AND
-phase, not pure phase — the magnitude relaxes to whatever balances
-the input drive against the decay `λ`, and the phase rotates at `ω`
-until the cross-layer coupling locks it in. That's exactly the
+The self-energy term `½ Re⟨z, Kz⟩ = ½ λ|z|²` acts like a quadratic
+confinement toward `z = 0`. On the unit-circle constraint surface that's a
+degenerate force (zero perpendicular to the surface). In practice the EP
+equilibrium for phasor networks is a balance of magnitude AND phase, not
+pure phase — the magnitude relaxes to whatever balances the input drive
+against the decay `λ`.
+
+The phase, meanwhile, does **not** need to be part of that balance: since
+ω is absent from the energy (see the correction above), the equilibrium is
+a *relative* equilibrium — a fixed point of the co-rotating dynamics — and
+the lab-frame state is that fixed point carried around at `e^{iωt}`. That's exactly the
 behavior the discrete-time ZOH kernel already produces; making the
 energy explicit just lets us also compute the EP nudge.
 
 ## Open questions
 
-* **Trainable `K`?** In the existing PhasorDense, `λ` is always
-  trainable (via `log_neg_lambda`) and `ω` is optionally trainable.
-  EP's gradient extraction extends naturally to these per-channel
-  dynamics parameters, but we'd need to derive the Hebbian update for
-  `K` separately (it's the "self" gradient of the self-energy term).
+* **Trainable `K`?** `λ` is always trainable (via `log_neg_lambda`).
+  `ω` is **not** a parameter any more — it was removed from
+  `PhasorDense`'s params and state and is derived from
+  `spk_args.t_period` (per-channel ω rule). Nor could EP train it if it
+  were: the self-energy is `½Σλ_j|z_j|²`, so `∂Φ/∂ω = 0` identically
+  and there is no Hebbian to derive. Only the `λ` half of `K` is
+  reachable this way; a rotating substrate would have to learn ω by
+  some non-variational route.
 * **Symmetric weights.** Vanilla EP requires `W` symmetric; phasor
   EP requires `W` Hermitian (i.e., `W = W^H`). With real `W`, this
   is just `W = W^T` — the existing constraint. With complex `W`, it
@@ -326,13 +365,19 @@ Three knobs, three error sources — the temporal analog of hEP's
 | knob | controls | too small | too large |
 |---|---|---|---|
 | `ε` (probe amplitude) | linearity | numerical noise floor | nonlinear O(ε²) bias |
-| `ω_p` (probe frequency) | separation from natural ω_l, adiabatic following | resonance with channel oscillations | non-adiabatic (system can't track) |
+| `ω_p` (probe frequency) | adiabatic following | — | non-adiabatic (system can't track) |
 | `T_int` (integration cycles) | demodulator selectivity | aliasing from imperfectly-cancelled harmonics | computational cost |
 
 Stability constraints specific to lock-in:
 
-* **Frequency separation**: `|ω_p − ω_l| > |λ|` for every channel `l`
-  (probe must lie outside every channel's natural bandwidth).
+* ~~**Frequency separation**: `|ω_p − ω_l| > |λ|` for every channel.~~
+  **Vacuous for a single shared ω** — the carrier is absent from the
+  co-rotating dynamics, so there is no natural oscillation for the
+  probe to resonate with. It becomes live again only under detuning
+  (where the residual `Δω` survives the frame change, giving
+  `|ω_p − Δω_l| > |λ_l|`) or under multi-tone probing, where the
+  probes must be separated from each other and from their
+  intermodulation products.
 * **Adiabatic following**: `ω_p ≪ relaxation_rate ≈ |λ| + ‖W‖`
   (probe period much longer than the network's slowest fixed-point
   convergence time).

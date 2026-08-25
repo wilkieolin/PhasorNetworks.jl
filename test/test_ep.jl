@@ -29,6 +29,8 @@ function ep_tests()
         ep_codebook_cost_tests()
         ep_codebook_training_tests()
         ep_kmode_stored_tests()
+        ep_carrier_tests()
+        ep_readout_tests()
         ep_centered_tests()
         ep_batched_cost_tests()
         ep_batch_equivalence_tests()
@@ -451,8 +453,15 @@ function ep_kmode_stored_tests()
                                   omega_override=ω0)
         @test isapprox(s_stored[end], s_zero[end]; atol=1e-3)
 
-        # With non-zero ω (and a smaller dt to keep settling stable),
-        # K_mode=:stored produces a genuinely different equilibrium.
+        # K_mode=:stored produces a genuinely different equilibrium from
+        # :zero — but because of λ, NOT ω. `ep_self_force` returns ½·λ·z
+        # only: Re⟨z,(λ+iω)z⟩ = λ|z|², so the rotation contributes nothing
+        # to the energy and is not part of its gradient. ω is applied
+        # instead as an exact carrier rotation (see `ep_carrier_tests`).
+        # `omega_override` is therefore inert here and the Δ below is
+        # entirely the λ term; an earlier version of this test read the
+        # same Δ as evidence that ω changes the equilibrium, which is the
+        # misconception that the carrier gates now guard against.
         ω03 = [fill(0.3f0, n1), fill(0.3f0, n2)]
         s_zero_ω   = phasor_settle(chain, ps, st, x, cost, 0f0;
                                     T=400, dt=0.1f0, K_mode=:zero,
@@ -462,7 +471,15 @@ function ep_kmode_stored_tests()
                                     omega_override=ω03)
         Δ = norm(s_stored_ω[end] .- s_zero_ω[end])
         @test Δ > 1e-3
-        @info "K_mode :zero vs :stored with ω=0.3: Δ = $(round(Δ, digits=4))"
+        @info "K_mode :zero vs :stored (λ term only): Δ = $(round(Δ, digits=4))"
+
+        # And the corollary: omega_override genuinely IS inert now, so two
+        # different ω values must give byte-identical settles.
+        ω99 = [fill(9.9f0, n1), fill(9.9f0, n2)]
+        s_stored_ω99 = phasor_settle(chain, ps, st, x, cost, 0f0;
+                                     T=400, dt=0.1f0, K_mode=:stored,
+                                     omega_override=ω99)
+        @test s_stored_ω99[end] == s_stored_ω[end]
     end
 end
 
@@ -741,5 +758,182 @@ function ep_gpu_parity_tests(dev)
         logits_gpu = ep_predict(chain, ps_d, st_d, x_d, codes_d; T=100, dt=0.5f0)
         @test !(logits_gpu isa Array)
         @test isapprox(Array(logits_gpu), logits_cpu; rtol=EP_GPU_TOL, atol=1e-5)
+    end
+end
+
+
+# ----------------------------------------------------------------
+# 10b. Carrier / rotating-frame invariants
+# ----------------------------------------------------------------
+# These are the properties that make phasor EP valid on a running
+# resonate-and-fire network, where every neuron's instantaneous phase
+# rotates at a shared carrier ω while the information lives in the
+# static RELATIVE phases.
+#
+# The claim is not that the carrier is approximately negligible — it is
+# that it cancels EXACTLY. Φ = Σ_l Re⟨W_l z_{l-1}, z_l⟩ is U(1)-invariant
+# and `_project_damp` is U(1)-equivariant, so under z_l = w_l·e^{iωt}
+# applied to every layer (including the input) the carrier divides out of
+# the discrete step at any dt. The only symmetry-breaking terms are the
+# bias and the cost target, and both physically co-rotate in this package
+# (`bias_current` injects one phase-locked pulse per period; the codebook
+# is made of neurons at the same ω), so `phasor_settle(carrier=ω)` puts
+# them on the carrier and the equivalence is exact.
+#
+# A prior attempt at a "rotating frame" shipped a settle that never
+# rotated anything, a demodulator tuned to an empty band, and a reference
+# that was a free-phase Hebbian rather than a gradient. Each of the three
+# checks below fails loudly on one of those. See
+# scripts/ep_rotating_gates.jl for the wider, slower version.
+function ep_carrier_tests()
+    @testset "Carrier / rotating-frame invariants" begin
+        rng = Xoshiro(42)
+        chain = Chain(
+            PhasorDense(4 => 8, normalize_to_unit_circle, use_bias=true),
+            PhasorDense(8 => 2, normalize_to_unit_circle, use_bias=true))
+        ps, st = Lux.setup(rng, chain)
+        ps = (layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+              layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)))
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+        cost = SimilarityCost(y)
+
+        # (a) carrier = 0 must be BIT-identical to no carrier. cis(0) is
+        #     exactly 1+0im, so this is an equality, not a tolerance — the
+        #     cheapest possible check that the lab-frame branch has not
+        #     quietly changed the dynamics.
+        for β in (0f0, 0.05f0), K_mode in (:zero, :stored)
+            s_co  = phasor_settle(chain, ps, st, x, cost, β;
+                                  T=120, dt=EP_DT, K_mode=K_mode)
+            s_lab = phasor_settle(chain, ps, st, x, cost, β;
+                                  T=120, dt=EP_DT, K_mode=K_mode, carrier=0f0)
+            @test all(a == b for (a, b) in zip(s_co, s_lab))
+        end
+
+        # (b) At a real carrier the lab-frame settle must equal the
+        #     co-rotating one after demodulation. dt=0.5 with ω=2π is
+        #     ω·dt = π — exactly Nyquist — which an additive iω·z step
+        #     cannot represent at all; the exact multiplicative rotation
+        #     has no dt limit. Residual is accumulated Float32 rounding
+        #     over T steps, so tolerance scales with T.
+        for (ω, dt, T) in ((Float32(2π), 0.5f0, 120), (1.7f0, 0.5f0, 113))
+            s_co  = phasor_settle(chain, ps, st, x, cost, 0.05f0;
+                                  T=T, dt=dt)
+            s_lab = phasor_settle(chain, ps, st, x, cost, 0.05f0;
+                                  T=T, dt=dt, carrier=ω)
+            ph = ComplexF32(cis(mod(Float64(ω) * Float64(T * dt), 2π)))
+            for (a, b) in zip(s_lab, s_co)
+                @test norm(a .* conj(ph) .- b) / norm(b) < 1e-6 * T
+            end
+        end
+
+        # (c) Hebbians must be U(1)-invariant. `ep_hebbian` uses an
+        #     ADJOINT, giving real(z_self·z_in') = cos(π(θ_self − θ_in)) —
+        #     a relative phase, which is what a spiking substrate can read
+        #     off pre/post spike-time differences. A `transpose` gives
+        #     cos(π(θ_self + θ_in)), which spins at 2ω under a global
+        #     rotation and is not measurable from spike timing at all.
+        s  = phasor_settle(chain, ps, st, x, cost, 0f0; T=200, dt=EP_DT)
+        z0 = ComplexF32.(angle_to_complex(x))
+        h  = chain_hebbians(chain, ps, st, z0, s)
+        for θ in (0.3f0, 2.7f0)
+            u  = cis(θ)
+            hθ = chain_hebbians(chain, ps, st, z0 .* u, [z .* u for z in s])
+            for key in (:layer_1, :layer_2)
+                @test norm(hθ[key].weight .- h[key].weight) /
+                      norm(h[key].weight) < 1e-5
+            end
+            # Teeth: the transpose form must visibly break, so that (c)
+            # cannot pass vacuously.
+            tr(a, b) = real.(a * transpose(b))
+            @test norm(tr(s[2] .* u, s[1] .* u) .- tr(s[2], s[1])) /
+                  norm(tr(s[2], s[1])) > 0.1
+        end
+
+        # (d) BOTH projection kernels must be U(1)-equivariant:
+        #     û(e^{iθ}g) = e^{iθ}û(g). This is what lets the carrier divide
+        #     out of the discrete step. `_project_damp_soft` uses
+        #     g/sqrt(|g|²+ε²) rather than the phase-interpolating
+        #     `soft_normalize_to_unit_circle`, precisely because the latter
+        #     compresses phase toward a FIXED reference (0) and so installs
+        #     a preferred direction in the complex plane.
+        #
+        #     Measured cost of getting this wrong, on this chain: EP-vs-FD
+        #     rel-err 0.198 (phase-interpolating) vs 0.032 (equivariant) at
+        #     K_mode=:zero, and 0.318 vs 0.016 at :stored.
+        for θ in (0.4f0, 1.9f0), (g, zz) in ((ComplexF32(0.7, -0.3), ComplexF32(0.2, 0.9)),
+                                             (ComplexF32(1f-12, 0f0), ComplexF32(0.1, 0.1)))
+            u = ComplexF32(cis(θ))
+            hard_a = PhasorNetworks._project_damp(zz * u, g * u, 0.5f0, 1f-10)
+            hard_b = u * PhasorNetworks._project_damp(zz, g, 0.5f0, 1f-10)
+            soft_a = PhasorNetworks._project_damp_soft(zz * u, g * u, 0.5f0, 0.1f0)
+            soft_b = u * PhasorNetworks._project_damp_soft(zz, g, 0.5f0, 0.1f0)
+            @test isapprox(soft_a, soft_b; atol=1e-6)
+            # The hard kernel is equivariant only above its threshold — the
+            # |g| < th branch snaps to 1+0im, which is the discontinuity the
+            # soft kernel exists to remove. Assert that asymmetry explicitly
+            # rather than leaving it implied.
+            if abs(g) > 1f-10
+                @test isapprox(hard_a, hard_b; atol=1e-6)
+            else
+                @test !isapprox(hard_a, hard_b; atol=1e-6)
+            end
+        end
+
+        # (e) A soft settle stays finite and near (not on) the unit circle.
+        s_soft = phasor_settle(chain, ps, st, x, cost, 0f0;
+                               T=200, dt=EP_DT, project=:soft)
+        @test all(all(isfinite.(z)) for z in s_soft)
+        @test all(0.8 < mean(abs.(z)) < 1.0 for z in s_soft)
+    end
+end
+
+# ----------------------------------------------------------------
+# 10c. Spike-timing readout floor
+# ----------------------------------------------------------------
+# A spiking substrate does not read a complex number off a neuron — it
+# infers phase from WHEN the neuron spiked, to about the spike-kernel
+# width. `LockinEP(readout_δ=…)` models that as readout-only quantization
+# (dynamics stay analog; only what the synapse observes is snapped).
+#
+# This is what makes the usable ε window TWO-SIDED: large ε breaks
+# linearity via the hard projection, and small ε drops the response below
+# this floor. The exact-state sweep can only see the upper edge.
+function ep_readout_tests()
+    @testset "Spike-timing readout floor" begin
+        # (a) The quantizer lands on the grid and preserves modulus.
+        δ = 0.25f0                       # quarter-turn bins
+        for θ in (-0.9f0, -0.1f0, 0.2f0, 0.7f0)
+            z = 0.8f0 * ComplexF32(cis(π * θ))
+            q = PhasorNetworks._quantize_phase(z, 1f0 / δ)
+            @test isapprox(abs(q), abs(z); rtol=1e-5)
+            turns = angle(q) / (2f0 * π)
+            @test isapprox(turns / δ, round(turns / δ); atol=1e-4)
+        end
+
+        rng = Xoshiro(42)
+        chain, ps, st = _ep_chain(rng)
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+        mk(δ) = LockinEP(ε=0.01f0, ω_p=0.01f0, n_cycles=2,
+                         T_warmup_cycles=1, T_free=200, dt=EP_DT, readout_δ=δ)
+
+        # (b) readout_δ = 0 must be EXACTLY the original estimator — the
+        #     quantization path must not perturb the default at all.
+        g0, _ = ep_gradient(mk(0f0), chain, ps, st, x, y)
+        g0b, _ = ep_gradient(mk(0f0), chain, ps, st, x, y)
+        @test g0.layer_1.weight == g0b.layer_1.weight
+
+        # (c) A coarse quantum measurably degrades fidelity against FD.
+        #     This is the floor existing, which is the whole premise of the
+        #     `readout` sweep axis; if it ever stops holding, the axis is
+        #     measuring nothing.
+        fd = fd_gradient_phasor(chain, ps, st, x, y; T=200, dt=EP_DT)
+        re(g) = norm(g.layer_1.weight .- fd.layer_1.weight) /
+                norm(fd.layer_1.weight)
+        gq, _ = ep_gradient(mk(0.25f0), chain, ps, st, x, y)
+        @info "readout floor: exact rel-err=$(round(re(g0), digits=4)) " *
+              "δ=0.25 rel-err=$(round(re(gq), digits=4))"
+        @test re(gq) > re(g0)
     end
 end
