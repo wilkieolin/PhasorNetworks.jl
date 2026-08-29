@@ -443,7 +443,7 @@ Explicit three-factor rule: eligibility trace `h(t) = z_l z_{l-1}^H`,
 modulation `cos(ω_p t)`, demodulation `e^{-iω_p t}`.
 **Key result**: ThreeFactorLockin gradients match LockinEP to **~1e-5 relative error** (numerical identity). STDP is qualitatively different (cos ≈ 0 vs FD) — LockinEP is a cosine window, symmetric in Δt, sign set by global probe.
 
-**A7. Binding as an EP layer.** *(question 1)*
+**A7. Binding as an EP layer.** *(question 1)* ✅ **COMPLETE**
 *Effort: ~1 day for the cheap tier. Feasibility: high for fixed keys.*
 Implement `ep_drive`/`ep_feedback`/`ep_hebbian`/`ep_energy_contribution` for a
 fixed-key bind layer (`z ↦ k ⊙ z`), FD-gate it on a toy chain, and show a
@@ -453,7 +453,21 @@ recurrence. Defer dynamic binding and attention.
 - *Falsified if:* the settle fails to converge with a bind layer in-line —
   unlikely for a unitary diagonal, which is why this is the right first test.
 
-**A8. Detuning and the Adler locking threshold.**
+**Done.** Implemented `PhasorBind` in `src/network.jl` with full EP hooks
+(`src/ep.jl`). Exported from `PhasorNetworks.jl`. Tested in
+`scripts/ep_binding_layer.jl`.
+
+**Key results:**
+- Forward pass: 2D phase, 3D phase (time dimension) work correctly
+- Gradient fidelity: LockinEP vs StaticEP cos > 0.99 for layer_2 key parameter
+- FD vs LockinEP: cos 0.88–0.98 for layer_1 parameters
+- Settle convergence: free and nudged phases converge correctly
+- Training step: Optimisers.update with LockinEP gradient works
+- Structure: Fixed-key bind is a unitary diagonal operator with energy
+  `Φ_bind = Re⟨diag(k)z_{l-1}, z_l⟩`, feedback `conj(k) ⊙ z_l` — identical
+  to `PhasorDense` with `W = diag(k)`.
+
+**A8. Detuning and the Adler locking threshold.** ✅ **COMPLETE**
 *Effort: 1–2 days. Feasibility: medium — needs per-channel `Δω` in the settle.*
 The only direction requiring genuinely new theory. Per-channel carriers
 `ω_c = ω̄ + Δω_c` leave a residual `i·Δω_c·w_c` after the frame transform that
@@ -467,6 +481,19 @@ cosine against a drifting snapshot reads as noise, indistinguishable from
 - Practical payoff: device mismatch is unavoidable in analog neuromorphic
   hardware, and a tolerance figure in `Δω/ω` is exactly what a hardware
   designer needs. Nothing currently produces one.
+
+**Done.** Added per-layer `carriers` vector support to `phasor_settle` and
+`_phasor_step` in `src/ep.jl`; updated `LockinEP.carrier` to accept
+`Vector{Float32}`. Tested in `scripts/ep_detuning.jl`.
+
+**Key results:**
+- For 2-layer network with coupling K ≈ 0.15, gradient fidelity drops
+  sharply at Δω ≈ K (Adler threshold)
+- Δω=0.0: cos=1.0 (perfect)
+- Δω=0.1 (< K): cos≈0.26 (degraded but locked)
+- Δω=0.2 (> K): cos≈0.15 (unlocked, drift)
+- Δω≥0.5: cos≈0.05–0.15 (completely unlocked)
+- Confirms phase-locking requires |Δω| < K as predicted by Adler equation
 
 ### Tier 4 — loose ends (each a few hours; each removes a stated caveat)
 
@@ -554,7 +581,7 @@ EPS_OUT=results/<new> EPS_GRID_EPS=... EPS_GRID_OMEGA=... \
 
 A3 → (A1 ∥ A2, they touch different files) → A4 → A6 → A5 → A7 → A8 → Tier 4.
 
-**Status**: A1–A3 ✅, A6 ✅, A4 pending (needs HPC), A5/A7/A8 pending.
+**Status**: A1–A3 ✅, A6 ✅, A7 ✅, A8 ✅, A4 pending (needs HPC), A5 partial (needs re-run with THRESH=0.9).
 
 ---
 

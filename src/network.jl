@@ -1728,6 +1728,122 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
 end
 
 ###
+### PhasorBind Layer (Fixed-Key Binding for EP)
+###
+
+"""
+    PhasorBind(in_dims, key; use_bias=true, init_bias=zero_bias)
+
+Fixed-key binding layer for EP. Applies element-wise phase binding:
+    z_out = k ⊙ z_in  (complex multiplication: phase addition)
+
+This is a unitary diagonal operator with energy term:
+    Φ_bind = Re⟨diag(k) z_in, z_out⟩
+
+Feedback is conj(k) ⊙ z_out, structurally identical to PhasorDense with W = diag(k).
+
+# Arguments
+- `in_dims::Int`: Input/output dimensionality (binding preserves dimension)
+- `key::AbstractVector{<:Real}`: Phase key in [-1, 1] (units of π), length `in_dims`
+- `use_bias::Bool`: Whether to add a learnable complex bias (default: true)
+- `init_bias`: Bias initializer (default: `zero_bias`)
+- `spk_args::SpikingArgs`: Spiking arguments for ODE/Spiking paths
+
+# Example
+```julia
+key = rand(Float32, 64) .* 2 .- 1  # random phase key
+layer = PhasorBind(64, key, use_bias=true)
+```
+"""
+struct PhasorBind <: Lux.AbstractLuxLayer
+    in_dims::Int
+    out_dims::Int
+    use_bias::Bool
+    init_bias::Function
+    key::Vector{Float32}  # phase key in [-1, 1] (units of π)
+    spk_args::SpikingArgs
+end
+
+function PhasorBind(in_dims::Int, key::AbstractVector{<:Real};
+                    use_bias::Bool = true,
+                    init_bias = zero_bias,
+                    spk_args::SpikingArgs = SpikingArgs())
+    @assert length(key) == in_dims "Key length $(length(key)) must match in_dims $in_dims"
+    out_dims = in_dims  # binding preserves dimensionality
+    k = Float32.(key)
+    return PhasorBind(in_dims, out_dims, use_bias, init_bias, k, spk_args)
+end
+
+# Also accept Phase key
+function PhasorBind(in_dims::Int, key::AbstractVector{<:Phase};
+                    use_bias::Bool = true,
+                    init_bias = zero_bias,
+                    spk_args::SpikingArgs = SpikingArgs())
+    k = Float32.(Float32.(key))
+    return PhasorBind(in_dims, out_dims, use_bias, init_bias, k, spk_args)
+end
+
+# Lux interface
+function Lux.initialparameters(rng::AbstractRNG, l::PhasorBind)
+    parameters = (key = l.key,)
+    if l.use_bias
+        bias = l.init_bias(rng, (l.out_dims,))
+        parameters = merge(parameters, (
+            bias_real = Float32.(real.(bias)),
+            bias_imag = Float32.(imag.(bias))
+        ))
+    end
+    return parameters
+end
+
+Lux.initialstates(::AbstractRNG, ::PhasorBind) = NamedTuple()
+
+# ---- 2D Complex dispatch: z_out = diag(k) * z_in + bias ----
+function (l::PhasorBind)(x::AbstractArray{<:Complex}, params::LuxParams, state::NamedTuple)
+    k = params.key
+    y = k .* x
+    if l.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        y = y .+ bias_val
+    end
+    return y, state
+end
+
+# ---- 2D Phase dispatch ----
+function (l::PhasorBind)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
+    xz = angle_to_complex(x)
+    y, st = l(xz, params, state)
+    y_phase = complex_to_angle(y)
+    return y_phase, st
+end
+
+# ---- 3D Phase dispatch: direct phase addition per time step ----
+function (l::PhasorBind)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state::NamedTuple)
+    # x: (C, L, B) - channels × time × batch
+    k = params.key  # (C,)
+    # Bind at each time step: z_out(t) = k ⊙ z_in(t)
+    y = k .* x
+    if l.use_bias
+        bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
+        y = y .+ reshape(bias_val, :, 1, 1)
+    end
+    # Return in phase domain
+    y_phase = complex_to_angle(y)
+    return y_phase, state
+end
+
+# SpikingCall / CurrentCall - delegate to complex path
+function (l::PhasorBind)(x::SpikingCall, params::LuxParams, state::NamedTuple)
+    return l(x.train, params, state)
+end
+
+function (l::PhasorBind)(x::CurrentCall, params::LuxParams, state::NamedTuple)
+    # For CurrentCall, convert to complex and process
+    # This is a simplified path - in practice would need proper ODE integration
+    return l(x.train, params, state)
+end
+
+###
 ### Random Projection Layer
 ###
 

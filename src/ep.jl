@@ -403,6 +403,53 @@ function ep_energy_contribution(layer::PhasorDense, ps, st, z_in, z_self;
     return e
 end
 
+# ---- PhasorBind implementations ----
+
+"""
+    ep_drive(layer::PhasorBind, ps, st, z_in)
+
+Forward drive for binding layer: `k ⊙ z_in + bias`.
+"""
+function ep_drive(layer::PhasorBind, ps, st, z_in)
+    return first(layer(z_in, ps, st))
+end
+
+function ep_feedback(layer::PhasorBind, ps, st, z_out)
+    k = ps.key
+    return conj.(k) .* z_out
+end
+
+function ep_self_force(layer::PhasorBind, ps, st, z_self;
+                       K_mode::Symbol = :zero,
+                       omega_override::Union{Nothing, AbstractVector} = nothing)
+    # Binding has no self-dynamics (K = 0)
+    return zero(z_self)
+end
+
+function ep_hebbian(::PhasorBind, ps, st, z_in, z_self)
+    invB = one(Float32) / Float32(_batch_size(z_self))
+    # Gradient w.r.t. key: real(z_self ⊙ conj(z_in)) = real(z_self * z_in')
+    g = (key = real.(z_self .* adjoint(z_in)) .* invB,)
+    if haskey(ps, :bias_real)
+        zb = _sum_batch(z_self)
+        g = merge(g, (bias_real = Float32.(real.(zb)) .* invB,
+                      bias_imag = Float32.(imag.(zb)) .* invB))
+    end
+    return g
+end
+
+function ep_energy_contribution(layer::PhasorBind, ps, st, z_in, z_self;
+                                K_mode::Symbol = :zero,
+                                omega_override::Union{Nothing, AbstractVector} = nothing)
+    k = ps.key
+    e = Float32(real(dot(z_self, k .* z_in)))
+    if haskey(ps, :bias_real)
+        bias = ps.bias_real .+ 1f0im .* ps.bias_imag
+        e += Float32(real(dot(z_self, bias)))
+    end
+    return e
+end
+
 # ================================================================
 # 3. Chain settling
 # ================================================================
@@ -482,14 +529,24 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
                        init::Union{Nothing,Vector} = nothing,
                        K_mode::Symbol = :zero,
                        omega_override::Union{Nothing, Vector} = nothing,
-                       carrier::Union{Nothing, Real} = nothing,
+                       carrier::Union{Nothing, Real, Vector{<:Real}} = nothing,
                        t0::Real = 0,
                        project::Symbol = :hard,
                        soft_ε::Real = 0.1f0)
     layer_keys = collect(keys(ps))
+    n_layers = length(layer_keys)
     dt_f = Float32(dt)
     β_f  = Float32(β)
-    carrier_f = carrier === nothing ? nothing : Float32(carrier)
+    
+    # Handle carrier: single value (shared) or vector (per-layer detuning)
+    if carrier === nothing
+        carriers = nothing
+    elseif carrier isa AbstractVector
+        @assert length(carrier) == n_layers "carrier vector must match number of layers ($n_layers)"
+        carriers = Float32.(carrier)
+    else
+        carriers = fill(Float32(carrier), n_layers)
+    end
     t_f = Float32(t0)
 
     z0 = _phase_input_to_complex(x)
@@ -510,7 +567,7 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_f, dt_f, states; K_mode=K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache, carrier=carrier_f, t_now=t_f,
+                              cache=cache, carriers=carriers, t_now=t_f,
                               project=project, soft_ε=Float32(soft_ε))
         t_f += dt_f
     end
@@ -544,40 +601,41 @@ end
 # self-force at all (it is symplectic — see `ep_self_force`), so the value
 # threaded here is accepted and ignored. It is still live in
 # `ep_energy_contribution`, and the kwarg is retained so existing call
-# sites keep working. To actually rotate, use `carrier` below.
+# sites keep working. To actually rotate, use `carriers` below.
+# `carriers` can be `nothing` (co-rotating frame), a single Float32 (shared
+# carrier for all layers), or a Vector{Float32} (per-layer carrier for detuning).
 function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                       cost::AbstractEPCost, β::Float32, dt::Float32, states;
                       K_mode::Symbol = :zero,
                       omega_override::Union{Nothing, Vector} = nothing,
                       drive0 = nothing, cache = nothing,
-                      carrier::Union{Nothing, Float32} = nothing,
+                      carriers::Union{Nothing, Float32, Vector{Float32}} = nothing,
                       t_now::Float32 = 0f0,
                       project::Symbol = :hard,
                       soft_ε::Float32 = 0.1f0)
     n = length(layer_keys)
     th = 1.0f-10
-    # Lab-frame carrier (see `phasor_settle`). `c_t` puts the two
-    # symmetry-BREAKING terms — the bias and the cost target — onto the
-    # carrier at the current time; `rot` advances the state by one exact
-    # carrier step after the projection. Everything else (W·z_in, the
-    # feedback, ½λz) is U(1)-covariant and co-rotates for free.
-    # With carrier === nothing both are absent and the loop below is the
-    # original co-rotating hot path, unchanged.
-    # Argument reduction in Float64 before rounding to ComplexF32. `ω·t`
-    # grows without bound over a long settle while the phase only matters
-    # mod 2π, so a naive Float32 `cis(ω*t)` loses absolute precision in the
-    # ARGUMENT: at ω·t ≈ 380 the Float32 spacing is ~3e-5 rad, which shows
-    # up as a ~1e-5 relative error against the co-rotating frame — small,
-    # but it is drift, and it grows with run length. The co-rotating frame
-    # never accumulates it at all, which is one more reason to prefer it.
-    c_t = carrier === nothing ? nothing :
-          ComplexF32(cis(mod(Float64(carrier) * Float64(t_now), 2π)))
-    # `rot` is applied T times in a row, so any deviation of |rot| from 1
-    # compounds into a steady-state magnitude offset. Renormalize once here
-    # (free — it is a scalar) so the carrier is a pure rotation.
-    rot = carrier === nothing ? nothing :
-          (r = ComplexF32(cis(mod(Float64(carrier) * Float64(dt), 2π)));
-           r / abs(r))
+    
+    # Lab-frame carrier(s). `carriers` can be nothing (co-rotating), 
+    # a single carrier (shared), or per-layer vector (detuning).
+    # Precompute c_t and rot per layer.
+    c_t_vec = if carriers === nothing
+        fill(nothing, n)
+    elseif carriers isa AbstractVector
+        @assert length(carriers) == n
+        [ComplexF32(cis(mod(Float64(carriers[l]) * Float64(t_now), 2π))) for l in 1:n]
+    else
+        fill(ComplexF32(cis(mod(Float64(carriers) * Float64(t_now), 2π))), n)
+    end
+    
+    rot_vec = if carriers === nothing
+        fill(nothing, n)
+    elseif carriers isa AbstractVector
+        [(r = ComplexF32(cis(mod(Float64(carriers[l]) * Float64(dt), 2π))); r / abs(r)) for l in 1:n]
+    else
+        fill((r = ComplexF32(cis(mod(Float64(carriers) * Float64(dt), 2π))); r / abs(r)), n)
+    end
+    
     # `map` (rather than a preallocated `Vector{Vector{ComplexF32}}`)
     # lets the element type be inferred, so the same code path yields
     # `Vector` states for a single sample and `Matrix` states for a
@@ -587,6 +645,8 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
         ps_l = ps[key]; st_l = st[key]
         z_self = states[l]
         ω_l    = omega_override === nothing ? nothing : omega_override[l]
+        c_t    = c_t_vec[l]
+        rot    = rot_vec[l]
 
         grad_l = if l == 1
             # Both W₁·z₀ and the bias sit on the carrier together, so the
@@ -596,7 +656,8 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
                 _cached_drive(cache, l, chain, key, ps_l, st_l, z0) : drive0
             c_t === nothing ? d : c_t .* d
         else
-            # `states[l-1]` already carries the carrier; the bias does not.
+            # `states[l-1]` already carries its own carrier; the bias does not.
+            # Use the current layer's carrier for bias.
             _cached_drive(cache, l, chain, key, ps_l, st_l, states[l-1];
                           carrier_phase=c_t)
         end
@@ -615,7 +676,7 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
         end
         if l == n && β != 0f0
             # Evaluate the cost on the DEMODULATED state and put the
-            # resulting force back on the carrier. Doing it this way keeps
+            # resulting force back on the carrier. Doing this way keeps
             # every cost type working unchanged — including CodebookCost,
             # whose softmax is nonlinear and could not simply be rotated.
             grad_l = grad_l .+ (c_t === nothing ?
@@ -1218,7 +1279,9 @@ Base.@kwdef struct LockinEP <: AbstractEPMethod
     # settle runs in the lab frame (states rotate at ω) and the readout
     # frame determines whether quantization happens in the lab or
     # co-rotating frame.
-    carrier::Union{Nothing, Float32} = nothing
+    # Can be: nothing (co-rotating), single Float32 (shared carrier),
+    # or Vector{Float32} (per-layer carrier for detuning experiments).
+    carrier::Union{Nothing, Float32, Vector{Float32}} = nothing
     # Readout frame: :co_rotating (quantize then demodulate, original
     # behavior) or :lab (demodulate carrier off, then quantize).
     readout_frame::Symbol      = :co_rotating
@@ -1233,11 +1296,18 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
                      omega_override::Union{Nothing, Vector} = nothing)
     # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
     #    If carrier is set, run in lab frame with t0=0.
-    carrier_f = m.carrier === nothing ? nothing : Float32(m.carrier)
+    # Support per-layer carriers for detuning experiments.
+    if m.carrier === nothing
+        carriers_f = nothing
+    elseif m.carrier isa AbstractVector
+        carriers_f = Float32.(m.carrier)
+    else
+        carriers_f = fill(Float32(m.carrier), length(keys(ps)))
+    end
     s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
                            T=m.T_free, dt=m.dt, K_mode=m.K_mode,
                            omega_override=omega_override, project=m.project,
-                           carrier=carrier_f, t0=0f0)
+                           carrier=carriers_f, t0=0f0)
     # Time at end of free settle (start of warmup).
     t_free_end = Float32(m.T_free * m.dt)
 
@@ -1251,6 +1321,9 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     _noise(a) = m.readout_jitter <= 0f0 ? nothing :
                 m.readout_jitter .* randn(ro_rng, Float32, size(a))
 
+    # For per-layer carriers, use the first layer's carrier for readout frame
+    carrier_f = carriers_f === nothing ? nothing : carriers_f[1]
+    
     # Readout function depends on frame.
     # In co-rotating frame: demodulate carrier (if present), then quantize.
     #   This matches the original LockinEP behavior when carrier=nothing.
@@ -1284,7 +1357,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     z0c    = _phase_input_to_complex(x)
 
     # For lab frame, the input must be put on the carrier before readout.
-    # Carrier phase at t_free_end.
+    # Carrier phase at t_free_end (using first layer's carrier).
     ph_free_end = carrier_f === nothing ? ComplexF32(1) :
                   ComplexF32(cis(mod(Float64(carrier_f) * Float64(t_free_end), 2π)))
     z0_lab_free = z0c .* ph_free_end
@@ -1320,7 +1393,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
                               cache=cache, project=m.project,
-                              carrier=carrier_f, t_now=t_now)
+                              carriers=carriers_f, t_now=t_now)
     end
 
     # 4. Accumulators.
@@ -1360,7 +1433,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
                               cache=cache, project=m.project,
-                              carrier=carrier_f, t_now=t_now)
+                              carriers=carriers_f, t_now=t_now)
 
         # Subsample the lock-in accumulation.
         if (t - 1) % se == 0
