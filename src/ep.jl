@@ -26,8 +26,10 @@
 #     an extra half-i-omega*z — see ep_self_force.)
 #   * Carrier: phasor_settle(carrier=omega) runs the lab frame for a
 #     rotating (resonate-and-fire) substrate. Exactly equivalent to the
-#     default co-rotating frame for one shared omega, so it is a
-#     verification tool rather than a different model.
+#     default co-rotating frame for one shared omega, so for the analog
+#     settle it is a verification tool rather than a different model.
+#     This stops at a quantized readout (readout_delta > 0), which is not
+#     U(1)-equivariant — see phasor_settle's docstring.
 #   * use_bias is supported and FD-verified, and is effectively required
 #     in practice — real W plus an entrywise unit projection is
 #     axis-preserving, so without a complex bias whole input classes stay
@@ -438,9 +440,27 @@ its fundamental is `b·e^{iωt}`, and the codebook is made of neurons at the
 same ω. The lab-frame path therefore puts both on the carrier and the
 equivalence is exact.
 
-Consequence: the lab frame is a **validation tool**, not a cheaper or a
-truer model. Running a sweep in it buys nothing — see
-`scripts/ep_rotating_gates.jl`, which asserts the equivalence.
+Consequence: **for the analog settle**, the lab frame is a validation
+tool, not a cheaper or a truer model — see `scripts/ep_rotating_gates.jl`,
+which asserts the equivalence.
+
+The equivalence stops at the readout. `_quantize_phase` rounds onto a
+fixed phase grid, and rounding commutes with a rotation only when the
+rotation is an exact multiple of the grid spacing δ. It is therefore the
+one non-U(1)-equivariant operation in the pipeline, and the carrier
+reduction above does not reach it. With `readout_δ > 0` the two frames
+give materially different estimators: measured over 8 draws at
+δ = 0.005 turns and no jitter, median cos against a centered `StaticEP`
+reference is 0.44/0.82 co-rotating but 0.998/0.998 in the lab at an
+incommensurate ω — the carrier sweeps the state across tens of bins per
+step and dithers the quantizer for free, which is precisely the dead zone
+the co-rotating model suffers. A commensurate carrier (ω = 2π at dt = 0.5
+is 0.25 turns = exactly 50 bins of δ = 0.005) reproduces the co-rotating
+result, as the commensurability argument requires. So with quantization
+the frame is a modelling choice about where the readout clock lives, not
+a free change of variables. Gate F in `scripts/ep_rotating_gates.jl` pins
+the equivariance boundary; `scripts/ep_readout_frame_check.jl` reproduces
+the measurement.
 
 * Initializes states at zero by default. The hard branch of
   `normalize_to_unit_circle(·; ε=0)` returns `1+0im` for
@@ -1117,6 +1137,18 @@ percent on a 2-layer chain).
 # the probe dithers the quantizer and time-averaging recovers some
 # sub-quantum resolution. How much is exactly what the sweep measures.
 #
+# The grid here is fixed in whatever frame the states are in, which for
+# the default settle is the CO-ROTATING frame. That is the pessimistic
+# case: the envelope is slowly varying, so the only thing sweeping the
+# state across bins is the probe, and the probe sweeps by less than a bin
+# — hence the dead zone. A physical spike-time clock may instead be fixed
+# in the LAB frame, where the carrier sweeps the state across tens of bins
+# per step and dithers the quantizer for free. That is not a free change
+# of variables (rounding is not U(1)-equivariant) and it measurably
+# matters: 0.44 -> 0.998 median cos at delta = 0.005 turns. Which frame is
+# right is a hardware question about what the readout clock is locked to;
+# see phasor_settle's docstring and docs/ep_rotating_followups.md.
+#
 # Modelled here as readout-only: the dynamics stay analog (a membrane
 # potential is continuous) and only the value entering the Hebbian is
 # quantized. Quantizing inter-layer communication as well is a strictly
@@ -1182,15 +1214,33 @@ Base.@kwdef struct LockinEP <: AbstractEPMethod
     # back the resolution that `readout_δ` destroys.
     readout_jitter::Float32    = 0f0
     readout_seed::Int          = 1234
+    # Lab-frame carrier ω for resonate-and-fire substrates. When set, the
+    # settle runs in the lab frame (states rotate at ω) and the readout
+    # frame determines whether quantization happens in the lab or
+    # co-rotating frame.
+    carrier::Union{Nothing, Float32} = nothing
+    # Readout frame: :co_rotating (quantize then demodulate, original
+    # behavior) or :lab (demodulate carrier off, then quantize).
+    readout_frame::Symbol      = :co_rotating
+    # Subsampling factor for the lock-in integration loop. 1 = every step,
+    # period_steps = one sample per probe period. Affects T_lockin and
+    # demodulator phase increment.
+    sample_every::Int          = 1
 end
 
 function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
                      cost::AbstractEPCost;
                      omega_override::Union{Nothing, Vector} = nothing)
     # 1. Free settle to the β=0 equilibrium and snapshot the DC hebbians.
+    #    If carrier is set, run in lab frame with t0=0.
+    carrier_f = m.carrier === nothing ? nothing : Float32(m.carrier)
     s_free = phasor_settle(chain, ps, st, x, cost, 0f0;
                            T=m.T_free, dt=m.dt, K_mode=m.K_mode,
-                           omega_override=omega_override, project=m.project)
+                           omega_override=omega_override, project=m.project,
+                           carrier=carrier_f, t0=0f0)
+    # Time at end of free settle (start of warmup).
+    t_free_end = Float32(m.T_free * m.dt)
+
     # The DC Hebbian is subtracted from the demodulated accumulators, so it
     # must be read through the SAME quantizer — otherwise the mismatch
     # between an exact DC term and a quantized AC term would masquerade as
@@ -1200,11 +1250,47 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     ro_rng = Xoshiro(m.readout_seed)
     _noise(a) = m.readout_jitter <= 0f0 ? nothing :
                 m.readout_jitter .* randn(ro_rng, Float32, size(a))
-    _ro(a)    = _readout(a, m.readout_δ, m.readout_jitter, _noise(a))
+
+    # Readout function depends on frame.
+    # In co-rotating frame: demodulate carrier (if present), then quantize.
+    #   This matches the original LockinEP behavior when carrier=nothing.
+    #   When carrier is set, this corresponds to a lab-frame settle with
+    #   co-rotating frame readout (carrier demodulated before quantization).
+    # In lab frame: quantize the lab-frame state (which rotates with carrier),
+    # then demodulate the carrier by multiplying by conj(carrier_phase).
+    # This matches the physical scenario where the readout clock is in the lab frame.
+    _ro = if m.readout_frame === :co_rotating
+        (a, t) -> begin
+            if carrier_f === nothing
+                return _readout(a, m.readout_δ, m.readout_jitter, _noise(a))
+            end
+            # Demodulate carrier first, then quantize
+            ph = ComplexF32(cis(mod(Float64(carrier_f) * Float64(t), 2π)))
+            return _readout(a .* conj(ph), m.readout_δ, m.readout_jitter, _noise(a))
+        end
+    elseif m.readout_frame === :lab
+        (a, t) -> begin
+            if carrier_f === nothing
+                return _readout(a, m.readout_δ, m.readout_jitter, _noise(a))
+            end
+            # Quantize lab-frame state, then demodulate carrier
+            ph = ComplexF32(cis(mod(Float64(carrier_f) * Float64(t), 2π)))
+            return _readout(a, m.readout_δ, m.readout_jitter, _noise(a)) .* conj(ph)
+        end
+    else
+        error("Unknown readout_frame: $(m.readout_frame). Expected :co_rotating or :lab")
+    end
 
     z0c    = _phase_input_to_complex(x)
-    z0_ro  = _ro(z0c)
-    h_dc   = chain_hebbians(chain, ps, st, z0_ro, [_ro(z) for z in s_free])
+
+    # For lab frame, the input must be put on the carrier before readout.
+    # Carrier phase at t_free_end.
+    ph_free_end = carrier_f === nothing ? ComplexF32(1) :
+                  ComplexF32(cis(mod(Float64(carrier_f) * Float64(t_free_end), 2π)))
+    z0_lab_free = z0c .* ph_free_end
+
+    z0_ro  = _ro(z0_lab_free, t_free_end)
+    h_dc   = chain_hebbians(chain, ps, st, z0_ro, [_ro(z, t_free_end) for z in s_free])
 
     # 2. Lock-in setup.
     layer_keys = collect(keys(ps))
@@ -1213,36 +1299,43 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     T_warmup = m.T_warmup_cycles * period_steps
     T_lockin = m.n_cycles        * period_steps
 
+    # Subsampling: only accumulate every `sample_every` steps.
+    # This affects the effective T_lockin and the demodulator phase increment.
+    se = max(1, m.sample_every)
+    T_lockin_eff = div(T_lockin, se)
+    if T_lockin_eff == 0
+        T_lockin_eff = 1
+    end
+
     states = [copy(s) for s in s_free]
     cache  = _weight_cache(chain, ps, layer_keys)
     drive0 = _input_drive(chain, ps, st, layer_keys, z0; cache=cache)
 
     # 3. Warm-up — drive the probe but don't accumulate (transients die).
+    #    Track absolute time: warmup starts at t_free_end.
     for t in 1:T_warmup
         β_t = m.ε * cos(m.ω_p * t * m.dt)
+        t_now = t_free_end + Float32((t - 1) * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache, project=m.project)
+                              cache=cache, project=m.project,
+                              carrier=carrier_f, t_now=t_now)
     end
 
     # 4. Accumulators.
     #
     # `Ẑ[l] = Σ_t z_l(t)·e^{-iω_p t}` — the demodulated state of every
     # layer, `(out_l, B)`. This gives the bias gradient for every layer
-    # directly, and for layer 1 it also gives the WEIGHT gradient
-    # without ever forming a per-step outer product: layer 1's `z_in`
-    # is `z₀`, which is constant in t, so it factors out of the sum
+    # directly.
     #
-    #     Σ_t z₁(t)·z₀' ·e^{-iω_p t} = (Σ_t z₁(t)e^{-iω_p t})·z₀'
+    # For layer 1's weight gradient: in the co-rotating frame, the input `z₀`
+    # is constant, so `Σ_t z₁(t)·z₀' ·e^{-iω_p t} = (Σ_t z₁(t)e^{-iω_p t})·z₀'`
+    # factors out (optimization). In the lab frame, the input rotates with
+    # the carrier, so we must accumulate the outer product per step.
     #
-    # turning ~10⁴ full `(out×in)` complex outer products into ~10⁴
-    # cheap `(out×B)` accumulations plus one matmul at the end (19x at
-    # 784→256, B=128).
-    #
-    # `HW[l]` for l > 1 still needs per-step accumulation because
-    # `z_in = states[l-1]` varies in t — but via the 5-arg `mul!`, which
-    # fuses scale-and-add into one BLAS call with no temporaries.
+    # `HW[l]` for l ≥ 1 accumulates `Σ_t demod · z_l · z_{l-1}'` (adjoint).
+    # For l=1, `z_{l-1}` is the input `z₀` (put on carrier for lab frame).
     #
     # `c = Σ_t e^{-iω_p t}` carries the DC subtraction out of the loop
     # too: `Σ_t (h(t) - h_dc)·e^{-iω_p t} = Σ_t h(t)e^{-iω_p t} - c·h_dc`.
@@ -1250,42 +1343,71 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     Zhat = [gpu_zeros(states[l], ComplexF32, size(states[l])...) for l in 1:length(layer_keys)]
     HW   = Vector{Any}(nothing, length(layer_keys))
     for (l, key) in enumerate(layer_keys)
-        (l > 1 && haskey(ps[key], :weight)) || continue
+        haskey(ps[key], :weight) || continue
         HW[l] = gpu_zeros(ps[key].weight, ComplexF32, size(ps[key].weight)...)
     end
     c = zero(ComplexF32)
 
+    # Time at end of warmup (start of lock-in integration).
+    t_warm_end = t_free_end + Float32(T_warmup * m.dt)
+
     # 5. Integration: settle + demodulated accumulation.
+    #    Subsample by `se`: only accumulate on steps where (t-1) % se == 0.
     for t in 1:T_lockin
         β_t   = m.ε * cos(m.ω_p * t * m.dt)
+        t_now = t_warm_end + Float32((t - 1) * m.dt)
         states = _phasor_step(chain, ps, st, layer_keys, z0, cost,
                               β_t, m.dt, states; K_mode=m.K_mode,
                               omega_override=omega_override, drive0=drive0,
-                              cache=cache, project=m.project)
-        demod = ComplexF32(exp(-im * m.ω_p * t * m.dt))
-        c += demod
-        # Readout-only quantization: `states` keeps evolving in full
-        # precision (the membrane is analog); only what the synapse
-        # observes is snapped to the spike-time grid.
-        obs = (m.readout_δ <= 0f0 && m.readout_jitter <= 0f0) ? states :
-              [_ro(z) for z in states]
-        for l in 1:length(layer_keys)
-            Zhat[l] .+= obs[l] .* demod
-            HW[l] === nothing && continue
-            # H += demod · z_l · z_{l-1}'  (adjoint, not transpose —
-            # the energy derivative requires conjugation; see ep_hebbian)
-            mul!(HW[l], obs[l], adjoint(obs[l-1]), demod, one(ComplexF32))
+                              cache=cache, project=m.project,
+                              carrier=carrier_f, t_now=t_now)
+
+        # Subsample the lock-in accumulation.
+        if (t - 1) % se == 0
+            # Effective lock-in step index (0-based).
+            t_eff = div(t - 1, se)
+            # Demodulator phase: tracks the probe phase which is ω_p * t * dt
+            # where t is the lock-in step (1-based). For subsampled steps,
+            # the effective probe phase is ω_p * (t_eff * se + 1) * dt.
+            # The demodulator uses the same phase as the probe at that step.
+            # Using 0-based: phase = ω_p * (t_eff * se + 1) * dt
+            # But the original uses t * dt for step t (1-based), so for
+            # effective step t_eff (0-based) corresponding to original step t = t_eff*se + 1:
+            demod_phase = m.ω_p * Float32(t_eff * se + 1) * m.dt
+            demod = ComplexF32(exp(-im * demod_phase))
+            c += demod
+
+            # Readout time: absolute time for carrier demodulation in lab frame.
+            # The state returned by _phasor_step at step t is at time t_now + dt.
+            t_sample = t_warm_end + Float32(t_eff * se + 1) * m.dt
+            obs = (m.readout_δ <= 0f0 && m.readout_jitter <= 0f0) ? states :
+                  [_ro(z, t_sample) for z in states]
+
+            # Lab-frame input at this sample time (for layer 1's Hebbian).
+            ph_sample = carrier_f === nothing ? ComplexF32(1) :
+                        ComplexF32(cis(mod(Float64(carrier_f) * Float64(t_sample), 2π)))
+            z0_lab_sample = z0c .* ph_sample
+            z0_ro_sample = _ro(z0_lab_sample, t_sample)
+
+            for l in 1:length(layer_keys)
+                Zhat[l] .+= obs[l] .* demod
+                HW[l] === nothing && continue
+                # H += demod · z_l · z_{l-1}'  (adjoint, not transpose —
+                # the energy derivative requires conjugation; see ep_hebbian)
+                z_in = (l == 1) ? z0_ro_sample : obs[l-1]
+                mul!(HW[l], obs[l], adjoint(z_in), demod, one(ComplexF32))
+            end
         end
     end
 
-    # 6. Convert to gradient: dL/d(real-param) = -2·Re(H) / (T_lockin · ε).
+    # 6. Convert to gradient: dL/d(real-param) = -2·Re(H) / (T_lockin_eff · ε).
     #    The factor of 2 comes from the real cosine probe — see the
     #    design doc, section "Implementation sketch". For bias the
     #    real/imag parts of H_b give the bias_real / bias_imag grads
     #    respectively (since H_b's "complex" packaging is z_self and
     #    Re(z_self), Im(z_self) are independent params).
     H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, HW, z0_ro, h_dc, c)
-    grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin, m.ε)
+    grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin_eff, m.ε)
     return grads, s_free
 end
 
@@ -1299,7 +1421,9 @@ function _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
     for (l, key) in enumerate(layer_keys)
         haskey(ps[key], :weight) || continue
         invB = one(Float32) / Float32(_batch_size(Zhat[l]))
-        raw  = l == 1 ? Zhat[1] * adjoint(z0) : HW[l]
+        # Use HW[l] for all layers (including l=1, which now accumulates
+        # the outer product with the correct time-varying input in lab frame).
+        raw = HW[l]
         H_W[key] = raw .* invB .- c .* ComplexF32.(h_dc[key].weight)
         if haskey(ps[key], :bias_real)
             dc_b = ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)

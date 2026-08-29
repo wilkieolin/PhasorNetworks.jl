@@ -1,4 +1,4 @@
-# The spike-timing readout floor closes the lock-in EP window
+# The spike-timing readout floor closes the lock-in EP window (carrier-locked readout)
 
 > **Harness:** `scripts/ep_adiabatic_sweep.jl` &nbsp;|&nbsp;
 > **Theory:** `docs/ep_rotating_extension.md`,
@@ -6,12 +6,36 @@
 > **Gates:** `scripts/ep_rotating_gates.jl` &nbsp;|&nbsp;
 > **What to do next:** `docs/ep_rotating_followups.md`
 
+> ### ⚠ Scope caveat (added after these runs)
+>
+> Every number below was measured with the readout grid fixed in the
+> **co-rotating** frame. That is the pessimistic case, and it is not the only
+> defensible model. `_quantize_phase` is the one non-U(1)-equivariant operation
+> in the pipeline, so the carrier-cancellation theorem does *not* extend to it:
+> rounding commutes with a rotation only on exact multiples of the grid. With
+> the same grid fixed in the **lab** frame and an incommensurate carrier, the
+> carrier sweeps the state across tens of bins per step and dithers the
+> quantizer for free — median cos recovers from 0.44 to 0.998 at δ = 0.005
+> turns, no injected noise (8 draws, toy width). Reproduce with
+> `julia --project=. scripts/ep_readout_frame_check.jl`; discussion in
+> `docs/ep_rotating_extension.md`, "The exception: a quantized readout".
+>
+> So the floor below is real **for a readout clock phase-locked to the carrier**
+> — one spike time per period, which is automatically commensurate — and largely
+> not real for a clock that free-runs against it. Which one applies is a hardware
+> question that this package does not currently commit to; `LockinEP` has no
+> `carrier` field, so the co-rotating choice was implicit rather than argued.
+> Resolving it is `docs/ep_rotating_followups.md` §0, and it now gates the
+> interpretation of everything here. Gate F in `scripts/ep_rotating_gates.jl`
+> pins the equivariance boundary so this cannot drift again.
+
 ## Why this was run
 
 The goal is EP that runs *while a symmetrically-connected spiking network is
-running*. The carrier turned out to be free — for one shared ω it cancels
-identically, so the rotating problem is the static problem
-(`docs/ep_rotating_extension.md`). That leaves the gap that is not free: a
+running*. The carrier turned out to be free for the analog settle — for one shared ω it
+cancels identically, so the rotating *settle* is the static settle
+(`docs/ep_rotating_extension.md`). It is not free at the readout, which is the
+caveat above. That leaves the gap that is not free: a
 spiking substrate does not read a complex number off a neuron, it infers phase
 from **when the neuron spiked**, and that time is resolvable only to about the
 spike-kernel width. `SpikingArgs` defaults to `t_window = 0.01` against

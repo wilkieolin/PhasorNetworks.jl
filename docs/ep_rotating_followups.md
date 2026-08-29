@@ -3,32 +3,110 @@
 > **Derivation:** `docs/phasor_lockin_derivation.tex` §Rotating Substrate &nbsp;|&nbsp;
 > **Narrative:** `docs/ep_rotating_extension.md` &nbsp;|&nbsp;
 > **Measurements:** `results/ep_readout_floor/FINDINGS.md` &nbsp;|&nbsp;
-> **Gates:** `scripts/ep_rotating_gates.jl`
+> **Gates:** `scripts/ep_rotating_gates.jl` &nbsp;|&nbsp;
+> **Frame/readout check:** `scripts/ep_readout_frame_check.jl` &nbsp;|&nbsp;
+> **Superseding priority order:** `docs/ep_program_status.md`
 
 ## Where things stand
 
+> **Priority note.** The ranking in this file predates the wider program
+> review in `docs/ep_program_status.md` §4, which reconciles these items
+> against the three motivating questions (VSA-structured networks; analog
+> fine-tuning; per-synapse / gated rules) and re-ranks them. The *content*
+> below still stands; the ordering is superseded. In particular §0 there is
+> action **A1**, §1a is folded into **A5**, and §2 is **A8**.
+
 Two results bound what follows.
 
-1. **The carrier is free.** For a single shared ω the rotation cancels
-   exactly — continuous and discrete, at any `dt` — so the rotating problem
-   *is* the static problem and the existing zone map already applies. Nothing
-   further to measure here.
+1. **The carrier is free — for the analog settle.** For a single shared ω the
+   rotation cancels exactly, continuous and discrete, at any `dt`. Nothing
+   further to measure about the settle itself.
 2. **The spike-time readout is not free.** A deterministic phase quantum of
    0.005 turns (1.8°) takes best-achievable fidelity from 0.999 to 0.07, with
    100% failure at every (ε, ω_p, n_cycles). Dithering roughly doubles that and
-   no more; a smoother projection helps the tail by ~8 points of fail rate. The
-   window for a spiking implementation is **closed** at the package's default
-   `t_window/t_period = 0.01`.
+   no more; a smoother projection helps the tail by ~8 points of fail rate.
 
-So the open work is not about ω. It is about the readout, and about the one
-place where a rotating substrate genuinely does change the theory.
+**These two interact, and that was missed when they were written.** Result 1
+covers the settle; the quantizer in Result 2 is the one non-U(1)-equivariant
+operation in the pipeline, so the carrier reduction does not reach it. Result 2
+was measured with the readout grid in the *co-rotating* frame, which is the
+pessimistic case — only the probe sweeps the state across bins, and it sweeps by
+less than one. Put the same grid in the lab frame with an incommensurate carrier
+and the estimator recovers from 0.44 to 0.998 median cos, for free (see
+`docs/ep_rotating_extension.md`, "The exception: a quantized readout").
+
+So the readout floor is **conditional on what the readout clock is locked to**,
+and that condition is now the first open question rather than an afterthought.
+
+---
+
+## 0. Which frame does the readout clock live in? *(now the binding question)*
+
+Everything in §1 assumes the floor measured in `results/ep_readout_floor/` is
+real. It is real for a clock **phase-locked to the carrier** — bins fixed within
+each period, one sample per period — because then the state occupies the same
+bin every period and the quantizer is deterministic with a dead zone. It is
+largely *not* real for a clock that **free-runs** relative to the carrier,
+because then the carrier itself sweeps the state across tens of bins per sample
+and dithers the quantizer at no cost.
+
+Measured at δ = 0.005 turns, no jitter, 8 draws, median cos vs. centered
+`StaticEP`, grid fixed in the stated frame
+(`scripts/ep_readout_frame_check.jl`, reproducible):
+
+| grid frame | carrier | bins swept / step | median cos (L1 / L2) |
+|---|---|---|---|
+| co-rotating | — | ≈0 | 0.436 / 0.825 |
+| lab | ω = 2π, dt = 0.5 | 50.00 (commensurate) | 0.452 / 0.819 |
+| lab | ω = 1.7 | 27.06 | **0.998 / 0.998** |
+| lab | ω = 2.9 | 46.16 | **0.998 / 0.999** |
+
+The commensurate row is the control: 0.25 turns is exactly 50 bins of
+δ = 0.005, rounding permutes bins, and the lab arm collapses onto the
+co-rotating one. So the effect is commensurability, not "the lab frame is
+magic."
+
+**What to do.**
+
+1. *Settle the physical question first.* What is the sampling relation in the
+   intended substrate — is a neuron's spike time compared against a clock
+   derived from the same oscillator that sets ω (locked) or against an
+   independent one (free-running)? This is a hardware question and it decides
+   whether §1 is urgent or moot. Nothing in this package currently commits to
+   an answer, and `LockinEP` has no `carrier` kwarg at all, so the co-rotating
+   choice was implicit rather than argued.
+2. *Add the frame as a sweep axis.* `LockinEP` needs a `carrier` field threaded
+   into `phasor_settle` and the `_ro` readout applied in the lab frame before
+   demodulation. Then re-run the readout grid with the frame as a factor. This
+   is the sweep previously written off as buying nothing; with quantization it
+   buys the whole result.
+3. *Check the sampling rate separately from the frame.* The current harness
+   observes every `dt` — two samples per carrier period. A spiking neuron
+   emits one spike per period, so the physically faithful model observes once
+   per period, which is automatically commensurate and therefore pessimistic
+   again. Rate and frame are confounded in the numbers above and should be
+   separated.
+4. *Re-run the dither comparison inside the answer.* Already visible in the
+   same script: adding jitter at the measured optimum (0.25× the quantum)
+   takes the co-rotating arm 0.44 → 0.90 but the incommensurate lab arm only
+   0.998 → 0.963 — i.e. slightly *worse*, because the carrier has already
+   dithered the quantizer and the extra noise is now pure noise. So
+   `readout_jitter`'s ~2× gain is a repair for a frame choice, not an
+   independent effect, and its optimum will move if §0 resolves the other
+   way.
+
+**What would falsify the optimistic reading:** commensurate sampling being
+forced by the physics — e.g. the readout being a per-period spike time by
+construction, with no sub-period clock — in which case the co-rotating grid is
+correct and §1 stands as written.
 
 ---
 
 ## 1. Beat the readout floor, or establish that it cannot be beaten
 
-The binding question. Everything in Result 2 follows from needing the probe
-response `ε·χ` to exceed one phase bin, and from a deterministic quantizer
+Binding **if** §0 resolves toward a carrier-locked clock.
+
+Everything in Result 2 follows from needing the probe response `ε·χ` to exceed one phase bin, and from a deterministic quantizer
 having a dead zone: if the state never crosses a bin boundary, the demodulated
 sum is *identically* zero, and no amount of averaging recovers a signal that
 never moved.
@@ -139,10 +217,12 @@ Small, cheap, and each removes a stated caveat.
 
 ## 4. Deliberately not pursued
 
-- **A lab-frame sweep.** The frames are provably equivalent and the lab frame is
-  strictly worse numerically (it accumulates `O(N·u)` carrier rounding the
-  co-rotating frame never incurs). Its only role is verification, which
-  `scripts/ep_rotating_gates.jl` already performs.
+- **A lab-frame sweep of the *analog* settle.** There the frames are provably
+  equivalent and the lab frame is strictly worse numerically (it accumulates
+  `O(N·u)` carrier rounding the co-rotating frame never incurs). Its only role
+  is verification, which `scripts/ep_rotating_gates.jl` already performs. This
+  does **not** apply once `readout_δ > 0` — see §0, which is now the
+  highest-value axis left.
 - **Tuning the dual-sideband demodulator.** In the co-rotating frame there is
   one sideband, at ω_p. The `ω ± ω_p` structure is an artifact of choosing the
   wrong frame, and chasing it was what produced 120 cells of uninterpretable

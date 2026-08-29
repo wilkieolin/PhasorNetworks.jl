@@ -43,9 +43,49 @@ this package **both physically co-rotate**:
 - The codebook is made of neurons rotating at the same ω.
 
 **Consequence: for a chain with one shared carrier, the rotating problem *is* the
-static problem.** The existing zone map (`results/ep_adiabatic/`) already applies.
-A sweep in the lab frame buys nothing, and the lab frame is strictly worse
-numerically (see Gate C).
+static problem** — as long as the states stay analog. The existing zone map
+(`results/ep_adiabatic/`) already applies, and the lab frame is strictly worse
+numerically (see Gate C), so for the analog settle it is a verification tool
+rather than a different model.
+
+### The exception: a quantized readout
+
+This stops being true the moment `readout_δ > 0`. `_quantize_phase` rounds
+`angle(z)/2π` onto a fixed grid, and rounding commutes with a rotation of θ
+turns only when `θ/δ` is an integer. It is the **one non-U(1)-equivariant
+operation in the pipeline**, and the carrier reduction does not reach it — the
+formal derivation proves a statement about the settle and says nothing about
+the readout.
+
+The gap is not academic. With the grid fixed in the lab frame — where a physical
+spike-time clock lives — measured over 8 draws at δ = 0.005 turns and no jitter,
+median cos against a centered `StaticEP` reference
+(`scripts/ep_readout_frame_check.jl`):
+
+| readout grid frame | carrier | bins swept per step | median cos (L1 / L2) | worst |
+|---|---|---|---|---|
+| co-rotating (the sweep as run) | — | ≈0 (probe only) | 0.436 / 0.825 | 0.233 / 0.161 |
+| lab | ω = 2π, dt = 0.5 | 50.00 (**commensurate**) | 0.452 / 0.819 | 0.220 / 0.484 |
+| lab | ω = 1.7 | 27.06 | **0.998 / 0.998** | 0.995 / 0.981 |
+| lab | ω = 2.9 | 46.16 | **0.998 / 0.999** | 0.994 / 0.980 |
+
+An incommensurate carrier recovers the quantized estimator essentially
+completely, for free and with no injected noise — better than the Gaussian
+dither at its stochastic-resonance optimum. The mechanism is the one
+`_quantize_phase`'s comment already guessed at: in the co-rotating frame only
+the probe sweeps the state across bins, and it sweeps by less than a bin, which
+is exactly the dead zone. The carrier sweeps by tens. ω = 2π at dt = 0.5 is the
+degenerate case — 0.25 turns is precisely 50 bins of δ = 0.005 — which is why it
+tracks the co-rotating arm and confirms the mechanism rather than contradicting
+it. The δ = 0 control in the same script has all four arms agreeing to four
+decimals, which is the carrier-reduction theorem holding.
+
+So **with quantization the frame is a modelling choice about what the readout
+clock is locked to, not a change of variables.** If the clock is phase-locked to
+the carrier (bins fixed within each period, one sample per period) the
+co-rotating model is right. If it free-runs, the floor largely evaporates. Which
+one a device does is open — see `docs/ep_rotating_followups.md` §2. Gate F pins
+both halves of the equivariance boundary so this cannot quietly drift again.
 
 This is a strong validation of the per-channel ω rule (`CLAUDE.md`): the rule
 exists so phase-locked communication works, and exact carrier cancellation is
@@ -129,6 +169,7 @@ nonlinear and could not simply be rotated.
 | **C** | lab frame ≡ co-rotating frame after demodulation | rel-err **1e-7 – 1.3e-4**, cos ≥ **0.9999998** |
 | **D** | Hebbians U(1)-invariant (and transpose breaks) | **9.3e-8** invariant / **1.84** broken |
 | **E** | lab-frame *gradient* ≡ co-rotating gradient | rel-err **4.5e-5 – 8.2e-5**, cos = **1.00000000** |
+| **F** | readout quantizer is *not* U(1)-equivariant at δ>0 | **4e-7** on grid multiples / **0.021–0.030** off them |
 
 Two notes on reading these:
 

@@ -24,8 +24,14 @@
 # The only symmetry-breaking terms are the bias and the cost target, and
 # in this package both physically co-rotate (see `phasor_settle`'s
 # docstring). So the correct rotating extension must reproduce the
-# co-rotating result to machine precision, and a sweep in the lab frame
-# buys nothing.
+# co-rotating result to machine precision.
+#
+# That claim is about the ANALOG settle. It does not extend to a quantized
+# readout: rounding onto a fixed phase grid commutes with a rotation only
+# when the rotation is an exact multiple of the grid, so `readout_δ > 0`
+# makes the frame a modelling choice rather than a change of variables.
+# Gate F pins both halves — equivalence at δ=0, and a visible, correctly
+# sized break at δ>0 — so neither can quietly stop being true.
 #
 #   julia --project=. scripts/ep_rotating_gates.jl
 #
@@ -302,6 +308,55 @@ function gate_gradient_equivalence()
 end
 
 # ---------------------------------------------------------------------
+# Gate F — the carrier reduction covers the settle, NOT the readout.
+# ---------------------------------------------------------------------
+# Gates B, C and E establish frame equivalence for the analog state. The
+# readout quantizer is the one operation in the pipeline that is not
+# U(1)-equivariant: `_quantize_phase` rounds `angle(z)/2π` onto a grid of
+# spacing δ turns, and `round` commutes with a rotation of θ turns only
+# when θ/δ is an integer.
+#
+# This gate has teeth in both directions:
+#   * a rotation by an exact multiple of δ must leave the quantized value
+#     unchanged (otherwise the quantizer is broken, not just anisotropic);
+#   * a rotation by a non-multiple must visibly change it (otherwise the
+#     gate would pass vacuously and the docs' "the frames are equivalent"
+#     would silently over-reach into the quantized regime).
+#
+# The consequence is measured, not just asserted: with the grid fixed in
+# the lab frame an incommensurate carrier dithers the quantizer for free,
+# taking the estimator from ~0.44 to ~0.998 median cos at δ = 0.005 turns.
+# See `phasor_settle`'s docstring and docs/ep_rotating_followups.md §2.
+function gate_readout_not_equivariant()
+    section("Gate F: readout quantizer is NOT U(1)-equivariant (δ > 0)")
+    δ = 0.005f0
+    z = ComplexF32.(cis.(2π .* rand(Xoshiro(1), Float32, 4000)))
+    Q(a) = PhasorNetworks._readout(a, δ, 0f0, nothing)
+    dev(θturns) = (θ = 2f0 * Float32(π) * θturns;
+                   maximum(abs.(Q(z .* cis(θ)) .* conj(cis(θ)) .- Q(z))))
+
+    # δ = 0 is the analog case: equivariant at any angle, by Gates B/C/E.
+    d0 = maximum(abs.(PhasorNetworks._readout(z .* cis(1.234f0), 0f0, 0f0, nothing) .*
+                      conj(cis(1.234f0)) .-
+                      PhasorNetworks._readout(z, 0f0, 0f0, nothing)))
+    # δ=0 passes the state through untouched, so the only residue is the
+    # Float32 round trip of e^{iθ}·e^{-iθ} itself (~1 ulp), not the readout.
+    gate("F  δ=0 readout is equivariant (analog case)", d0 < 1f-6,
+         @sprintf("max|Δ|=%.3g (float round-trip only)", d0))
+
+    for θt in (δ, 100f0 * δ)              # 1 bin, 100 bins (= 0.5 turns)
+        d = dev(θt)
+        gate(@sprintf("F  commensurate rot %.4f turns (=%.0f bins)", θt, θt/δ),
+             d < 1f-5, @sprintf("max|Δ|=%.3g (want ~0)", d))
+    end
+    for θt in (0.1353f0, 0.0017f0)        # 27.06 bins, 0.34 bins
+        d = dev(θt)
+        gate(@sprintf("F  incommensurate rot %.4f turns (=%.2f bins)", θt, θt/δ),
+             d > 1f-3, @sprintf("max|Δ|=%.3g (want ≫0 — teeth)", d))
+    end
+end
+
+# ---------------------------------------------------------------------
 function main()
     println("Rotating-EP correctness gates")
     println("=============================")
@@ -310,6 +365,7 @@ function main()
     gate_frame_equivalence()
     gate_u1_invariance()
     gate_gradient_equivalence()
+    gate_readout_not_equivariant()
 
     println()
     if isempty(FAILURES)
