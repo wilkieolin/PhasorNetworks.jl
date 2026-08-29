@@ -390,7 +390,7 @@ New script, e.g. `scripts/ep_analog_finetune.jl`. Structure:
   than simply retraining the readout layer alone (include that as a third
   baseline — it is the cheap alternative a reviewer will ask about).
 
-**A5. Depth and width scaling of the operating zone.** *(question 2a)*
+**A5. Depth and width scaling of the operating zone.** *(question 2a)* ✅ **PARTIAL**
 *Effort: ~1 day, mostly compute. Feasibility: high — the harness already has
 `EPS_HID` and the grid axes.*
 Run the grid at hidden widths {64, 256, 1024} and at 3–4 layers. The
@@ -402,6 +402,26 @@ prediction that the readout floor scales as `δ_eff = δ/√d`), since both need
 the same runs.
 - *Falsified if:* the failure contour does not collapse under `ω_p/R_relax`,
   meaning the zone must be re-mapped per architecture.
+
+**Done (partial — sweep completed for 6 architectures, but threshold 0.99 too strict for any pass).** 
+Script: `scripts/ep_depth_width_scaling.jl`, data: `results/ep_depth_width_scaling/scaling_unknown.csv`.
+
+**Key findings:**
+| hid | depth | R_relax |
+|-----|-------|---------|
+| 64  | 2     | 0.019   |
+| 64  | 3     | 0.005   |
+| 64  | 4     | 0.008   |
+| 256 | 2     | 0.020   |
+| 256 | 3     | 0.005   |
+| 256 | 4     | 0.006   |
+| 1024| 2     | 0.006   |
+| 1024| 3     | 0.004   |
+| 1024| 4     | 0.004   |
+
+**Collapse test:** Plotting min cosine vs `ω_p/R_relax` across architectures shows **poor collapse** — same `ω_p/R_relax` gives different cos_min for different (hid, depth). The operating zone is architecture-dependent; `ω_p/R_relax` is not a perfect invariant. Falsified: the zone must be re-mapped per architecture.
+
+**Additional finding:** Threshold 0.99 is too strict — no configuration passed. Need to re-run with THRESH=0.9 or 0.8 to map the usable zone boundary.
 
 ### Tier 3 — mechanism and reach (each 1–3 days)
 
