@@ -1,33 +1,14 @@
 #!/usr/bin/env julia
-#
 # scripts/ep_analog_finetune.jl — A4: Analog-impairment fine-tuning harness
 #
-# This is the headline experiment: can EP fine-tune through impaired weights?
-#
-# Structure:
-# 1. Pretrain to a good checkpoint (backprop, per A3)
-# 2. Apply impairment model to ps — menu, each independently switchable:
-#    - multiplicative lognormal on W (σ sweep)
-#    - additive Gaussian noise
-#    - fraction of stuck-at-zero synapses
-#    - fraction stuck at saturation
-# 3. Record accuracy drop
-# 4. Fine-tune through impaired network with LockinEP for k epochs
-#    (stuck synapses stay stuck: mask both weight AND its update)
-# 5. Optionally impair the update too: asymmetric plasticity η₊ ≠ η₋;
-#    granular Δw with minimum representable step
-# 6. Compare against three references:
-#    - backprop fine-tuning (ceiling)
-#    - no fine-tuning (floor)
-#    - readout-only retraining (cheap baseline)
-#
-# Report: recovery fraction (acc_tuned − acc_impaired) / (acc_clean − acc_impaired)
-# against impairment severity.
+# Pretrain → impair → fine-tune with LockinEP through the impairment.
+# Reports recovery fraction vs. impairment severity.
 #
 # Usage:
 #   julia --project=. scripts/ep_analog_finetune.jl
-#   julia --project=. -t 4 scripts/ep_analog_finetune.jl
-#   julia --project=. scripts/ep_analog_finetune.jl --impairment lognormal --sigma 0.1
+#   PRETRAIN=both julia --project=. scripts/ep_analog_finetune.jl
+#   PRETRAIN=backprop STATIC_EPOCHS=0 julia --project=. scripts/ep_analog_finetune.jl
+#   RUN_GPU=0 julia --project=. scripts/ep_analog_finetune.jl  # force CPU
 
 using Pkg
 function find_repo_root(start_dir::String = pwd())
@@ -46,47 +27,102 @@ repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
 Pkg.activate(repo_root)
 
-using PhasorNetworks, Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, CUDA
-using Dates, LinearAlgebra, Printf
+using PhasorNetworks, Lux, MLUtils, OneHotArrays, Statistics, Random, Optimisers, LinearAlgebra, CSV, DataFrames, Printf, Zygote
 using Random: Xoshiro
+using CUDA
 
-# Parse command line args
-const IMPAIRMENT_TYPE = get(ENV, "IMPAIRMENT", "lognormal")  # lognormal, gaussian, stuck_zero, stuck_sat
-const SIGMA = parse(Float32, get(ENV, "SIGMA", "0.1"))
-const FRAC = parse(Float32, get(ENV, "FRAC", "0.1"))
-const FINETUNE_EPOCHS = parse(Int, get(ENV, "FINETUNE_EPOCHS", "10"))
-const PRETRAIN_EPOCHS = parse(Int, get(ENV, "PRETRAIN_EPOCHS", "5"))
-const LR = parse(Float64, get(ENV, "LR", "0.001"))
-const FINETUNE_LR = parse(Float64, get(ENV, "FINETUNE_LR", "0.001"))
-const SEED = parse(Int, get(ENV, "SEED", "42"))
-const USE_CUDA = CUDA.functional()
-const BATCHSIZE = 128
-const HID = 256
-const DOUT = 64
-const SCALE = 0.4f0
+# ============================================================
+# CONFIGURATION (env-overridable)
+# ============================================================
 
-cdev = cpu_device()
-gdev = gpu_device()
-dev = USE_CUDA ? gdev : cdev
+const OUT = get(ENV, "EPS_OUT", joinpath(repo_root, "results", "ep_analog_finetune"))
+mkpath(OUT)
 
-args = Args(batchsize = BATCHSIZE,
-            epochs = PRETRAIN_EPOCHS,
-            lr = LR,
-            rng = Xoshiro(SEED),
-            use_cuda = USE_CUDA)
+const PRETRAIN = Symbol(get(ENV, "PRETRAIN", "both"))  # :backprop, :staticep, :both
+const N_TRAIN = parse(Int, get(ENV, "N_TRAIN", "60000"))
+const N_TEST  = parse(Int, get(ENV, "N_TEST", "10000"))
+const BATCH   = parse(Int, get(ENV, "BATCH", "128"))
+const HID     = parse(Int, get(ENV, "HID", "256"))
+const DOUT    = parse(Int, get(ENV, "DOUT", "64"))
+const SEED    = parse(UInt, get(ENV, "SEED", "42"))
 
-finetune_args = Args(batchsize = BATCHSIZE,
-                     epochs = FINETUNE_EPOCHS,
-                     lr = FINETUNE_LR,
-                     rng = Xoshiro(SEED + 1000),
-                     use_cuda = USE_CUDA)
+const BP_EPOCHS     = parse(Int, get(ENV, "BP_EPOCHS", "5"))
+const BP_LR         = parse(Float64, get(ENV, "BP_LR", "0.001"))
+const STATIC_EPOCHS = parse(Int, get(ENV, "STATIC_EPOCHS", "20"))
+const STATIC_BETA   = parse(Float32, get(ENV, "STATIC_BETA", "0.1"))
+const FT_EPOCHS     = parse(Int, get(ENV, "FT_EPOCHS", "5"))
 
-println("=== A4: Analog Fine-tuning Harness ===")
-println("Impairment: $IMPAIRMENT_TYPE")
-println("Params: sigma=$SIGMA, frac=$FRAC, finetune_epochs=$FINETUNE_EPOCHS, pretrain_epochs=$PRETRAIN_EPOCHS")
-println("LR: pretrain=$LR, finetune=$FINETUNE_LR, seed=$SEED, use_cuda=$USE_CUDA")
+# LockinEP knobs (from A5 optimal)
+const LOCKIN_EPS     = parse(Float32, get(ENV, "LOCKIN_EPS", "0.03"))
+const LOCKIN_WP      = parse(Float32, get(ENV, "LOCKIN_WP", "0.02"))
+const LOCKIN_CYCLES  = parse(Int, get(ENV, "LOCKIN_CYCLES", "4"))
+const LOCKIN_TFREE   = parse(Int, get(ENV, "LOCKIN_TFREE", "200"))
+const LOCKIN_DT      = parse(Float32, get(ENV, "LOCKIN_DT", "0.5"))
 
-# ---- encode_phase (matching ep_fashionmnist.jl) ----
+# Weight decay
+const WEIGHT_DECAY  = parse(Float64, get(ENV, "WEIGHT_DECAY", "0.0001"))
+
+# Device
+const RUN_GPU = get(ENV, "RUN_GPU", "auto")  # "1", "0", "auto"
+const USE_CUDA = if RUN_GPU == "auto"
+    CUDA.functional()
+elseif RUN_GPU == "1"
+    CUDA.functional() || error("CUDA requested but not functional")
+else
+    false
+end
+const DEVICE = USE_CUDA ? gpu_device() : cpu_device()
+
+# Provenance
+const GITREV = try
+    rev = strip(read(`git -C $(repo_root) rev-parse --short HEAD`, String))
+    d   = read(`git -C $(repo_root) diff HEAD -- src`, String)
+    isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
+catch
+    "unknown"
+end
+
+# ============================================================
+# IMPAIRMENT CONFIGS
+# ============================================================
+
+# Weight impairments: (name, param_values, apply_fn)
+const WEIGHT_IMPAIRMENTS = [
+    (:lognormal,   [0.01f0, 0.03f0, 0.1f0, 0.3f0]),
+    (:gaussian,    [0.01f0, 0.03f0, 0.1f0, 0.3f0]),
+    (:stuck_zero,  [0.01f0, 0.03f0, 0.1f0, 0.3f0]),
+    (:stuck_sat,   [0.01f0, 0.03f0, 0.1f0, 0.3f0]),
+]
+
+# Update impairments: applied during fine-tuning via gradient post-processing
+const UPDATE_IMPAIRMENTS = [
+    (:asym_plasticity, [0.5f0, 0.8f0, 1.2f0, 2.0f0]),
+    (:granular_dw,     [0.001f0, 0.01f0, 0.1f0]),
+]
+
+const REPS = 3
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+cosine(a, b) = real(dot(vec(a), vec(b)) / (norm(vec(a)) * norm(vec(b)) + 1e-30))
+
+function build_chain(rng::Xoshiro; scale=0.4f0)
+    chain = Chain(
+        PhasorDense(784 => HID, normalize_to_unit_circle, use_bias=true),
+        PhasorDense(HID => DOUT, normalize_to_unit_circle, use_bias=true)
+    )
+    ps, st = Lux.setup(rng, chain)
+    ps = (layer_1 = merge(ps.layer_1, (weight = scale .* ps.layer_1.weight,)),
+          layer_2 = merge(ps.layer_2, (weight = scale .* ps.layer_2.weight,)))
+    return chain, ps, st
+end
+
+function make_codes(rng::Xoshiro)
+    return ComplexF32.(angle_to_complex(orthogonal_codes(rng, DOUT, 10)))
+end
+
 function encode_phase(imgs::AbstractArray{Float32,3})
     N = size(imgs, 3)
     flat = reshape(imgs, :, N)
@@ -95,86 +131,54 @@ function encode_phase(imgs::AbstractArray{Float32,3})
     return Phase.(0.5f0 .* tanh.((flat .- μ) ./ σ))
 end
 
-# Load FashionMNIST
-println("\nLoading FashionMNIST...")
-tr = fashion_mnist_data(:train)
-te = fashion_mnist_data(:test)
-ntr = min(60000, length(tr.targets))
-nte = min(10000, length(te.targets))
-Xtr = encode_phase(Float32.(tr.features[:, :, 1:ntr]))
-Xte = encode_phase(Float32.(te.features[:, :, 1:nte]))
-ytr = Int.(tr.targets[1:ntr]) .+ 1
-yte = Int.(te.targets[1:nte]) .+ 1
-
-train_loader = DataLoader((Xtr, ytr), batchsize=BATCHSIZE, shuffle=true)
-test_loader = DataLoader((Xte, yte), batchsize=BATCHSIZE, shuffle=false)
-
-# ---- Build EP chain ----
-import PhasorNetworks: default_bias, normalize_to_unit_circle
-
-function build_chain(rng)
-    chain = Chain(
-        PhasorDense(784 => HID, normalize_to_unit_circle, use_bias=true),
-        PhasorDense(HID => DOUT, normalize_to_unit_circle, use_bias=true)
-    )
-    ps, st = Lux.setup(rng, chain)
-    ps = (layer_1 = merge(ps.layer_1, (weight = SCALE .* ps.layer_1.weight,)),
-          layer_2 = merge(ps.layer_2, (weight = SCALE .* ps.layer_2.weight,)))
-    return chain, ps, st
+function load_fashionmnist()
+    tr = fashion_mnist_data(:train)
+    te = fashion_mnist_data(:test)
+    ntr = min(N_TRAIN, length(tr.targets))
+    nte = min(N_TEST,  length(te.targets))
+    Xtr = encode_phase(Float32.(tr.features[:, :, 1:ntr]))
+    Xte = encode_phase(Float32.(te.features[:, :, 1:nte]))
+    ytr = Int.(tr.targets[1:ntr]) .+ 1
+    yte = Int.(te.targets[1:nte]) .+ 1
+    return (Xtr, ytr), (Xte, yte)
 end
 
-function make_codes(rng)
-    return ComplexF32.(angle_to_complex(orthogonal_codes(rng, DOUT, 10)))
+function to_device(x)
+    return USE_CUDA ? x |> DEVICE : x
 end
 
-rng = Xoshiro(SEED)
-chain, ps, st = build_chain(rng)
-cb_codes = make_codes(rng)
-
-if USE_CUDA
-    ps = ps |> gdev
-    st = st |> gdev
-    cb_codes = cb_codes |> gdev
-end
-
-# ---- Loss/accuracy functions ----
-function bp_loss(x, y, model, ps, st, codebook, dev=dev)
-    x = x |> dev
-    y = y |> dev
+# --- Backprop training (feedforward) ---
+function bp_loss(x, y, model, ps, st, codebook)
     z_out, _ = Lux.apply(model, x, ps, st)
     z_out_c = ComplexF32.(angle_to_complex(z_out))
-    codes_dev = codebook |> dev
-    logits = similarity_outer(z_out_c, codes_dev)
+    logits = similarity_outer(z_out_c, codebook)
     y_onehot = onehotbatch(y .- 1, 0:9)
     log_probs = logits .- log.(sum(exp.(logits); dims=1))
-    loss = -mean(sum(y_onehot .* log_probs; dims=1))
-    return loss
+    return -mean(sum(y_onehot .* log_probs; dims=1))
 end
 
-function bp_accuracy(model, data_loader, ps, st, codebook, dev=dev)
-    total_correct = 0
-    total_samples = 0
-    for (x, y) in data_loader
-        x = x |> dev
-        y = y |> dev
-        z_out, _ = Lux.apply(model, x, ps, st)
-        z_out_c = ComplexF32.(angle_to_complex(z_out))
-        logits = similarity_outer(z_out_c, codebook |> dev)
-        logits_cpu = logits |> cdev
-        pred_indices = argmax(logits_cpu; dims=1)
-        pred_labels = [idx[1] for idx in vec(pred_indices)]
-        y_cpu = y |> cdev
-        total_correct += sum(pred_labels .== y_cpu)
-        total_samples += length(y_cpu)
+function train_bp(chain, ps, st, train_loader, epochs, lr, codebook)
+    optimiser = Optimisers.Adam(lr)
+    opt_state = Optimisers.setup(optimiser, ps)
+    for epoch in 1:epochs
+        epoch_losses = Float64[]
+        for (x, y) in train_loader
+            lf = p -> bp_loss(x, y, chain, p, st, codebook)
+            lossval, gs = Zygote.withgradient(lf, ps)
+            push!(epoch_losses, lossval)
+            opt_state, ps = Optimisers.update(opt_state, ps, gs[1])
+        end
+        @printf("  BP epoch %d/%d: loss = %.4f\n", epoch, epochs, mean(epoch_losses))
     end
-    return total_correct / total_samples
+    return ps
 end
 
-function ep_accuracy(model, X, y, ps, st, codebook, dev=dev; T=200, dt=0.5f0, K_mode=:zero)
+# --- EP evaluation ---
+function ep_accuracy(model, X, y, ps, st, codebook; batch=512, T=200, dt=0.5f0, K_mode=:zero)
     correct = 0
-    for i in 1:512:length(y)
-        e = min(i + 512 - 1, length(y))
-        x_batch = X[:, i:e] |> dev
+    for i in 1:batch:length(y)
+        e = min(i + batch - 1, length(y))
+        x_batch = X[:, i:e]
         logits = ep_predict(model, ps, st, x_batch, codebook; T=T, dt=dt, K_mode=K_mode)
         pred = [argmax(view(logits, :, b))[1] for b in 1:(e - i + 1)]
         correct += sum(pred .== y[i:e])
@@ -182,306 +186,325 @@ function ep_accuracy(model, X, y, ps, st, codebook, dev=dev; T=200, dt=0.5f0, K_
     return correct / length(y)
 end
 
-# ---- Impairment functions ----
-function apply_lognormal_impairment(ps, σ, rng)
-    W1 = ps.layer_1.weight
-    W2 = ps.layer_2.weight
-    # Generate noise on same device as weights
-    noise1 = exp.(σ .* randn(rng, Float32, size(W1) |> cdev)) .- 1f0
-    noise2 = exp.(σ .* randn(rng, Float32, size(W2) |> cdev)) .- 1f0
-    noise1 = noise1 |> typeof(W1)
-    noise2 = noise2 |> typeof(W2)
-    return (layer_1 = merge(ps.layer_1, (weight = W1 .* (1f0 .+ noise1),)),
-            layer_2 = merge(ps.layer_2, (weight = W2 .* (1f0 .+ noise2),)))
+# --- StaticEP training ---
+function train_staticep(chain, ps, st, train_loader, epochs, beta, codes)
+    args = Args(lr=0.001, epochs=epochs, weight_decay=WEIGHT_DECAY, rng=Xoshiro(SEED + 1))
+    method = StaticEP(β=beta, T_free=200, T_nudge=100, dt=0.5f0, centered=true)
+    losses, ps_out, st_out = ep_train(chain, ps, st, train_loader, args;
+                                       method=method,
+                                       cost_fn=yb -> CodebookCost(codes, yb),
+                                       optimiser=Optimisers.Adam)
+    return ps_out, st_out
 end
 
-function apply_gaussian_impairment(ps, σ, rng)
-    W1 = ps.layer_1.weight
-    W2 = ps.layer_2.weight
-    noise1 = σ .* randn(rng, Float32, size(W1) |> cdev)
-    noise2 = σ .* randn(rng, Float32, size(W2) |> cdev)
-    noise1 = noise1 |> typeof(W1)
-    noise2 = noise2 |> typeof(W2)
-    return (layer_1 = merge(ps.layer_1, (weight = W1 .+ noise1,)),
-            layer_2 = merge(ps.layer_2, (weight = W2 .+ noise2,)))
+# --- LockinEP fine-tuning ---
+function train_lockinep(chain, ps, st, train_loader, epochs, codes; weight_mask=nothing)
+    args = Args(lr=0.001, epochs=epochs, weight_decay=WEIGHT_DECAY, rng=Xoshiro(SEED + 2))
+    lockin = LockinEP(ε=LOCKIN_EPS, ω_p=LOCKIN_WP, n_cycles=LOCKIN_CYCLES,
+                      T_warmup_cycles=2, T_free=LOCKIN_TFREE, dt=LOCKIN_DT)
+    losses, ps_out, st_out = ep_train(chain, ps, st, train_loader, args;
+                                       method=lockin,
+                                       cost_fn=yb -> CodebookCost(codes, yb),
+                                       optimiser=Optimisers.Adam,
+                                       weight_mask=weight_mask)
+    return ps_out, st_out
 end
 
-function apply_stuck_zero_impairment(ps, frac, rng)
-    W1 = ps.layer_1.weight
-    W2 = ps.layer_2.weight
-    mask1 = rand(rng, Float32, size(W1) |> cdev) .< frac
-    mask2 = rand(rng, Float32, size(W2) |> cdev) .< frac
-    mask1 = mask1 |> typeof(W1)
-    mask2 = mask2 |> typeof(W2)
-    W1_imp = W1 .* (1f0 .- mask1)
-    W2_imp = W2 .* (1f0 .- mask2)
-    # Also create update masks (same stuck synapses stay stuck)
-    update_mask1 = 1f0 .- mask1
-    update_mask2 = 1f0 .- mask2
-    ps_imp = (layer_1 = merge(ps.layer_1, (weight = W1_imp,)),
-              layer_2 = merge(ps.layer_2, (weight = W2_imp,)))
-    update_masks = (layer_1 = (weight = update_mask1,),
-                    layer_2 = (weight = update_mask2,))
-    return ps_imp, update_masks
-end
-
-function apply_stuck_saturation_impairment(ps, frac, rng)
-    W1 = ps.layer_1.weight
-    W2 = ps.layer_2.weight
-    # Stuck at max magnitude (saturation)
-    max1 = maximum(abs, W1 |> cdev)
-    max2 = maximum(abs, W2 |> cdev)
-    mask1 = rand(rng, Float32, size(W1) |> cdev) .< frac
-    mask2 = rand(rng, Float32, size(W2) |> cdev) .< frac
-    mask1 = mask1 |> typeof(W1)
-    mask2 = mask2 |> typeof(W2)
-    sign1 = sign.(W1)
-    sign2 = sign.(W2)
-    W1_imp = W1 .* (1f0 .- mask1) .+ mask1 .* sign1 .* max1
-    W2_imp = W2 .* (1f0 .- mask2) .+ mask2 .* sign2 .* max2
-    update_mask1 = 1f0 .- mask1
-    update_mask2 = 1f0 .- mask2
-    ps_imp = (layer_1 = merge(ps.layer_1, (weight = W1_imp,)),
-              layer_2 = merge(ps.layer_2, (weight = W2_imp,)))
-    update_masks = (layer_1 = (weight = update_mask1,),
-                    layer_2 = (weight = update_mask2,))
-    return ps_imp, update_masks
-end
-
-# ---- Training functions ----
-function train_bp(chain, ps, st, train_loader, args, codebook, dev; epochs=args.epochs, lr=args.lr)
+# --- Backprop fine-tuning (ceiling baseline) ---
+function train_bp_finetune(chain, ps, st, train_loader, epochs, lr, codebook)
     optimiser = Optimisers.Adam(lr)
     opt_state = Optimisers.setup(optimiser, ps)
-    losses = Float64[]
     for epoch in 1:epochs
-        epoch_losses = Float64[]
         for (x, y) in train_loader
-            x = x |> dev
-            y = y |> dev
-            lf = p -> bp_loss(x, y, chain, p, st, codebook, dev)
-            lossval, gs = withgradient(lf, ps)
-            push!(epoch_losses, lossval)
-            if args.weight_decay > 0
-                PhasorNetworks._apply_weight_decay(gs[1], ps, args.weight_decay)
-            end
+            lf = p -> bp_loss(x, y, chain, p, st, codebook)
+            lossval, gs = Zygote.withgradient(lf, ps)
             opt_state, ps = Optimisers.update(opt_state, ps, gs[1])
         end
-        push!(losses, mean(epoch_losses))
-        println("  Epoch $epoch: loss = $(losses[end])")
     end
-    return ps, losses
+    return ps
 end
 
-function train_ep(chain, ps, st, train_loader, args, codebook, dev; epochs=args.epochs, lr=args.lr, update_masks=nothing)
-    method = LockinEP(ε=0.05f0, ω_p=0.05f0, n_cycles=4, T_warmup_cycles=2, T_free=100, dt=0.1f0)
+# --- Readout-only retraining (cheap baseline) ---
+function train_readout_only(chain, ps, st, train_loader, epochs, lr, codebook)
+    # Freeze layer_1, only train layer_2 (readout)
+    frozen_ps = merge(ps, (layer_1 = ps.layer_1,))
     optimiser = Optimisers.Adam(lr)
-    opt_state = Optimisers.setup(optimiser, ps)
-    losses = Float64[]
+    opt_state = Optimisers.setup(optimiser, frozen_ps)
     for epoch in 1:epochs
-        epoch_losses = Float64[]
         for (x, y) in train_loader
-            x = x |> dev
-            y = y |> dev
-            x_phase = Phase.(x)
-            # Use CodebookCost with batch labels (1-based) - move y to CPU first
-            y_cpu = y |> cdev
-            cost = CodebookCost(codebook, y_cpu)
-            g, _ = ep_gradient(method, chain, ps, st, x_phase, cost)
-            # Apply update masks if provided (for stuck synapses)
-            if update_masks !== nothing
-                if haskey(g, :layer_1) && haskey(update_masks, :layer_1)
-                    g = merge(g, (layer_1 = merge(g.layer_1, (weight = g.layer_1.weight .* update_masks.layer_1.weight,)),))
-                end
-                if haskey(g, :layer_2) && haskey(update_masks, :layer_2)
-                    g = merge(g, (layer_2 = merge(g.layer_2, (weight = g.layer_2.weight .* update_masks.layer_2.weight,)),))
-                end
-            end
-            if args.weight_decay > 0
-                PhasorNetworks._apply_weight_decay(g, ps, args.weight_decay)
-            end
-            opt_state, ps = Optimisers.update(opt_state, ps, g)
-            lossval = ep_loss(cost, PhasorNetworks.phasor_settle(chain, ps, st, x_phase, cost, 0f0;
-                              T=100, dt=0.1f0, K_mode=:zero)[end])
-            push!(epoch_losses, lossval)
-        end
-        push!(losses, mean(epoch_losses))
-        println("  EP Epoch $epoch: loss = $(losses[end])")
-    end
-    return ps, losses
-end
-
-function train_readout_only(chain, ps, st, train_loader, args, codebook, dev; epochs=args.epochs, lr=args.lr)
-    """Retrain only the output layer (layer_2) - cheap baseline."""
-    # Freeze layer_1
-    ps_frozen = (layer_1 = ps.layer_1,
-                 layer_2 = ps.layer_2)
-    optimiser = Optimisers.Adam(lr)
-    opt_state = Optimisers.setup(optimiser, ps_frozen)
-    losses = Float64[]
-    for epoch in 1:epochs
-        epoch_losses = Float64[]
-        for (x, y) in train_loader
-            x = x |> dev
-            y = y |> dev
-            # Only compute gradient for layer_2
-            lf = p -> bp_loss(x, y, chain, p, st, codebook, dev)
-            lossval, gs = withgradient(lf, ps_frozen)
+            lf = p -> bp_loss(x, y, chain, p, st, codebook)
+            lossval, gs = Zygote.withgradient(lf, frozen_ps)
+            # gs is a tuple with one element (the gradient NamedTuple)
+            g = gs[1]
             # Zero out layer_1 gradients
-            gs = (layer_1 = (weight = zero(gs[1].layer_1.weight),
-                            log_neg_lambda = zero(gs[1].layer_1.log_neg_lambda),
-                            bias_real = zero(gs[1].layer_1.bias_real),
-                            bias_imag = zero(gs[1].layer_1.bias_imag)),
-                  layer_2 = gs[1].layer_2)
-            push!(epoch_losses, lossval)
-            if args.weight_decay > 0
-                PhasorNetworks._apply_weight_decay(gs[1], ps_frozen, args.weight_decay)
+            g = (layer_1 = merge(g.layer_1, (weight = zero(g.layer_1.weight),)),
+                 layer_2 = g.layer_2)
+            if haskey(g.layer_1, :bias_real)
+                g = merge(g, (layer_1 = merge(g.layer_1,
+                    (bias_real = zero(g.layer_1.bias_real),
+                     bias_imag = zero(g.layer_1.bias_imag))),))
             end
-            opt_state, ps_frozen = Optimisers.update(opt_state, ps_frozen, gs[1])
+            opt_state, frozen_ps = Optimisers.update(opt_state, frozen_ps, g)
         end
-        push!(losses, mean(epoch_losses))
-        println("  Readout-only Epoch $epoch: loss = $(losses[end])")
     end
-    return ps_frozen, losses
+    return frozen_ps
+end
+
+# --- Impairment functions ---
+
+# Weight impairments (return impaired ps and optionally a mask for stuck synapses)
+function apply_lognormal(ps, σ, rng)
+    W1 = ps.layer_1.weight .* (1f0 .+ exp.(σ .* randn(rng, Float32, size(ps.layer_1.weight))) .- 1f0)
+    W2 = ps.layer_2.weight .* (1f0 .+ exp.(σ .* randn(rng, Float32, size(ps.layer_2.weight))) .- 1f0)
+    return merge(ps, (layer_1 = merge(ps.layer_1, (weight = W1,)),
+                        layer_2 = merge(ps.layer_2, (weight = W2,)))), nothing
+end
+
+function apply_gaussian(ps, σ, rng)
+    W1 = ps.layer_1.weight .+ σ .* randn(rng, Float32, size(ps.layer_1.weight))
+    W2 = ps.layer_2.weight .+ σ .* randn(rng, Float32, size(ps.layer_2.weight))
+    return merge(ps, (layer_1 = merge(ps.layer_1, (weight = W1,)),
+                        layer_2 = merge(ps.layer_2, (weight = W2,)))), nothing
+end
+
+function apply_stuck_zero(ps, frac, rng)
+    mask1 = rand(rng, Float32, size(ps.layer_1.weight)) .>= frac
+    mask2 = rand(rng, Float32, size(ps.layer_2.weight)) .>= frac
+    W1 = ps.layer_1.weight .* Float32.(mask1)
+    W2 = ps.layer_2.weight .* Float32.(mask2)
+    # Build weight_mask (0 for stuck, 1 for free)
+    wmask = (layer_1 = (weight = Float32.(mask1), bias_real = ones(Float32, size(ps.layer_1.bias_real)), bias_imag = ones(Float32, size(ps.layer_1.bias_imag))),
+             layer_2 = (weight = Float32.(mask2), bias_real = ones(Float32, size(ps.layer_2.bias_real)), bias_imag = ones(Float32, size(ps.layer_2.bias_imag))))
+    return merge(ps, (layer_1 = merge(ps.layer_1, (weight = W1,)),
+                        layer_2 = merge(ps.layer_2, (weight = W2,)))), wmask
+end
+
+function apply_stuck_sat(ps, frac, rng)
+    max1 = maximum(abs.(ps.layer_1.weight))
+    max2 = maximum(abs.(ps.layer_2.weight))
+    mask1 = rand(rng, Float32, size(ps.layer_1.weight)) .>= frac
+    mask2 = rand(rng, Float32, size(ps.layer_2.weight)) .>= frac
+    signs1 = rand(rng, [1f0, -1f0], size(ps.layer_1.weight))
+    signs2 = rand(rng, [1f0, -1f0], size(ps.layer_2.weight))
+    W1 = ps.layer_1.weight .* Float32.(mask1) .+ (1f0 .- Float32.(mask1)) .* signs1 .* max1
+    W2 = ps.layer_2.weight .* Float32.(mask2) .+ (1f0 .- Float32.(mask2)) .* signs2 .* max2
+    # Build weight_mask (0 for stuck, 1 for free)
+    wmask = (layer_1 = (weight = Float32.(mask1), bias_real = ones(Float32, size(ps.layer_1.bias_real)), bias_imag = ones(Float32, size(ps.layer_1.bias_imag))),
+             layer_2 = (weight = Float32.(mask2), bias_real = ones(Float32, size(ps.layer_2.bias_real)), bias_imag = ones(Float32, size(ps.layer_2.bias_imag))))
+    return merge(ps, (layer_1 = merge(ps.layer_1, (weight = W1,)),
+                        layer_2 = merge(ps.layer_2, (weight = W2,)))), wmask
+end
+
+# Update impairments (applied via callback in ep_train)
+# We'll implement these as gradient post-processing in the callback
+struct UpdateImpairment
+    type::Symbol
+    param::Float32
+end
+
+function apply_update_impairment!(grads, imp::UpdateImpairment)
+    if imp.type == :asym_plasticity
+        # η₊/η₋ asymmetry
+        η₊ = 1.0f0
+        η₋ = imp.param  # η₋/η₊ ratio
+        for key in keys(grads)
+            if haskey(grads[key], :weight)
+                g = grads[key].weight
+                grads[key] = merge(grads[key], (weight = (η₊ .* (g .> 0) .+ η₋ .* (g .< 0)) .* g,))
+                if haskey(grads[key], :bias_real)
+                    gr = grads[key].bias_real
+                    gi = grads[key].bias_imag
+                    grads[key] = merge(grads[key], (
+                        bias_real = (η₊ .* (gr .> 0) .+ η₋ .* (gr .< 0)) .* gr,
+                        bias_imag = (η₊ .* (gi .> 0) .+ η₋ .* (gi .< 0)) .* gi,
+                    ))
+                end
+            end
+        end
+    elseif imp.type == :granular_dw
+        # Granular Δw: round to nearest step
+        step = imp.param
+        for key in keys(grads)
+            if haskey(grads[key], :weight)
+                g = grads[key].weight
+                grads[key] = merge(grads[key], (weight = round.(g ./ step) .* step,))
+                if haskey(grads[key], :bias_real)
+                    gr = grads[key].bias_real
+                    gi = grads[key].bias_imag
+                    grads[key] = merge(grads[key], (
+                        bias_real = round.(gr ./ step) .* step,
+                        bias_imag = round.(gi ./ step) .* step,
+                    ))
+                end
+            end
+        end
+    end
+    return grads
 end
 
 # ============================================================
-# MAIN EXPERIMENT
+# MAIN
 # ============================================================
 
-# 1. PRETRAIN (backprop)
-println("\n=== 1. PRETRAIN (backprop, $PRETRAIN_EPOCHS epochs) ===")
-initial_loss = bp_loss(first(train_loader)..., chain, ps, st, cb_codes, dev)
-println("Initial loss: $initial_loss")
-ps, pretrain_losses = train_bp(chain, ps, st, train_loader, args, cb_codes, dev)
+println("=== A4: Analog-Impairment Fine-Tuning Harness ===")
+@printf("HID=%d, DOUT=%d, PRETRAIN=%s, USE_CUDA=%s\n", HID, DOUT, PRETRAIN, USE_CUDA)
+println("Output: $OUT")
 
-acc_clean_bp = bp_accuracy(chain, test_loader, ps, st, cb_codes, dev)
-acc_clean_ep = ep_accuracy(chain, Xte, yte, ps, st, cb_codes, dev)
-println("Clean BP accuracy: $acc_clean_bp")
-println("Clean EP accuracy: $acc_clean_ep")
+# Load data
+println("\nLoading FashionMNIST...")
+(Xtr, ytr), (Xte, yte) = load_fashionmnist()
+Xtr, Xte = to_device(Xtr), to_device(Xte)
+ytr, yte = to_device(ytr), to_device(yte)
+println("Train: $(size(Xtr,2)), Test: $(size(Xte,2))")
 
-# Save clean checkpoint
-ps_clean = deepcopy(ps)
-st_clean = deepcopy(st)
+# Build chain
+rng = Xoshiro(SEED)
+chain, ps_init, st = build_chain(rng)
+cb_codes = make_codes(rng)
+chain, ps_init, st = to_device(chain), to_device(ps_init), to_device(st)
+cb_codes = to_device(cb_codes)
 
-# 2. APPLY IMPAIRMENT
-println("\n=== 2. APPLY IMPAIRMENT: $IMPAIRMENT_TYPE ===")
-rng_imp = Xoshiro(SEED + 2000)
+train_loader = DataLoader((Xtr, ytr); batchsize=BATCH, shuffle=true)
 
-if IMPAIRMENT_TYPE == "lognormal"
-    ps_imp = apply_lognormal_impairment(ps_clean, SIGMA, rng_imp)
-    update_masks = nothing
-elseif IMPAIRMENT_TYPE == "gaussian"
-    ps_imp = apply_gaussian_impairment(ps_clean, SIGMA, rng_imp)
-    update_masks = nothing
-elseif IMPAIRMENT_TYPE == "stuck_zero"
-    ps_imp, update_masks = apply_stuck_zero_impairment(ps_clean, FRAC, rng_imp)
-elseif IMPAIRMENT_TYPE == "stuck_sat"
-    ps_imp, update_masks = apply_stuck_saturation_impairment(ps_clean, FRAC, rng_imp)
-else
-    error("Unknown impairment type: $IMPAIRMENT_TYPE")
+# CSV output
+csv_file = joinpath(OUT, "analog_finetune_$(GITREV).csv")
+isfile(csv_file) || CSV.write(csv_file, DataFrame(
+    gitrev=String[],
+    pretrain=String[],
+    impairment_type=String[],
+    param=Float32[],
+    rep=Int[],
+    acc_clean=Float32[],
+    acc_impaired=Float32[],
+    acc_tuned=Float32[],
+    acc_bp_ft=Float32[],
+    acc_readout_only=Float32[],
+    recovery_frac=Float32[],
+    bp_recovery_frac=Float32[],
+    readout_recovery_frac=Float32[],
+    width=Int[],
+    depth=Int[]
+))
+
+# Pretrain paths
+pretrain_results = Dict{Symbol, Any}()
+
+# --- Pretrain: Backprop ---
+if PRETRAIN in (:backprop, :both)
+    println("\n=== Pretraining: Backprop (5 epochs) ===")
+    ps_bp = train_bp(chain, ps_init, st, train_loader, BP_EPOCHS, BP_LR, cb_codes)
+    acc_clean = ep_accuracy(chain, Xte, yte, ps_bp, st, cb_codes)
+    println("Clean accuracy (ep_predict): $acc_clean")
+    pretrain_results[:backprop] = (ps=ps_bp, st=st, acc_clean=acc_clean)
 end
 
-# Evaluate impaired
-acc_imp_bp = bp_accuracy(chain, test_loader, ps_imp, st_clean, cb_codes, dev)
-acc_imp_ep = ep_accuracy(chain, Xte, yte, ps_imp, st_clean, cb_codes, dev)
-println("Impaired BP accuracy: $acc_imp_bp (drop: $(acc_clean_bp - acc_imp_bp))")
-println("Impaired EP accuracy: $acc_imp_ep (drop: $(acc_clean_ep - acc_imp_ep))")
+# --- Pretrain: StaticEP ---
+if PRETRAIN in (:staticep, :both)
+    println("\n=== Pretraining: StaticEP (20 epochs) ===")
+    ps_ep, st_ep = train_staticep(chain, ps_init, st, train_loader, STATIC_EPOCHS, STATIC_BETA, cb_codes)
+    acc_clean = ep_accuracy(chain, Xte, yte, ps_ep, st_ep, cb_codes)
+    println("Clean accuracy (ep_predict): $acc_clean")
+    pretrain_results[:staticep] = (ps=ps_ep, st=st_ep, acc_clean=acc_clean)
+end
 
-# 3. FINE-TUNE with LockinEP through impaired network
-println("\n=== 3. FINE-TUNE with LockinEP ($FINETUNE_EPOCHS epochs) ===")
-ps_finetuned, ft_losses = train_ep(chain, ps_imp, st_clean, train_loader, finetune_args, cb_codes, dev; update_masks=update_masks)
+# ============================================================
+# IMPAIRMENT SWEEP
+# ============================================================
 
-acc_ft_bp = bp_accuracy(chain, test_loader, ps_finetuned, st_clean, cb_codes, dev)
-acc_ft_ep = ep_accuracy(chain, Xte, yte, ps_finetuned, st_clean, cb_codes, dev)
-println("Finetuned BP accuracy: $acc_ft_bp")
-println("Finetuned EP accuracy: $acc_ft_ep")
+for (pretrain_name, pretrain_data) in pretrain_results
+    ps_clean = pretrain_data.ps
+    st_clean = pretrain_data.st
+    local acc_clean = pretrain_data.acc_clean
 
-# 4. BASELINES
-println("\n=== 4. BASELINES ===")
+    # Weight impairments
+    for (imp_type, params) in WEIGHT_IMPAIRMENTS
+        println("\n=== Impairment: $imp_type ===")
+        for param in params
+            @printf("  param = %.3f\n", param)
+            for rep in 1:REPS
+                rng_rep = Xoshiro(hash((imp_type, param, rep, pretrain_name)) % UInt64)
+                
+                # Apply weight impairment
+                if imp_type == :lognormal
+                    ps_imp, wmask = apply_lognormal(ps_clean, param, rng_rep)
+                elseif imp_type == :gaussian
+                    ps_imp, wmask = apply_gaussian(ps_clean, param, rng_rep)
+                elseif imp_type == :stuck_zero
+                    ps_imp, wmask = apply_stuck_zero(ps_clean, param, rng_rep)
+                elseif imp_type == :stuck_sat
+                    ps_imp, wmask = apply_stuck_sat(ps_clean, param, rng_rep)
+                end
+                
+                # Evaluate impaired
+                acc_impaired = ep_accuracy(chain, Xte, yte, ps_imp, st_clean, cb_codes)
+                
+                # Fine-tune with LockinEP
+                ps_tuned, st_tuned = train_lockinep(chain, ps_imp, st_clean, train_loader, FT_EPOCHS, cb_codes; weight_mask=wmask)
+                acc_tuned = ep_accuracy(chain, Xte, yte, ps_tuned, st_tuned, cb_codes)
+                
+                # Baseline: Backprop fine-tune
+                ps_bp_ft = train_bp_finetune(chain, ps_imp, st_clean, train_loader, FT_EPOCHS, BP_LR, cb_codes)
+                acc_bp_ft = ep_accuracy(chain, Xte, yte, ps_bp_ft, st_clean, cb_codes)
+                
+                # Baseline: Readout-only
+                ps_ro = train_readout_only(chain, ps_imp, st_clean, train_loader, FT_EPOCHS, BP_LR, cb_codes)
+                acc_ro = ep_accuracy(chain, Xte, yte, ps_ro, st_clean, cb_codes)
+                
+                # Recovery fractions
+                denom = acc_clean - acc_impaired
+                if denom > 0
+                    rec_frac = clamp((acc_tuned - acc_impaired) / denom, -1.0, 2.0)
+                    bp_rec = clamp((acc_bp_ft - acc_impaired) / denom, -1.0, 2.0)
+                    ro_rec = clamp((acc_ro - acc_impaired) / denom, -1.0, 2.0)
+                else
+                    rec_frac = bp_rec = ro_rec = NaN
+                end
+                
+                row = DataFrame(
+                    gitrev=GITREV,
+                    pretrain=string(pretrain_name),
+                    impairment_type=string(imp_type),
+                    param=param,
+                    rep=rep,
+                    acc_clean=Float32(acc_clean),
+                    acc_impaired=Float32(acc_impaired),
+                    acc_tuned=Float32(acc_tuned),
+                    acc_bp_ft=Float32(acc_bp_ft),
+                    acc_readout_only=Float32(acc_ro),
+                    recovery_frac=Float32(rec_frac),
+                    bp_recovery_frac=Float32(bp_rec),
+                    readout_recovery_frac=Float32(ro_rec),
+                    width=HID,
+                    depth=2
+                )
+                CSV.write(csv_file, row, append=true)
+                
+                @printf("    rep=%d: clean=%.4f impaired=%.4f tuned=%.4f bp_ft=%.4f ro=%.4f rec=%.3f\n",
+                    rep, acc_clean, acc_impaired, acc_tuned, acc_bp_ft, acc_ro, rec_frac)
+            end
+        end
+    end
+    
+    # Update impairments (only for lognormal σ=0.03 as representative)
+    println("\n=== Update Impairments (on lognormal σ=0.03) ===")
+    for (imp_type, params) in UPDATE_IMPAIRMENTS
+        for param in params
+            @printf("  param = %.3f\n", param)
+            for rep in 1:REPS
+                rng_rep = Xoshiro(hash((imp_type, param, rep, pretrain_name)) % UInt64)
+                
+                # Apply base weight impairment (lognormal σ=0.03)
+                ps_imp, wmask = apply_lognormal(ps_clean, 0.03f0, rng_rep)
+                acc_impaired = ep_accuracy(chain, Xte, yte, ps_imp, st_clean, cb_codes)
+                
+                # Fine-tune with LockinEP + update impairment via callback
+                # We'll use a custom callback to post-process gradients
+                # For now, skip update impairments as they need callback support in ep_train
+                # TODO: implement callback-based update impairment
+                println("    TODO: update impairments need callback support")
+            end
+        end
+    end
+end
 
-# No fine-tuning (floor)
-acc_floor_bp = acc_imp_bp
-acc_floor_ep = acc_imp_ep
-println("Floor (no finetune) BP: $acc_floor_bp")
-println("Floor (no finetune) EP: $acc_floor_ep")
-
-# Backprop fine-tuning (ceiling)
-println("\n--- Backprop fine-tuning (ceiling) ---")
-ps_bp_ft, _ = train_bp(chain, ps_imp, st_clean, train_loader, finetune_args, cb_codes, dev)
-acc_bp_ceiling = bp_accuracy(chain, test_loader, ps_bp_ft, st_clean, cb_codes, dev)
-println("BP ceiling accuracy: $acc_bp_ceiling")
-
-# Readout-only retraining (cheap baseline)
-println("\n--- Readout-only retraining ---")
-ps_ro_ft, _ = train_readout_only(chain, ps_imp, st_clean, train_loader, finetune_args, cb_codes, dev)
-acc_ro_bp = bp_accuracy(chain, test_loader, ps_ro_ft, st_clean, cb_codes, dev)
-acc_ro_ep = ep_accuracy(chain, Xte, yte, ps_ro_ft, st_clean, cb_codes, dev)
-println("Readout-only BP accuracy: $acc_ro_bp")
-println("Readout-only EP accuracy: $acc_ro_ep")
-
-# 5. COMPUTE RECOVERY FRACTION
-println("\n=== 5. RECOVERY FRACTION ===")
-# Recovery = (acc_tuned - acc_impaired) / (acc_clean - acc_impaired)
-# Using BP accuracy as primary metric
-rec_bp = (acc_ft_bp - acc_imp_bp) / (acc_clean_bp - acc_imp_bp)
-rec_bp_ceiling = (acc_bp_ceiling - acc_imp_bp) / (acc_clean_bp - acc_imp_bp)
-rec_ro = (acc_ro_bp - acc_imp_bp) / (acc_clean_bp - acc_imp_bp)
-
-# Using EP accuracy
-rec_ep = (acc_ft_ep - acc_imp_ep) / (acc_clean_ep - acc_imp_ep)
-rec_ro_ep = (acc_ro_ep - acc_imp_ep) / (acc_clean_ep - acc_imp_ep)
-
-println("LockinEP recovery (BP metric): $(round(rec_bp*100, digits=1))%")
-println("BP ceiling recovery (BP metric): $(round(rec_bp_ceiling*100, digits=1))%")
-println("Readout-only recovery (BP metric): $(round(rec_ro*100, digits=1))%")
-println()
-println("LockinEP recovery (EP metric): $(round(rec_ep*100, digits=1))%")
-println("Readout-only recovery (EP metric): $(round(rec_ro_ep*100, digits=1))%")
-
-# 6. SUMMARY
-println("\n=== SUMMARY ===")
-@printf("Impairment: %s (σ=%.3f, frac=%.3f)\n", IMPAIRMENT_TYPE, SIGMA, FRAC)
-@printf("Clean BP:     %.4f\n", acc_clean_bp)
-@printf("Impaired BP:  %.4f  (drop %.4f)\n", acc_imp_bp, acc_clean_bp - acc_imp_bp)
-@printf("Floor BP:     %.4f\n", acc_floor_bp)
-@printf("LockinEP FT:  %.4f  (recovery %.1f%%)\n", acc_ft_bp, rec_bp*100)
-@printf("BP ceiling:   %.4f  (recovery %.1f%%)\n", acc_bp_ceiling, rec_bp_ceiling*100)
-@printf("Readout-only: %.4f  (recovery %.1f%%)\n", acc_ro_bp, rec_ro*100)
-println()
-@printf("Clean EP:     %.4f\n", acc_clean_ep)
-@printf("Impaired EP:  %.4f  (drop %.4f)\n", acc_imp_ep, acc_clean_ep - acc_imp_ep)
-@printf("LockinEP FT:  %.4f  (recovery %.1f%%)\n", acc_ft_ep, rec_ep*100)
-@printf("Readout-only: %.4f  (recovery %.1f%%)\n", acc_ro_ep, rec_ro_ep*100)
-
-# Save results
-results = Dict(
-    "impairment" => IMPAIRMENT_TYPE,
-    "sigma" => SIGMA,
-    "frac" => FRAC,
-    "finetune_epochs" => FINETUNE_EPOCHS,
-    "acc_clean_bp" => acc_clean_bp,
-    "acc_imp_bp" => acc_imp_bp,
-    "acc_ft_bp" => acc_ft_bp,
-    "acc_bp_ceiling" => acc_bp_ceiling,
-    "acc_ro_bp" => acc_ro_bp,
-    "recovery_bp" => rec_bp,
-    "recovery_bp_ceiling" => rec_bp_ceiling,
-    "recovery_ro" => rec_ro,
-    "acc_clean_ep" => acc_clean_ep,
-    "acc_imp_ep" => acc_imp_ep,
-    "acc_ft_ep" => acc_ft_ep,
-    "acc_ro_ep" => acc_ro_ep,
-    "recovery_ep" => rec_ep,
-    "recovery_ro_ep" => rec_ro_ep,
-    "gitrev" => readchomp(`git rev-parse HEAD`),
-    "timestamp" => Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
-)
-
-outdir = joinpath("results", "ep_analog_finetune")
-mkpath(outdir)
-fname = joinpath(outdir, "finetune_$(IMPAIRMENT_TYPE)_s$(SIGMA)_f$(FRAC)_$(Dates.format(now(), "yyyy-mm-dd_HHMMSS")).jld2")
-using JLD2
-@save fname results
-println("\nResults saved to: $fname")
-
-println("\nDone.")
+println("\n=== Sweep complete. Results in $csv_file ===")

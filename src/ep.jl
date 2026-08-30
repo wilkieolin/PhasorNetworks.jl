@@ -451,6 +451,15 @@ function ep_energy_contribution(layer::PhasorBind, ps, st, z_in, z_self;
 end
 
 # ================================================================
+# Weight cache for hoisted drive/feedback
+# ================================================================
+
+struct _WeightCache{T}
+    drive::T        # per-layer ComplexF32 weight, or nothing
+    feedback::T     # per-layer ComplexF32 transpose(weight), or nothing
+end
+
+# ================================================================
 # 3. Chain settling
 # ================================================================
 
@@ -532,7 +541,8 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
                        carrier::Union{Nothing, Real, Vector{<:Real}} = nothing,
                        t0::Real = 0,
                        project::Symbol = :hard,
-                       soft_ε::Real = 0.1f0)
+                       soft_ε::Real = 0.1f0,
+                       cache::Union{Nothing, _WeightCache} = nothing)
     layer_keys = collect(keys(ps))
     n_layers = length(layer_keys)
     dt_f = Float32(dt)
@@ -560,7 +570,7 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
     # original loop recomputed it every step. At MLP width this is the
     # single largest term in the step (2.6x on the per-step linear
     # algebra at 784→256, B=128).
-    cache  = _weight_cache(chain, ps, layer_keys)
+    cache = cache === nothing ? _weight_cache(chain, ps, layer_keys) : cache
     drive0 = _input_drive(chain, ps, st, layer_keys, z0; cache=cache)
 
     for _ in 1:T
@@ -793,10 +803,6 @@ end
 # against a complex operand: that combination misses the BLAS path
 # entirely and falls back to a generic kernel ~19x SLOWER than the
 # allocating `transpose(W) * z`.
-struct _WeightCache{T}
-    drive::T        # per-layer ComplexF32 weight, or nothing
-    feedback::T     # per-layer ComplexF32 transpose(weight), or nothing
-end
 
 function _weight_cache(chain::Lux.Chain, ps, layer_keys)
     drive = Any[]; feedback = Any[]
@@ -1562,6 +1568,10 @@ reaches 0.80 (see `demos/ep_fashionmnist.jl`, `EP_MODE=sweep`).
 
 `callback(epoch, ps, st, epoch_loss)` runs after each epoch — use it for
 test-set evaluation, checkpointing, or tracking the settle residual.
+
+`weight_mask` (optional) — a NamedTuple matching `ps` structure with
+values in [0,1] to scale gradients per parameter. Used to freeze
+stuck synapses (mask=0.0) during fine-tuning with impaired weights.
 """
 function ep_train(model::Lux.Chain, ps, st, train_loader, args;
                   method::AbstractEPMethod = StaticEP(),
@@ -1569,7 +1579,8 @@ function ep_train(model::Lux.Chain, ps, st, train_loader, args;
                   optimiser = Optimisers.Descent,
                   callback = nothing,
                   omega_override::Union{Nothing, Vector} = nothing,
-                  verbose::Bool = false)
+                  verbose::Bool = false,
+                  weight_mask::Union{Nothing, NamedTuple} = nothing)
     opt_state = Optimisers.setup(optimiser(Float32(args.lr)), ps)
     losses = Float32[]
     for epoch in 1:args.epochs
@@ -1578,15 +1589,11 @@ function ep_train(model::Lux.Chain, ps, st, train_loader, args;
             cost = cost_fn(y)
             grads, s_free = ep_gradient(method, model, ps, st, x, cost;
                                         omega_override=omega_override)
-            # Weight decay is read here (ep_train previously ignored it).
-            # It measurably helps EP training on FashionMNIST at 1e-4, but
-            # NOT by bounding ‖W‖ — measured, 1e-4 leaves the weight-norm
-            # trajectory almost unchanged while clearly improving accuracy,
-            # and a larger 1e-3 bounds ‖W‖ much more while performing
-            # worse. Treat it as ordinary regularization; the EP-specific
-            # large-‖W‖ failure is described under `StaticEP`.
             if args.weight_decay > 0
                 grads = _apply_weight_decay(grads, ps, args.weight_decay)
+            end
+            if weight_mask !== nothing
+                grads = _apply_weight_mask(grads, weight_mask)
             end
             opt_state, ps = Optimisers.update(opt_state, ps, grads)
             push!(losses, ep_loss(cost, s_free[end]))
@@ -1600,6 +1607,29 @@ function ep_train(model::Lux.Chain, ps, st, train_loader, args;
         end
     end
     return losses, ps, st
+end
+
+# Apply weight mask to gradients (zero out stuck synapses)
+# mask has same structure as ps, with 0.0 for stuck, 1.0 for free
+function _apply_weight_mask(grads, mask)
+    pairs = Pair{Symbol,Any}[]
+    for key in keys(grads)
+        g = grads[key]
+        m = mask[key]
+        if haskey(g, :weight)
+            entry = (weight = g.weight .* m.weight,)
+            if haskey(g, :bias_real)
+                entry = merge(entry, (
+                    bias_real = g.bias_real .* m.bias_real,
+                    bias_imag = g.bias_imag .* m.bias_imag,
+                ))
+            end
+            push!(pairs, key => merge(entry, _pad_dynamics_zeros(entry, g)))
+        else
+            push!(pairs, key => g)
+        end
+    end
+    return NamedTuple(pairs)
 end
 
 """
