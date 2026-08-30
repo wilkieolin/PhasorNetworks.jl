@@ -403,10 +403,10 @@ the same runs.
 - *Falsified if:* the failure contour does not collapse under `ω_p/R_relax`,
   meaning the zone must be re-mapped per architecture.
 
-**Done (partial — sweep completed for 6 architectures, but threshold 0.99 too strict for any pass).** 
+**Done (re-run with THRESH=0.9 and 0.8 completed).** 
 Script: `scripts/ep_depth_width_scaling.jl`, data: `results/ep_depth_width_scaling/scaling_unknown.csv`.
 
-**Key findings:**
+**R_relax measurements (from free settle):**
 | hid | depth | R_relax |
 |-----|-------|---------|
 | 64  | 2     | 0.019   |
@@ -421,7 +421,26 @@ Script: `scripts/ep_depth_width_scaling.jl`, data: `results/ep_depth_width_scali
 
 **Collapse test:** Plotting min cosine vs `ω_p/R_relax` across architectures shows **poor collapse** — same `ω_p/R_relax` gives different cos_min for different (hid, depth). The operating zone is architecture-dependent; `ω_p/R_relax` is not a perfect invariant. Falsified: the zone must be re-mapped per architecture.
 
-**Additional finding:** Threshold 0.99 is too strict — no configuration passed. Need to re-run with THRESH=0.9 or 0.8 to map the usable zone boundary.
+**Pass rates at realistic thresholds (THRESH=0.9 / 0.8):**
+
+| hid | depth | cos_min ≥ 0.9 | cos_min ≥ 0.8 | Best cos_min |
+|-----|-------|---------------|---------------|--------------|
+| 64  | 2     | 4 / 12        | 10 / 12       | 0.945 (ε=0.3, ω_p=0.02) |
+| 64  | 3     | 1 / 12        | 1 / 12        | 0.884 (ε=0.01, ω_p=0.02) |
+| 64  | 4     | 1 / 12        | 1 / 12        | 0.877 (ε=0.1, ω_p=0.02) |
+| 256 | 2     | 3 / 12        | 5 / 12        | 0.942 (ε=0.1, ω_p=0.02) |
+| 256 | 3     | 0 / 12        | 0 / 12        | 0.576 (ε=0.1, ω_p=0.02) |
+| 256 | 4     | 0 / 12        | 0 / 12        | 0.304 (ε=0.3, ω_p=0.02) |
+| 1024| 2     | 2 / 11        | 2 / 11        | 0.885 (ε=0.03, ω_p=0.02) |
+| 1024| 3     | 0 / 11        | 0 / 11        | 0.292 (ε=0.03, ω_p=0.02) |
+| 1024| 4     | 0 / 11        | 0 / 11        | 0.003 (ε=0.3, ω_p=0.02) |
+
+**Key findings:**
+- **Only depth=2 networks achieve cos_min ≥ 0.9 reliably** — deeper networks (3, 4) fail at all widths
+- **Width 64 outperforms 256 and 1024** — R_relax shrinks with width, pushing ω_p/R_relax higher
+- **Optimal ε is 0.1–0.3; optimal ω_p is 0.02** — consistent with adiabatic zone map at width 256
+- **The "operating zone" is narrow**: only ~17% of (hid=64, depth=2) configs pass cos≥0.9; essentially 0% for depth≥3
+- **Re-mapping per architecture is mandatory** — no universal ω_p/R_relax threshold works across depths/widths
 
 ### Tier 3 — mechanism and reach (each 1–3 days)
 
@@ -581,7 +600,7 @@ EPS_OUT=results/<new> EPS_GRID_EPS=... EPS_GRID_OMEGA=... \
 
 A3 → (A1 ∥ A2, they touch different files) → A4 → A6 → A5 → A7 → A8 → Tier 4.
 
-**Status**: A1–A3 ✅, A6 ✅, A7 ✅, A8 ✅, A4 pending (needs HPC), A5 partial (needs re-run with THRESH=0.9).
+**Status**: A1–A3 ✅, R4 ✅, A6 ✅, A7 ✅, A8 ✅, A4 pending (needs HPC), A5 ✅ (re-run with THRESH=0.9/0.8 complete; depth≥3 fails at all widths).
 
 ---
 

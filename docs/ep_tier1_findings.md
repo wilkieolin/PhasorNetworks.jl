@@ -98,3 +98,43 @@ Added `sample_every` subsampling in lock-in accumulation loop.
 ## Next: A4 — Analog-impairment fine-tuning harness
 
 Per execution order in `ep_program_status.md` §5.1: **A4 → A6 → A5 → A7 → A8**
+
+---
+
+## R4. Feedback weight symmetry (asymmetric feedback) ✅
+
+**Script**: `scripts/ep_feedback_asymmetry.jl`
+
+### Method
+Uses the `cache` kwarg in `phasor_settle` (added in `src/ep.jl:536`) to inject perturbed feedback weights `W_fb = perturb(W_fwd')` during the nudged settle only, matching the A2 methodology. Runs at FashionMNIST width (784→256→64) with 5-epoch backprop-trained weights, 4 replicates per condition.
+
+### Asymmetry types and results (median cos over 4 reps)
+
+| Asymmetry type | Parameter | Layer 1 cos | Layer 2 cos | Verdict |
+|---|---|---|---|---|
+| **Lognormal** (multiplicative) | σ = 0.01 | 0.9994 | 0.9990 | **Well-tolerated** |
+|  | σ = 0.03 | 0.9950 | 0.9921 | **Well-tolerated** |
+|  | σ = 0.1 | 0.8723 | 0.8606 | Moderate degradation |
+|  | σ = 0.3 | 0.4402 | 0.3133 | **Breaks down** |
+| **Gaussian** (additive) | σ = 0.01 | 0.7870 | 0.6738 | Already degrading |
+|  | σ = 0.03 | 0.4163 | 0.3715 | **Breaks down** |
+|  | σ = 0.1 | -0.0226 | 0.1030 | Random |
+|  | σ = 0.3 | 0.0175 | 0.0968 | Random |
+| **Scaling** (global gain) | 0.5× | 0.1676 | 0.1321 | **Breaks down** |
+|  | 0.8× | 0.3848 | 0.4074 | Degraded |
+|  | 1.0× (symmetric) | 1.0002 | 1.0000 | **Perfect** |
+|  | 1.2× | 0.5352 | 0.3425 | Degraded |
+|  | 2.0× | 0.2508 | 0.3058 | **Breaks down** |
+| **Sign-flip** (sparse) | 1% | 0.8962 | 0.7820 | Tolerable |
+|  | 3% | 0.6473 | 0.5562 | Degraded |
+|  | 10% | 0.3626 | 0.3413 | **Breaks down** |
+|  | 30% | 0.2259 | 0.2089 | Random |
+
+### Key conclusions
+1. **Lognormal multiplicative asymmetry up to ~3% (σ ≤ 0.03) is well-tolerated** (cos > 0.99), matching A2's transpose-asymmetry findings
+2. **Additive Gaussian noise is far more damaging** than multiplicative — even σ=0.01 degrades cos to ~0.7
+3. **Global gain scaling is tolerated only near 1.0×**; both 0.5× and 2.0× break gradient fidelity
+4. **Sign-flip asymmetry is damaging but less so than Gaussian** — 1% flips still gives cos ~0.9, but 10% breaks it
+5. **Layer 2 (output-adjacent) is consistently more sensitive** than Layer 1 across all asymmetry types
+
+**Hardware implication**: Feedback path matching should prioritize multiplicative tracking (gain matching) over exact weight symmetry; analog implementations should avoid additive noise injection on the feedback path.
