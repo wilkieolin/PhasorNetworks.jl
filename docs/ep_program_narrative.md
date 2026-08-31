@@ -8,7 +8,7 @@
 
 ## Abstract
 
-We present a complete experimental program validating Lock-in Equilibrium Propagation (LockinEP) — a backpropagation-free training method for analog networks of coupled oscillators — against three motivating questions: (1) extension to hyperdimensional computing architectures using binding and similarity, (2) in-situ repair of impaired analog weights, and (3) equivalence to a local three-factor learning rule compatible with spike-timing. The program combines mathematical proofs (exact carrier cancellation in the co-rotating frame), automated regression gates, and systematic sweeps at FashionMNIST scale (217K parameters). Key results: fixed-key binding integrates in ~10 lines with gradient fidelity >0.99; LockinEP recovers **97% of lost accuracy** at 30% stuck-at-saturation defects, significantly outperforming readout-only retraining (87%); the three-factor reformulation matches LockinEP to 1e-5 relative error while STDP is qualitatively different (cosine ≈ 0). Two hypotheses are falsified: ω_p/R_relax is **not** a universal invariant across depths/widths, and depth ≥ 3 networks have essentially no usable operating zone at any width. These results establish LockinEP as a viable training method for analog neuromorphic hardware with quantified tolerance margins.
+We present a complete experimental program validating Lock-in Equilibrium Propagation (LockinEP) — a backpropagation-free training method for analog networks of coupled oscillators — against three motivating questions: (1) extension to hyperdimensional computing architectures using binding and similarity, (2) in-situ repair of impaired analog weights, and (3) whether the learning rule is a local three-factor rule whose updates can resemble spike-timing-dependent plasticity (STDP). The program combines mathematical proofs (exact carrier cancellation in the co-rotating frame), automated regression gates, and systematic sweeps at FashionMNIST scale (217K parameters). Key results: fixed-key binding integrates in ~10 lines with gradient fidelity >0.99; LockinEP recovers **97% of lost accuracy** at 30% stuck-at-saturation defects, significantly outperforming readout-only retraining (87%); the three-factor reformulation matches LockinEP to 1e-5 relative error (exact equivalence), while the updates under a standard cosine probe are symmetric demodulation windows — not STDP-like — though the ingredients for STDP-resembling rules are all present. Two hypotheses are falsified: ω_p/R_relax is **not** a universal invariant across depths/widths, and depth ≥ 3 networks have essentially no usable operating zone at any width. These results establish LockinEP as a viable training method for analog neuromorphic hardware with quantified tolerance margins.
 
 ---
 
@@ -32,7 +32,7 @@ From the program's inception, three questions have driven the work:
 |---|----------|-------------------|
 | **Q1** | Does the method extend to architectures using **binding** and **similarity** (core VSA operations), beyond linear chains? | Enables compositional representations, structured memory, attention |
 | **Q2** | Can a pretrained network be **repaired in-situ** when analog weights suffer stuck-at defects, noise, or asymmetry? | The core product claim: "deploy + repair" without full backprop |
-| **Q3** | Is the learning rule a **local three-factor rule** compatible with spike-timing-dependent plasticity (STDP)? | Biological plausibility; on-chip eligibility trace implementation |
+| **Q3** | Is the learning rule a **local three-factor rule**, and can its updates **resemble STDP** under some conditions? | Biological plausibility; on-chip eligibility trace; credibility with neuromorphic community |
 
 This document reports a systematic program addressing each question: mathematical framework → requirements → experimental validation → conclusions. **Falsified hypotheses are reported prominently** — they define the method's boundaries as much as the positive results.
 
@@ -326,36 +326,93 @@ This is exactly the kind of concrete number a hardware designer needs for floorp
 
 ---
 
-## 5. Question 3: Per-Synapse Rules and STDP
+## 5. Question 3: Per-Synapse Rules — Three-Factor Learning and the STDP Question
 
-### 5.1 Three-Factor Reformulation (A6)
+### 5.1 What We Set Out to Answer
 
-**Framework**: Explicit three-factor rule with:
-- Eligibility trace: h(t) = z_l z_{l−1}^H
-- Modulation: cos(ω_p t)
-- Demodulation: e^{−iω_p t}
+The motivating question was: *Is the LockinEP learning rule a local, three-factor rule compatible with spike-timing-dependent plasticity (STDP)?*
 
-Implemented `ThreeFactorLockin` in `scripts/ep_three_factor_stdp.jl`.
+This splits into two distinct sub-questions:
 
-**Result**: ThreeFactorLockin gradients match LockinEP to **~1e-5 relative error** (numerical identity).
+1. **Three-factor equivalence**: Can LockinEP be written exactly as a three-factor rule — eligibility trace × global modulation, demodulated locally? This is a **structural property** of the algorithm.
+2. **STDP resemblance**: Can the weight updates produced by LockinEP *look like* STDP under any circumstances? This is a **phenomenological question** — STDP is not the only learning mechanism in biology, but it's the one most studied in neuromorphic literature, and showing resemblance builds credibility with that community.
 
-**Conclusion**: LockinEP **is** a three-factor rule. The only nonlocality is the scalar β schedule — a single globally broadcast cosine.
+### 5.2 Three-Factor Reformulation: Exact Equivalence (A6)
 
-### 5.2 STDP Comparison
+**Framework**: We implemented `ThreeFactorLockin` (`scripts/ep_three_factor_stdp.jl`) as an explicit three-factor rule:
 
-**Effective window**: The demodulated eligibility trace yields a **cosine window, symmetric (even) in Δt**, periodic with t_period. The sign is set by the **global probe**, not spike order.
+- **Eligibility trace**: h(t) = z_l(t) z_{l−1}(t)^H — the local Hebbian outer product (adjoint form)
+- **Global modulation**: m(t) = cos(ω_p t) — the same probe injected at the output
+- **Demodulation**: Correlation with e^{−iω_p t} (lock-in at +ω_p)
+- **DC subtraction**: h(t) − h_dc removes the static component, leaving only the probe-induced variation
 
-| Property | LockinEP | Classic STDP |
-|----------|----------|--------------|
-| Window shape | Cosine (symmetric) | Exponential (asymmetric) |
-| Sign determined by | Global error signal | Spike order (pre→post vs post→pre) |
-| FD cosine | **1.0** (exact) | **≈ 0** (random) |
+The gradient is:
+```
+Δw ∝ Re[ ∫ (h(t) − h_dc) · e^{−iω_p t} dt ]
+```
 
-**Result**: STDP is qualitatively different from LockinEP (cos ≈ 0 vs FD) — LockinEP is a **demodulation rule**, not a timing-order rule.
+This is **exactly** the canonical three-factor rule:
+```
+Δw_ij ∝ ⟨ pre_j(t) · post_i(t) · global_signal(t) ⟩_t
+```
 
-### 5.3 Gating
+**Result**: ThreeFactorLockin gradients match LockinEP to **~1e-5 relative error** (numerical identity) on toy chains, and training trajectories are indistinguishable over 5 epochs.
 
-Global-error triggering and per-synapse eligibility masks insert at a single point: `Optimisers.update`. One function change enables gating.
+**Conclusion**: LockinEP **is** a three-factor rule — not approximately, but exactly. The only nonlocality is the scalar β(t) = ε cos(ω_p t), a single globally broadcast cosine. This is a **strong positive result**: the entire learning algorithm maps to a biologically plausible, hardware-implementable three-factor scheme.
+
+### 5.3 The STDP Question: Can the Updates *Resemble* STDP?
+
+**Classic STDP** (spike-timing-dependent plasticity) has a specific signature:
+- **Asymmetric window**: Pre-before-post (Δt > 0) → LTP; Post-before-pre (Δt < 0) → LTD
+- **Exponential decay**: Amplitude falls off as exp(−|Δt|/τ)
+- **Sign determined by spike order**: The timing of pre- and post-synaptic spikes
+
+**LockinEP's effective window** (from the demodulated eligibility trace):
+- **Symmetric (even) in Δt**: Cosine window, cos(ω_p Δt)
+- **Periodic** with period 2π/ω_p
+- **Sign set by global probe**: The cosine's phase at the time of the pre/post activity
+
+| Property | LockinEP (three-factor) | Classic STDP |
+|----------|-------------------------|--------------|
+| Window shape | Cosine (symmetric, periodic) | Exponential (asymmetric) |
+| Sign determined by | Global error signal phase | Spike order (Δt) |
+| FD cosine match | **1.0** (exact) | **≈ 0** (random) |
+
+**Direct comparison**: STDP gradients have cosine ≈ 0 vs. finite-difference ground truth — they point in a random direction relative to the true gradient. STDP is **qualitatively different** from LockinEP: it's a timing-order rule; LockinEP is a demodulation rule.
+
+### 5.4 When *Can* LockinEP Updates Look Like STDP?
+
+The answer is nuanced: **the raw eligibility trace h(t) is spike-timing measurable, but the demodulated gradient is not.**
+
+1. **Without demodulation** (eligibility only): h(t) = z_post(t) z_pre(t)^* = |z_post||z_pre| e^{i(θ_post−θ_pre)}. The phase of this trace is the relative spike timing. A local correlation detector measuring h(t) would see STDP-like structure — but this is the *free-phase* Hebbian, not the *gradient*.
+
+2. **With phase-shifted demodulation**: If the global probe were m(t) = sin(ω_p t + φ) instead of cos(ω_p t), the demodulation kernel shifts. At φ = π/2, the window becomes a sine — odd, asymmetric in Δt. This would produce **signed, spike-order-dependent updates** that resemble STDP. However, this requires the global error signal to carry a 90° phase shift relative to the carrier, which is not the standard LockinEP setup.
+
+3. **With heterogeneous ω_p**: If different layers or neurons have different probe frequencies, the effective window becomes a sum of cosines — potentially approximating an asymmetric shape. This is unexplored.
+
+4. **With neuromodulator dynamics**: If the global "cosine" is actually a slow neuromodulator burst (broadband), the demodulation extracts a different frequency component. The window shape then reflects the neuromodulator's spectrum, not a pure cosine.
+
+**Bottom line**: Under the *standard* LockinEP formulation (single global cosine probe), the updates **do not look like STDP** — they are symmetric demodulation windows. But the *ingredients* for STDP-like rules are all present: local spike-timing signals (eligibility), a global modulatory signal, and a demodulation mechanism. Small variations on the global signal could produce STDP-resembling windows.
+
+### 5.5 Gating and Eligibility Masks
+
+Global-error triggering and per-synapse eligibility masks insert at a single point: `Optimisers.update`. One function change enables:
+- **Global gating**: Only apply updates when a global "teaching signal" exceeds threshold
+- **Per-synapse masks**: Structural plasticity, dropout, or hardware defect maps
+
+This is the practical interface for biological and neuromorphic implementations.
+
+---
+
+### 5.6 Suggested Follow-Ups
+
+| Follow-Up | Question | Effort | Impact |
+|-----------|----------|--------|--------|
+| **Phase-shifted probe** | Can m(t) = sin(ω_p t) or m(t) = cos(ω_p t + φ) produce asymmetric windows that match STDP? | Low (modify probe in `ThreeFactorLockin`) | Directly addresses STDP resemblance |
+| **Heterogeneous ω_p** | Do layer-specific or neuron-specific probe frequencies yield STDP-like effective windows? | Medium (new `ThreeFactorLockin` variant) | Explores population coding of error |
+| **Neuromodulator spectrum** | If the global signal is a slow burst (not pure cosine), what window emerges? | Low (change `m(t)` to pulse/burst) | Biological plausibility; matches dopamine/acetylcholine timescales |
+| **Eligibility-only plasticity** | What does a rule using only h(t) (no demodulation) learn? Equivalent to Hebbian? | Low (remove demodulation) | Baseline for demodulation's contribution |
+| **Spike-time implementation** | Implement ThreeFactorLockin on explicit spike trains (using `oscillator_bank`) — does it still work? | High (new script) | Validates on true spiking substrate |
 
 ---
 
@@ -368,7 +425,7 @@ Global-error triggering and per-synapse eligibility masks insert at a single poi
 | **In-situ repair of stuck-at defects** | 97% recovery at 30% stuck-sat (A4) |
 | **Feedback symmetry tolerance** | 1–3% multiplicative mismatch acceptable (R4) |
 | **Three-factor equivalence** | LockinEP ≡ ThreeFactorLockin to 1e-5 (A6) |
-| **STDP distinction** | LockinEP = demodulation rule, not timing-order (A6) |
+| **STDP analysis** | LockinEP = demodulation rule; symmetric cosine window; raw eligibility trace is spike-timing measurable (A6, §5.3–5.4) |
 | **Fixed-key binding integration** | Gradient fidelity >0.99 (A7) |
 | **Detuning tolerance** | Adler threshold Δω < K confirmed (A8) |
 | **Backprop→EP transfer** | 1.06% accuracy drop (A3) |
@@ -379,8 +436,9 @@ Global-error triggering and per-synapse eligibility masks insert at a single poi
 |------------|------|---------|
 | ω_p/R_relax is universal invariant | Depth/width grid (A5) | **Falsified** — poor collapse, zone architecture-dependent |
 | Depth ≥ 3 has usable zone | Depth/width grid (A5) | **Falsified** — cos_min < 0.9 essentially 0% at all widths |
-| STDP ≈ LockinEP | Three-factor analysis (A6) | **Falsified** — cosine ≈ 0 vs FD |
 | Rotating frame training demonstrated | Audit (ep_program_status.md) | **Falsified** — only gradient-fidelity gates, no training runs |
+
+*Note*: "STDP ≈ LockinEP" was not a hypothesis we tested — rather, we asked "can LockinEP updates resemble STDP?" (§5.4). The answer is: not under the standard cosine probe, but the ingredients (local eligibility, global modulation, demodulation) are all present; phase-shifted or broadband probes could yield STDP-like windows.
 
 ### 6.3 Scope Limitations
 
@@ -410,6 +468,13 @@ Additional caveats:
 - **On-chip LockinEP** with quantized readout (δ = 0.005 turns)
 - **Device-level validation** of weight symmetry, detuning, and stuck-at recovery
 - **Energy/latency measurement** in carrier cycles (R_relax ≈ 0.1 → 8–12 cycles relax; ω_p=0.02 → 314 cycles/probe period; ~1670 cycles/gradient ≈ 1.7 s at 1 kHz carrier)
+
+### Three-Factor / STDP Follow-Ups (from §5.6)
+- **Phase-shifted probe** — m(t) = sin(ω_p t) or cos(ω_p t + φ): can it produce asymmetric STDP-like windows?
+- **Heterogeneous ω_p** — layer/neuron-specific probe frequencies: sum of cosines as asymmetric window?
+- **Neuromodulator spectrum** — slow burst instead of pure cosine: window reflects modulator timescale?
+- **Eligibility-only plasticity** — Hebbian without demodulation: what does it learn?
+- **Spike-time implementation** — ThreeFactorLockin on explicit spikes via `oscillator_bank`
 
 ---
 
