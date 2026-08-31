@@ -138,3 +138,72 @@ Uses the `cache` kwarg in `phasor_settle` (added in `src/ep.jl:536`) to inject p
 5. **Layer 2 (output-adjacent) is consistently more sensitive** than Layer 1 across all asymmetry types
 
 **Hardware implication**: Feedback path matching should prioritize multiplicative tracking (gain matching) over exact weight symmetry; analog implementations should avoid additive noise injection on the feedback path.
+
+---
+
+## A4. Analog-impairment fine-tuning harness ✅
+
+**Script**: `scripts/ep_analog_finetune.jl` (gitrev `0fbf549`)
+
+### Method
+- **Network**: 784→256→64 (PhasorDense×2), LockinEP fine-tune
+- **Pretrains**: Backprop (5 epochs, Adam lr=0.001) + StaticEP (20 epochs)
+- **Impairments** (4 weight types, 4 severities, 3 reps each):
+  - Lognormal multiplicative noise (σ = 0.01, 0.03, 0.1, 0.3)
+  - Gaussian additive noise (σ = 0.01, 0.03, 0.1, 0.3)
+  - Stuck-at-zero synapses (fraction = 0.01, 0.03, 0.1, 0.3)
+  - Stuck-at-saturation synapses (fraction = 0.01, 0.03, 0.1, 0.3)
+- **Fine-tune**: LockinEP 3 epochs, `weight_mask` freezes impaired synapses
+- **Baselines**: Backprop fine-tune (ceiling), Readout-only retrain (cheap floor)
+- **Metric**: Recovery fraction = (tuned − impaired) / (clean − impaired)
+
+### Key results (median recovery fraction over 3 reps)
+
+#### Backprop pretrain → LockinEP fine-tune
+
+| Impairment | Severity | Impaired acc | LockinEP tuned | Recovery | BP ceiling | Readout-only |
+|---|---|---|---|---|---|---|
+| **Stuck-at-saturation** | 1% | 0.806 | 0.831 | 2.0× | 0.825 | 0.814 |
+|  | 3% | 0.797 | 0.821 | **1.97×** | 0.824 | 0.823 |
+|  | 10% | 0.732 | 0.821 | **1.16×** | 0.822 | 0.809 |
+|  | **30%** | **0.384** | **0.794** | **0.97×** | 0.804 | 0.763 |
+| **Gaussian noise** | 1% | 0.808 | 0.824 | 2.0× | 0.825 | 0.819 |
+|  | 3% | 0.775 | 0.821 | **1.40×** | 0.824 | 0.819 |
+|  | 10% | 0.340 | 0.784 | **0.95×** | 0.787 | 0.731 |
+|  | 30% | 0.114 | 0.641 | **0.73×** | 0.719 | 0.556 |
+| **Stuck-at-zero** | 30% | 0.797 | 0.822 | **1.16×** | 0.818 | 0.819 |
+| **Lognormal noise** | all | ~0.81–0.83 | ~0.82–0.84 | ~2× (no real degradation) | — | — |
+
+#### StaticEP pretrain → LockinEP fine-tune
+
+| Impairment | Severity | Impaired acc | LockinEP tuned | Recovery | BP ceiling | Readout-only |
+|---|---|---|---|---|---|---|
+| **Stuck-at-saturation** | 1% | 0.819 | 0.828 | 1.5× | 0.836 | 0.826 |
+|  | 3% | 0.796 | 0.830 | **1.13×** | 0.828 | 0.825 |
+|  | 10% | 0.692 | 0.824 | **0.99×** | 0.813 | 0.796 |
+|  | **30%** | **0.355** | **0.780** | **0.91×** | 0.797 | 0.738 |
+| **Gaussian noise** | 3% | 0.788 | 0.826 | **1.36×** | 0.835 | 0.821 |
+|  | 10% | 0.398 | 0.792 | **0.93×** | 0.801 | 0.753 |
+|  | 30% | 0.116 | 0.592 | **0.67×** | 0.708 | 0.561 |
+| **Stuck-at-zero** | 30% | 0.787 | 0.823 | **1.06×** | 0.825 | 0.823 |
+
+### Conclusions
+
+1. **Stuck-at-saturation is the most recoverable severe impairment**: At **30% synapses stuck at saturation**, LockinEP recovers **97% (backprop pretrain) / 91% (StaticEP pretrain)** of the lost accuracy — approaching the full backprop fine-tune ceiling (97–99%).
+
+2. **LockinEP significantly outperforms readout-only retraining** at high impairment:
+   - 30% stuck-sat: LockinEP 97% vs Readout 87% (backprop pretrain)
+   - 30% Gaussian: LockinEP 73% vs Readout 56% (backprop pretrain)
+   - LockinEP learns to *route around* impaired synapses; readout-only cannot.
+
+3. **Gaussian additive noise is harder than stuck-at defects** at equal severity — recovery drops to 67–73% at 30% severity.
+
+4. **Lognormal multiplicative noise up to σ=0.3 causes negligible degradation** (accuracy stays ~0.82), consistent with A2/R4 findings.
+
+5. **StaticEP pretrain is slightly less recoverable** than backprop pretrain at high impairment (91% vs 97% for stuck-sat), but still benefits strongly from LockinEP fine-tuning.
+
+**Hardware implication**: Analog neuromorphic systems with **stuck-at-saturation defects up to 30%** can be **repaired in-situ by EP fine-tuning** to near-original accuracy, without full backprop. This validates the core "deploy + repair" value proposition.
+
+---
+
+## Next: A6 — Three-factor/STDP reformulation
