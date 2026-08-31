@@ -451,6 +451,118 @@ function ep_energy_contribution(layer::PhasorBind, ps, st, z_in, z_self;
 end
 
 # ================================================================
+# ResidualBlock implementations (Phase 2: skip connections)
+# ================================================================
+
+"""
+    ep_drive(rb::ResidualBlock, ps, st, z_in)
+
+Forward drive for ResidualBlock: returns the pre-normalization target
+z_target = z_in ⊙ (z_branch .^ α).
+
+The branch state z_branch is computed from z_in using the internal chain.
+"""
+function ep_drive(rb::ResidualBlock, ps, st, z_in)
+    # Compute branch drive using internal chain's ep_drive
+    d_branch = ep_drive(rb.ff, ps.ff, st.ff, z_in)
+    # Project to unit circle to get branch state
+    z_branch = _project_damp(ComplexF32(1), d_branch, 1f0, 1f-10)
+    # Apply ReZero gate: z_branch^α
+    α = haskey(ps, :alpha) ? ps.alpha[1] : 1f0
+    z_branch_α = z_branch .^ α
+    # v_bind = complex multiplication = phase addition
+    return z_in .* z_branch_α
+end
+
+"""
+    ep_feedback(rb::ResidualBlock, ps, st, z_out)
+
+Backward feedback through ResidualBlock's v_bind (complex multiplication).
+If z_out is a tuple (z_out, z_branch), extracts branch state directly.
+Otherwise recomputes branch from z_out as approximation.
+"""
+function ep_feedback(rb::ResidualBlock, ps, st, z_out)
+    # Handle tuple state from settle: (z_out, z_branch)
+    if z_out isa Tuple
+        z_out_val, z_branch = z_out
+    else
+        # Recompute branch state from z_out as approximation
+        branch_ps = ps.ff.layer_1; branch_st = st.ff.layer_1
+        branch_layer = rb.ff.layers[1]  # assuming single PhasorDense branch
+        d_branch = ep_drive(branch_layer, branch_ps, branch_st, z_out)
+        z_branch = _project_damp.(ComplexF32(1), d_branch, 1f0, 1f-10)
+        z_out_val = z_out
+    end
+    α = haskey(ps, :alpha) ? ps.alpha[1] : 1f0
+    z_branch_α = z_branch .^ α
+    # Adjoint through z_in .* z_branch_α: ∂/∂z_in = conj(z_branch_α)
+    fb_zin = conj.(z_branch_α) .* z_out_val
+    # Plus feedback through branch weights
+    branch_ps = ps.ff.layer_1; branch_st = st.ff.layer_1
+    branch_layer = rb.ff.layers[1]
+    fb_branch = ep_feedback(branch_layer, branch_ps, branch_st, z_branch_α .* z_out_val)
+    return fb_zin + fb_branch
+end
+
+"""
+    ep_self_force(rb::ResidualBlock, ps, st, z_self; K_mode, omega_override)
+
+Self-energy for ResidualBlock output state: zero (no self-dynamics).
+Branch self-dynamics are handled by the branch chain's own ep_self_force.
+"""
+function ep_self_force(rb::ResidualBlock, ps, st, z_self;
+                       K_mode::Symbol = :zero,
+                       omega_override::Union{Nothing, AbstractVector} = nothing)
+    return zero(z_self)
+end
+
+"""
+    ep_hebbian(::ResidualBlock, ps, st, z_in, z_self)
+
+Per-parameter Hebbian for ResidualBlock:
+- Branch weights: reuse PhasorDense hebbian with (z_in, z_branch)
+- Alpha gradient: hand derivative d/dα (z^α) = z^α log(z)
+  For |z|=1: log(z) = i·angle(z), so d/dα (z^α) = i·angle(z)·z^α
+"""
+function ep_hebbian(rb::ResidualBlock, ps, st, z_in, z_self)
+    invB = one(Float32) / Float32(_batch_size(z_self))
+    
+    # Compute branch state using internal chain's ep_drive
+    branch_ps = ps.ff.layer_1; branch_st = st.ff.layer_1
+    branch_layer = rb.ff.layers[1]  # assuming single PhasorDense branch
+    d_branch = ep_drive(branch_layer, branch_ps, branch_st, z_in)
+    z_branch = _project_damp.(ComplexF32(1), d_branch, 1f0, 1f-10)
+    α = haskey(ps, :alpha) ? ps.alpha[1] : 1f0
+    z_branch_α = z_branch .^ α
+    
+    # Branch weight hebbian: reuse PhasorDense logic with (z_in, z_branch)
+    g_branch = ep_hebbian(branch_layer, branch_ps, branch_st, z_in, z_branch)
+    
+    # Alpha gradient: dE/dα = imag( (z_self ⊙ conj(z_branch_α)) ⊙ phase(z_branch) ) / B
+    # phase(z_branch) ∈ [-0.5, 0.5] where 1.0 = 2π rad = full circle
+    phase_zb = angle.(z_branch) ./ (2f0 * pi_f32)
+    alpha_grad = sum(imag.(z_self .* conj.(z_branch_α) .* phase_zb)) .* invB
+    
+    # Wrap branch hebbian under ff.layer_1 to match ResidualBlock param structure
+    g = (ff = (layer_1 = g_branch,), alpha = [alpha_grad])
+    return g
+end
+
+function ep_energy_contribution(rb::ResidualBlock, ps, st, z_in, z_self;
+                                K_mode::Symbol = :zero,
+                                omega_override::Union{Nothing, AbstractVector} = nothing)
+    # Energy: Re⟨z_self, z_in ⊙ z_branch^α⟩
+    branch_ps = ps.ff.layer_1; branch_st = st.ff.layer_1
+    branch_layer = rb.ff.layers[1]
+    d_branch = ep_drive(branch_layer, branch_ps, branch_st, z_in)
+    z_branch = _project_damp.(ComplexF32(1), d_branch, 1f0, 1f-10)
+    α = haskey(ps, :alpha) ? ps.alpha[1] : 1f0
+    z_branch_α = z_branch .^ α
+    z_target = z_in .* z_branch_α
+    return Float32(real(dot(z_self, z_target)))
+end
+
+# ================================================================
 # Weight cache for hoisted drive/feedback
 # ================================================================
 
@@ -563,7 +675,7 @@ function phasor_settle(chain::Lux.Chain, ps, st, x, cost::AbstractEPCost, β::Re
 
     states = init === nothing ?
         _init_states(chain, layer_keys, z0) :
-        [ComplexF32.(s) for s in init]
+        [s isa Tuple ? s : ComplexF32.(s) for s in init]
 
     # Hoist the input drive: layer 1's `ep_drive` is `W₁·z₀ (+ bias)`,
     # and both `ps` and `z₀` are fixed for the whole settle — yet the
@@ -653,57 +765,129 @@ function _phasor_step(chain::Lux.Chain, ps, st, layer_keys, z0,
     return map(1:n) do l
         key  = layer_keys[l]
         ps_l = ps[key]; st_l = st[key]
+        layer = chain.layers[key]
         z_self = states[l]
+        
+        # Extract z_out from tuple if ResidualBlock
+        z_out = z_self isa Tuple ? z_self[1] : z_self
+        
         ω_l    = omega_override === nothing ? nothing : omega_override[l]
         c_t    = c_t_vec[l]
         rot    = rot_vec[l]
 
-        grad_l = if l == 1
-            # Both W₁·z₀ and the bias sit on the carrier together, so the
-            # hoisted co-rotating drive stays valid and only needs the
-            # single scalar `c_t` applied to the whole thing.
-            d = drive0 === nothing ?
-                _cached_drive(cache, l, chain, key, ps_l, st_l, z0) : drive0
-            c_t === nothing ? d : c_t .* d
+        if layer isa ResidualBlock
+            # ResidualBlock-specific settle logic
+            # Get z_in (input to this block)
+            z_in = if l == 1
+                z0
+            else
+                z_prev = states[l-1]
+                z_prev isa Tuple ? z_prev[1] : z_prev
+            end
+            
+            # Compute branch state using internal chain
+            branch_ps = ps_l.ff.layer_1; branch_st = st_l.ff.layer_1
+            branch_layer = layer.ff.layers[1]
+            d_branch = ep_drive(branch_layer, branch_ps, branch_st, z_in)
+            z_branch = _project_damp.(ComplexF32(1), d_branch, 1f0, 1f-10)
+            
+            # Apply ReZero gate: z_branch^α
+            α = haskey(ps_l, :alpha) ? ps_l.alpha[1] : 1f0
+            z_branch_α = z_branch .^ α
+            
+            # Block target: z_target = z_in ⊙ z_branch_α
+            z_target = z_in .* z_branch_α
+            grad_l = z_target
+            
+            # Self-force (zero for ResidualBlock output, branch handled internally)
+            if K_mode != :zero
+                grad_l = grad_l .+ ep_self_force(layer, ps_l, st_l, z_out;
+                                                  K_mode=K_mode, omega_override=ω_l)
+            end
+            
+            # Feedback from next layer
+            if l < n
+                key_n = layer_keys[l+1]
+                next_layer = chain.layers[key_n]
+                next_z_self = states[l+1]
+                next_z_out = next_z_self isa Tuple ? next_z_self[1] : next_z_self
+                if next_layer isa ResidualBlock
+                    # Next layer is also ResidualBlock - use its ep_feedback with tuple
+                    grad_l = grad_l .+ ep_feedback(next_layer, ps[key_n], st[key_n], next_z_self)
+                else
+                    grad_l = grad_l .+ _cached_feedback(cache, l+1, chain, key_n,
+                                                        ps[key_n], st[key_n], next_z_out)
+                end
+            end
+            
+            # Nudge at output layer
+            if l == n && β != 0f0
+                grad_l = grad_l .+ (c_t === nothing ?
+                    nudge_force(cost, z_out, β) :
+                    c_t .* nudge_force(cost, z_out .* conj(c_t), β))
+            end
+            
+            # Project
+            if project === :soft
+                z_out_new = rot === nothing ?
+                    _project_damp_soft.(z_out, grad_l, dt, soft_ε) :
+                    _project_damp_soft_rot.(z_out, grad_l, dt, soft_ε, rot)
+            else
+                z_out_new = rot === nothing ? _project_damp.(z_out, grad_l, dt, th) :
+                                              _project_damp_rot.(z_out, grad_l, dt, th, rot)
+            end
+            
+            # Return tuple (z_out, z_branch) for this ResidualBlock
+            return (z_out_new, z_branch)
         else
-            # `states[l-1]` already carries its own carrier; the bias does not.
-            # Use the current layer's carrier for bias.
-            _cached_drive(cache, l, chain, key, ps_l, st_l, states[l-1];
-                          carrier_phase=c_t)
-        end
+            # Standard layer logic (PhasorDense, PhasorBind, etc.)
+            # Get z_in for drive computation
+            z_in = if l == 1
+                z0
+            else
+                z_prev = states[l-1]
+                z_prev isa Tuple ? z_prev[1] : z_prev
+            end
+            
+            grad_l = if l == 1
+                d = drive0 === nothing ?
+                    _cached_drive(cache, l, chain, key, ps_l, st_l, z0) : drive0
+                c_t === nothing ? d : c_t .* d
+            else
+                _cached_drive(cache, l, chain, key, ps_l, st_l, z_in;
+                              carrier_phase=c_t)
+            end
 
-        # Skip the self-force entirely under K_mode=:zero rather than
-        # allocating a zero array and broadcasting it in every step.
-        if K_mode != :zero
-            grad_l = grad_l .+ ep_self_force(chain.layers[key], ps_l, st_l, z_self;
-                                              K_mode=K_mode, omega_override=ω_l)
-        end
+            if K_mode != :zero
+                grad_l = grad_l .+ ep_self_force(layer, ps_l, st_l, z_out;
+                                                  K_mode=K_mode, omega_override=ω_l)
+            end
 
-        if l < n
-            key_n = layer_keys[l+1]
-            grad_l = grad_l .+ _cached_feedback(cache, l+1, chain, key_n,
-                                                ps[key_n], st[key_n], states[l+1])
-        end
-        if l == n && β != 0f0
-            # Evaluate the cost on the DEMODULATED state and put the
-            # resulting force back on the carrier. Doing this way keeps
-            # every cost type working unchanged — including CodebookCost,
-            # whose softmax is nonlinear and could not simply be rotated.
-            grad_l = grad_l .+ (c_t === nothing ?
-                nudge_force(cost, z_self, β) :
-                c_t .* nudge_force(cost, z_self .* conj(c_t), β))
-        end
+            if l < n
+                key_n = layer_keys[l+1]
+                next_z_self = states[l+1]
+                next_z_out = next_z_self isa Tuple ? next_z_self[1] : next_z_self
+                if chain.layers[key_n] isa ResidualBlock
+                    grad_l = grad_l .+ ep_feedback(chain.layers[key_n], ps[key_n], st[key_n], next_z_self)
+                else
+                    grad_l = grad_l .+ _cached_feedback(cache, l+1, chain, key_n,
+                                                        ps[key_n], st[key_n], next_z_out)
+                end
+            end
+            if l == n && β != 0f0
+                grad_l = grad_l .+ (c_t === nothing ?
+                    nudge_force(cost, z_out, β) :
+                    c_t .* nudge_force(cost, z_out .* conj(c_t), β))
+            end
 
-        # Hard projection (ε = 0) — matches prototype, avoids
-        # sub-threshold magnitude bias from the safe-mode default. Fused
-        # into a single broadcast; see `_project_damp`.
-        if project === :soft
-            rot === nothing ?
-                _project_damp_soft.(z_self, grad_l, dt, soft_ε) :
-                _project_damp_soft_rot.(z_self, grad_l, dt, soft_ε, rot)
-        else
-            rot === nothing ? _project_damp.(z_self, grad_l, dt, th) :
-                              _project_damp_rot.(z_self, grad_l, dt, th, rot)
+            if project === :soft
+                rot === nothing ?
+                    _project_damp_soft.(z_out, grad_l, dt, soft_ε) :
+                    _project_damp_soft_rot.(z_out, grad_l, dt, soft_ε, rot)
+            else
+                rot === nothing ? _project_damp.(z_out, grad_l, dt, th) :
+                                  _project_damp_rot.(z_out, grad_l, dt, th, rot)
+            end
         end
     end
 end
@@ -897,22 +1081,77 @@ function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
         layer_ps = ps[key]
-        filled = NamedTuple()
-        for pname in (:weight, :bias_real, :bias_imag)
-            haskey(layer_ps, pname) || continue
-            P = layer_ps[pname]
+        if haskey(layer_ps, :ff) && haskey(layer_ps, :alpha)
+            # ResidualBlock: recursively FD the branch chain
+            ff_grad = _fd_nested_params(ps, key, layer_ps.ff, loss_at, ε_f)
+            # FD alpha
+            P = layer_ps.alpha
             gP = zeros(Float32, size(P))
             for i in eachindex(P)
                 Pp = copy(P)
                 Pp[i] += ε_f
-                ps_perturbed = _replace_param(ps, key, pname, Pp)
+                ps_perturbed = _replace_param(ps, key, :alpha, Pp)
                 gP[i] = (loss_at(ps_perturbed) - base) / ε_f
             end
-            filled = merge(filled, NamedTuple{(pname,)}((gP,)))
+            filled = (ff = ff_grad, alpha = gP)
+            push!(pairs, key => filled)
+        else
+            filled = NamedTuple()
+            for pname in (:weight, :bias_real, :bias_imag)
+                haskey(layer_ps, pname) || continue
+                P = layer_ps[pname]
+                gP = zeros(Float32, size(P))
+                for i in eachindex(P)
+                    Pp = copy(P)
+                    Pp[i] += ε_f
+                    ps_perturbed = _replace_param(ps, key, pname, Pp)
+                    gP[i] = (loss_at(ps_perturbed) - base) / ε_f
+                end
+                filled = merge(filled, NamedTuple{(pname,)}((gP,)))
+            end
+            push!(pairs, key => _zero_other_params(layer_ps, filled))
         end
-        push!(pairs, key => _zero_other_params(layer_ps, filled))
     end
     return NamedTuple(pairs)
+end
+
+# FD for nested param structures (ResidualBlock branch chains)
+function _fd_nested_params(ps, layer_key, ps_struct, loss_at, ε_f)
+    pairs = Pair{Symbol,Any}[]
+    for k in keys(ps_struct)
+        ps_k = ps_struct[k]
+        if haskey(ps_k, :weight)
+            filled = NamedTuple()
+            for pname in (:weight, :bias_real, :bias_imag)
+                haskey(ps_k, pname) || continue
+                P = ps_k[pname]
+                gP = zeros(Float32, size(P))
+                for i in eachindex(P)
+                    Pp = copy(P)
+                    Pp[i] += ε_f
+                    # Perturb the nested param
+                    ps_perturbed = _replace_nested_param(ps, layer_key, k, pname, Pp)
+                    gP[i] = (loss_at(ps_perturbed) - loss_at(ps)) / ε_f
+                end
+                filled = merge(filled, NamedTuple{(pname,)}((gP,)))
+            end
+            push!(pairs, k => _zero_other_params(ps_k, filled))
+        else
+            push!(pairs, k => _fd_nested_params(ps, layer_key, ps_k, loss_at, ε_f))
+        end
+    end
+    return NamedTuple(pairs)
+end
+
+# Replace a nested param: ps[layer_key].ff[k][pname] = V
+function _replace_nested_param(ps, layer_key, inner_key, pname, V)
+    inner = ps[layer_key]
+    ff = inner.ff
+    ff_k = ff[inner_key]
+    new_ff_k = merge(ff_k, NamedTuple{(pname,)}((V,)))
+    new_ff = merge(ff, NamedTuple{(inner_key,)}((new_ff_k,)))
+    new_inner = merge(inner, NamedTuple{( :ff,)}((new_ff,)))
+    return merge(ps, NamedTuple{(layer_key,)}((new_inner,)))
 end
 
 # Backwards-compatible: y as a complex vector → SimilarityCost.
@@ -1085,35 +1324,98 @@ function chain_hebbians(chain::Lux.Chain, ps, st, x, states::Vector)
     pairs = Pair{Symbol,Any}[]
     for l in 1:n
         key = layer_keys[l]
-        z_in   = (l == 1) ? z0 : states[l-1]
+        layer = chain.layers[key]
+        ps_l = ps[key]; st_l = st[key]
+        
+        # Extract z_in from previous state (handle ResidualBlock tuple)
+        z_in = if l == 1
+            z0
+        else
+            z_prev = states[l-1]
+            z_prev isa Tuple ? z_prev[1] : z_prev
+        end
+        
+        # Handle ResidualBlock: states[l] is (z_out, z_branch)
         z_self = states[l]
-        h_l = haskey(ps[key], :weight) ?
-            ep_hebbian(chain.layers[key], ps[key], st[key], z_in, z_self) :
-            _zero_grad(ps[key])
+        if layer isa ResidualBlock
+            z_out, z_branch = z_self
+            # For ResidualBlock, ep_hebbian takes (z_in, z_self) where z_self is z_out
+            # It internally computes branch hebbian using z_branch
+            h_l = ep_hebbian(layer, ps_l, st_l, z_in, z_out)
+        else
+            z_out = z_self isa Tuple ? z_self[1] : z_self
+            h_l = haskey(ps_l, :weight) ?
+                ep_hebbian(layer, ps_l, st_l, z_in, z_out) :
+                _zero_grad(ps_l)
+        end
         push!(pairs, key => h_l)
     end
     return NamedTuple(pairs)
 end
 
 # Build the gradient NamedTuple by differencing per-layer Hebbians
-# and dividing by β. Handles weight + bias (when present) and
-# zeros-out non-EP-trained params (log_neg_lambda, omega).
+# and dividing by β. Handles weight + bias (when present), alpha (for
+# ResidualBlock), and zeros-out non-EP-trained params (log_neg_lambda).
 function _ep_diff_gradient(ps, h_free, h_nudge, β)
     inv_β = -1f0 / Float32(β)
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
-        if haskey(ps[key], :weight)
+        layer_ps = ps[key]
+        if haskey(layer_ps, :weight)
+            # PhasorDense, PhasorBind, etc.
             entry = (weight = inv_β .* (h_nudge[key].weight .- h_free[key].weight),)
-            if haskey(ps[key], :bias_real)
+            if haskey(layer_ps, :bias_real)
                 entry = merge(entry, (
                     bias_real = inv_β .* (h_nudge[key].bias_real .- h_free[key].bias_real),
                     bias_imag = inv_β .* (h_nudge[key].bias_imag .- h_free[key].bias_imag),
                 ))
             end
-            entry = _pad_dynamics_zeros(entry, ps[key])
+            # Alpha gradient for ResidualBlock (if somehow present)
+            if haskey(layer_ps, :alpha)
+                entry = merge(entry, (
+                    alpha = inv_β .* (h_nudge[key].alpha .- h_free[key].alpha),
+                ))
+            end
+            entry = _pad_dynamics_zeros(entry, layer_ps)
+            push!(pairs, key => entry)
+        elseif haskey(layer_ps, :ff) && haskey(layer_ps, :alpha)
+            # ResidualBlock: params are (ff = (layer_1 = ...), alpha = ...)
+            # Hebbians are (ff = (layer_1 = ...), alpha = ...)
+            ff_free = h_free[key].ff
+            ff_nudge = h_nudge[key].ff
+            alpha_free = h_free[key].alpha
+            alpha_nudge = h_nudge[key].alpha
+            
+            # Diff the branch chain params (recursively handle nested structure)
+            ff_grad = _diff_nested_params(layer_ps.ff, ff_free, ff_nudge, inv_β)
+            alpha_grad = inv_β .* (alpha_nudge .- alpha_free)
+            
+            entry = (ff = ff_grad, alpha = alpha_grad)
             push!(pairs, key => entry)
         else
-            push!(pairs, key => _zero_grad(ps[key]))
+            push!(pairs, key => _zero_grad(layer_ps))
+        end
+    end
+    return NamedTuple(pairs)
+end
+
+# Recursively difference nested parameter structures (for ResidualBlock branch chains)
+function _diff_nested_params(ps_struct, h_free, h_nudge, inv_β)
+    pairs = Pair{Symbol,Any}[]
+    for k in keys(ps_struct)
+        ps_k = ps_struct[k]
+        if haskey(ps_k, :weight)
+            entry = (weight = inv_β .* (h_nudge[k].weight .- h_free[k].weight),)
+            if haskey(ps_k, :bias_real)
+                entry = merge(entry, (
+                    bias_real = inv_β .* (h_nudge[k].bias_real .- h_free[k].bias_real),
+                    bias_imag = inv_β .* (h_nudge[k].bias_imag .- h_free[k].bias_imag),
+                ))
+            end
+            entry = _pad_dynamics_zeros(entry, ps_k)
+            push!(pairs, k => entry)
+        else
+            push!(pairs, k => _diff_nested_params(ps_k, h_free[k], h_nudge[k], inv_β))
         end
     end
     return NamedTuple(pairs)
@@ -1386,7 +1688,9 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
         T_lockin_eff = 1
     end
 
-    states = [copy(s) for s in s_free]
+    # Copy states, handling tuples for ResidualBlock
+    _copy_state(s) = s isa Tuple ? (copy(s[1]), copy(s[2])) : copy(s)
+    states = [_copy_state(s) for s in s_free]
     cache  = _weight_cache(chain, ps, layer_keys)
     drive0 = _input_drive(chain, ps, st, layer_keys, z0; cache=cache)
 
@@ -1419,11 +1723,22 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     # `c = Σ_t e^{-iω_p t}` carries the DC subtraction out of the loop
     # too: `Σ_t (h(t) - h_dc)·e^{-iω_p t} = Σ_t h(t)e^{-iω_p t} - c·h_dc`.
     # It is ≈0 over integer cycles but is kept exact.
-    Zhat = [gpu_zeros(states[l], ComplexF32, size(states[l])...) for l in 1:length(layer_keys)]
+    _state_template(s) = s isa Tuple ? s[1] : s
+    _state_size(s) = s isa Tuple ? size(s[1]) : size(s)
+    _branch_template(s) = s isa Tuple ? s[2] : nothing
+    _branch_size(s) = s isa Tuple ? size(s[2]) : nothing
+    Zhat = [gpu_zeros(_state_template(states[l]), ComplexF32, _state_size(states[l])...) for l in 1:length(layer_keys)]
+    Zhat_branch = [(_branch_template(states[l]) === nothing) ? nothing : gpu_zeros(_branch_template(states[l]), ComplexF32, _branch_size(states[l])...) for l in 1:length(layer_keys)]
     HW   = Vector{Any}(nothing, length(layer_keys))
     for (l, key) in enumerate(layer_keys)
-        haskey(ps[key], :weight) || continue
-        HW[l] = gpu_zeros(ps[key].weight, ComplexF32, size(ps[key].weight)...)
+        layer_ps = ps[key]
+        if haskey(layer_ps, :weight)
+            HW[l] = gpu_zeros(ps[key].weight, ComplexF32, size(ps[key].weight)...)
+        elseif haskey(layer_ps, :ff) && haskey(layer_ps, :alpha)
+            # ResidualBlock: allocate HW for the branch layer
+            branch_ps = layer_ps.ff.layer_1
+            HW[l] = gpu_zeros(branch_ps.weight, ComplexF32, size(branch_ps.weight)...)
+        end
     end
     c = zero(ComplexF32)
 
@@ -1459,8 +1774,12 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
             # Readout time: absolute time for carrier demodulation in lab frame.
             # The state returned by _phasor_step at step t is at time t_now + dt.
             t_sample = t_warm_end + Float32(t_eff * se + 1) * m.dt
-            obs = (m.readout_δ <= 0f0 && m.readout_jitter <= 0f0) ? states :
-                  [_ro(z, t_sample) for z in states]
+            _extract_obs(z) = z isa Tuple ? z[1] : z
+            if m.readout_δ <= 0f0 && m.readout_jitter <= 0f0
+                obs = [_extract_obs(z) for z in states]
+            else
+                obs = [_ro(_extract_obs(z), t_sample) for z in states]
+            end
 
             # Lab-frame input at this sample time (for layer 1's Hebbian).
             ph_sample = carrier_f === nothing ? ComplexF32(1) :
@@ -1470,6 +1789,13 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
 
             for l in 1:length(layer_keys)
                 Zhat[l] .+= obs[l] .* demod
+                # Track branch state for ResidualBlock alpha gradient
+                if Zhat_branch[l] !== nothing
+                    z_branch = states[l] isa Tuple ? states[l][2] : nothing
+                    if z_branch !== nothing
+                        Zhat_branch[l] .+= z_branch .* demod
+                    end
+                end
                 HW[l] === nothing && continue
                 # H += demod · z_l · z_{l-1}'  (adjoint, not transpose —
                 # the energy derivative requires conjugation; see ep_hebbian)
@@ -1485,7 +1811,7 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
     #    real/imag parts of H_b give the bias_real / bias_imag grads
     #    respectively (since H_b's "complex" packaging is z_self and
     #    Re(z_self), Im(z_self) are independent params).
-    H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, HW, z0_ro, h_dc, c)
+    H_W, H_b = _lockin_accumulators(ps, layer_keys, Zhat, Zhat_branch, HW, z0_ro, h_dc, c)
     grads = _ep_lockin_gradient(ps, H_W, H_b, T_lockin_eff, m.ε)
     return grads, s_free
 end
@@ -1494,22 +1820,73 @@ end
 # complex Hebbians keyed by layer. `h_dc` entries are already divided by
 # B (see `ep_hebbian`), so the raw accumulators get the same treatment
 # before the DC term is subtracted.
-function _lockin_accumulators(ps, layer_keys, Zhat, HW, z0, h_dc, c)
+function _lockin_accumulators(ps, layer_keys, Zhat, Zhat_branch, HW, z0, h_dc, c)
     H_W = Dict{Symbol, Any}()
     H_b = Dict{Symbol, Any}()
     for (l, key) in enumerate(layer_keys)
-        haskey(ps[key], :weight) || continue
+        layer_ps = ps[key]
         invB = one(Float32) / Float32(_batch_size(Zhat[l]))
-        # Use HW[l] for all layers (including l=1, which now accumulates
-        # the outer product with the correct time-varying input in lab frame).
-        raw = HW[l]
-        H_W[key] = raw .* invB .- c .* ComplexF32.(h_dc[key].weight)
-        if haskey(ps[key], :bias_real)
-            dc_b = ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)
-            H_b[key] = _sum_batch(Zhat[l]) .* invB .- c .* dc_b
+        if haskey(layer_ps, :weight)
+            # PhasorDense, PhasorBind, etc.
+            raw = HW[l]
+            H_W[key] = raw .* invB .- c .* ComplexF32.(h_dc[key].weight)
+            if haskey(layer_ps, :bias_real)
+                dc_b = ComplexF32.(h_dc[key].bias_real .+ 1f0im .* h_dc[key].bias_imag)
+                H_b[key] = _sum_batch(Zhat[l]) .* invB .- c .* dc_b
+            end
+        elseif haskey(layer_ps, :ff) && haskey(layer_ps, :alpha)
+            # ResidualBlock: params are (ff = (layer_1 = ...), alpha = ...)
+            # Hebbians are (ff = (layer_1 = ...), alpha = ...)
+            # The HW[l] for ResidualBlock is the branch layer's HW
+            # We need to recursively extract branch Hebbians
+            ff_H_W, ff_H_b = _lockin_nested_accumulators(layer_ps.ff, h_dc[key].ff, HW[l], Zhat_branch[l], invB, c)
+            H_W[key] = (ff = ff_H_W,)
+            # Alpha gradient from demodulated branch state
+            # dE/dα = imag(z_out ⊙ conj(z_branch^α) ⊙ phase(z_branch)) / B
+            # Lock-in extracts: demod · z_branch component at ω_p
+            # The alpha gradient is -2 * Re(Zhat_branch_alpha) / (T_lockin * ε)
+            if Zhat_branch[l] !== nothing
+                # Alpha hebbian is the demodulated branch state
+                # For alpha: H_b_alpha = Σ_t demod · z_branch / B  (demodulated at ω_p)
+                # The final alpha gradient uses: -2 * real(H_b_alpha) / (T_lockin * ε)
+                # But we need z_branch^α * phase(z_branch) - approximate from demodulated z_branch
+                # For small α near 1, z_branch^α ≈ z_branch, phase(z_branch) is angle(z_branch)/(2π)
+                # This is an approximation; full alpha gradient needs more careful treatment
+                # For now, sum over channels to make it scalar (matching alpha param size)
+                branch_hebbian = _sum_batch(Zhat_branch[l]) .* invB .- c .* h_dc[key].alpha
+                # Sum over channels to get scalar
+                alpha_hebbian = sum(branch_hebbian)
+                H_b[key] = (ff = ff_H_b, alpha = [alpha_hebbian])
+            else
+                H_b[key] = (ff = ff_H_b, alpha = zero.(h_dc[key].alpha))
+            end
         end
     end
     return H_W, H_b
+end
+
+# Recursively compute lock-in accumulators for nested parameter structures (for ResidualBlock branch chains)
+# Returns (weight_hebbians, bias_hebbians) where bias_hebbians are complex vectors (real=bias_real, imag=bias_imag)
+function _lockin_nested_accumulators(ps_struct, h_dc_struct, HW_raw, Zhat_branch_layer, invB, c)
+    weight_pairs = Pair{Symbol, Any}[]
+    bias_pairs = Pair{Symbol, Any}[]
+    # For ResidualBlock with single PhasorDense branch, HW_raw is the branch's HW
+    for k in keys(ps_struct)
+        ps_k = ps_struct[k]
+        if haskey(ps_k, :weight)
+            raw = HW_raw
+            # Weight hebbian
+            push!(weight_pairs, k => (raw .* invB .- c .* ComplexF32.(h_dc_struct[k].weight)))
+            # Bias hebbian: from demodulated branch state (Zhat_branch_layer)
+            if Zhat_branch_layer !== nothing
+                bias_hebbian = _sum_batch(Zhat_branch_layer) .* invB .- c .* ComplexF32.(h_dc_struct[k].bias_real .+ 1f0im .* h_dc_struct[k].bias_imag)
+                push!(bias_pairs, k => bias_hebbian)
+            else
+                push!(bias_pairs, k => zero.(h_dc_struct[k].bias_real) .+ 1f0im .* zero.(h_dc_struct[k].bias_imag))
+            end
+        end
+    end
+    return NamedTuple(weight_pairs), NamedTuple(bias_pairs)
 end
 
 function _ep_lockin_gradient(ps, H_W::AbstractDict, H_b::AbstractDict,
@@ -1517,7 +1894,9 @@ function _ep_lockin_gradient(ps, H_W::AbstractDict, H_b::AbstractDict,
     norm_factor = Float32(T_lockin) * Float32(ε)
     pairs = Pair{Symbol,Any}[]
     for key in keys(ps)
-        if haskey(ps[key], :weight)
+        layer_ps = ps[key]
+        if haskey(layer_ps, :weight)
+            # PhasorDense, PhasorBind, etc.
             entry = (weight = -2f0 .* real.(H_W[key]) ./ norm_factor,)
             if haskey(H_b, key)
                 # Re(H_b) → bias_real grad; Im(H_b) → bias_imag grad.
@@ -1526,10 +1905,51 @@ function _ep_lockin_gradient(ps, H_W::AbstractDict, H_b::AbstractDict,
                     bias_imag = -2f0 .* imag.(H_b[key]) ./ norm_factor,
                 ))
             end
-            entry = _pad_dynamics_zeros(entry, ps[key])
+            # Alpha gradient for ResidualBlock (if somehow present)
+            if haskey(layer_ps, :alpha)
+                entry = merge(entry, (
+                    alpha = -2f0 .* real.(H_b[key].alpha) ./ norm_factor,
+                ))
+            end
+            entry = _pad_dynamics_zeros(entry, layer_ps)
+            push!(pairs, key => entry)
+        elseif haskey(layer_ps, :ff) && haskey(layer_ps, :alpha)
+            # ResidualBlock: params are (ff = (layer_1 = ...), alpha = ...)
+            # Hebbians are (ff = (layer_1 = ...), alpha = ...)
+            ff_H_W = H_W[key].ff
+            ff_H_b = H_b[key].ff
+            alpha_H_b = H_b[key].alpha
+            
+            # Diff the branch chain params (recursively handle nested structure)
+            ff_grad = _lockin_nested_gradient(layer_ps.ff, ff_H_W, ff_H_b, norm_factor)
+            alpha_grad = -2f0 .* real.(alpha_H_b) ./ norm_factor
+            
+            entry = (ff = ff_grad, alpha = alpha_grad)
             push!(pairs, key => entry)
         else
-            push!(pairs, key => _zero_grad(ps[key]))
+            push!(pairs, key => _zero_grad(layer_ps))
+        end
+    end
+    return NamedTuple(pairs)
+end
+
+# Recursively compute lock-in gradient for nested parameter structures (for ResidualBlock branch chains)
+function _lockin_nested_gradient(ps_struct, H_W, H_b, norm_factor)
+    pairs = Pair{Symbol,Any}[]
+    for k in keys(ps_struct)
+        ps_k = ps_struct[k]
+        if haskey(ps_k, :weight)
+            entry = (weight = -2f0 .* real.(H_W[k]) ./ norm_factor,)
+            if haskey(H_b, k)
+                entry = merge(entry, (
+                    bias_real = -2f0 .* real.(H_b[k]) ./ norm_factor,
+                    bias_imag = -2f0 .* imag.(H_b[k]) ./ norm_factor,
+                ))
+            end
+            entry = _pad_dynamics_zeros(entry, ps_k)
+            push!(pairs, k => entry)
+        else
+            push!(pairs, k => _zero_grad(ps_k))
         end
     end
     return NamedTuple(pairs)

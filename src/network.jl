@@ -1948,6 +1948,7 @@ residual use.
 - `ff`: feed-forward `Chain` of `PhasorDense` layers
 - `gate`: `:none` (plain bind) or `:rezero` (learnable α gate)
 - `alpha0`: ReZero gate initialization (used when `gate === :rezero`)
+- `out_dims`: Output dimension of the block
 
 See also: [`v_bind`](@ref) for the phase binding operation.
 """
@@ -1955,6 +1956,7 @@ struct ResidualBlock{F} <: Lux.AbstractLuxLayer
     ff::F
     gate::Symbol
     alpha0::Float32
+    out_dims::Int
 end
 
 function ResidualBlock(dimensions::Tuple{Vararg{Int}},
@@ -1974,7 +1976,8 @@ function ResidualBlock(dimensions::Tuple{Vararg{Int}},
     pairs = [dimensions[i] => dimensions[i+1] for i in 1:length(dimensions) - 1]
     layers = [PhasorDense(pair, activation; init_weight = iw, kwargs...) for pair in pairs]
     ff = Chain(layers...)
-    return ResidualBlock(ff, gate, Float32(alpha0))
+    out_dim = dimensions[end]
+    return ResidualBlock(ff, gate, Float32(alpha0), out_dim)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, rb::ResidualBlock)
