@@ -524,6 +524,31 @@ cosine against a drifting snapshot reads as noise, indistinguishable from
 - Δω≥0.5: cos≈0.05–0.15 (completely unlocked)
 - Confirms phase-locking requires |Δω| < K as predicted by Adler equation
 
+### A9. ResidualBlock with LockinEP (Phase 2: Skip Connections for Depth ≥ 5)
+
+**Motivation:** A5 falsified depth ≥ 3 for standard PhasorDense chains. ResidualBlock with `v_bind` skip + ReZero gate preserves identity at init (Phase 1: bdisp < 0.002π), enabling deep training.
+
+**Theory:** Energy `E = -Re⟨z_in ⊙ z_branch^α, z_out⟩`. Forward: `z_out = normalize(z_in .* (normalize(W·z_in + b))^α)`. R_relax predicted ~constant with depth.
+
+**Implementation Plan** (see `docs/phase2_residual_lockin_plan.md`):
+1. Add `ep_drive`, `ep_feedback`, `ep_hebbian`, `ep_self_force` for `ResidualBlock` in `src/ep.jl`
+2. Modify `_phasor_step` to track `(z_out, z_branch)` tuples in states vector
+3. Update `chain_hebbians` to unpack branch states
+4. Alpha gradient: hand derivative `d/dα (z^α) = z^α log(z)` → `imag(z_self ⊙ conj(z_branch_α) ⊙ phase(z_branch))`
+
+**Validation Scripts:**
+- `scripts/ep_residual_static_test.jl`: StaticEP vs FD on toy chains (target cos > 0.95)
+- `scripts/ep_depth_width_residual_lockin.jl`: LockinEP depth sweep 1-5, D=64,256
+
+**Success Criteria:**
+| Metric | Target |
+|--------|--------|
+| StaticEP vs FD cosine (toy) | > 0.95 |
+| LockinEP depth 5 operating zone | Non-empty (cos_min ≥ 0.9) |
+| Depth 5 test acc (LockinEP, FMNIST) | > 70% |
+
+**Status:** IN PROGRESS — implementation started.
+
 ### Tier 4 — loose ends (each a few hours; each removes a stated caveat)
 
 - **`K_mode=:stored` at scale.** Gated at toy width but never swept or

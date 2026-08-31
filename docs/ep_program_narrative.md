@@ -451,7 +451,58 @@ Additional caveats:
 
 ---
 
-## 7. Future Work
+## 7. Phase 2: ResidualBlock with LockinEP (In Progress)
+
+**Objective**: Extend LockinEP to `ResidualBlock` (skip connections via `v_bind` + ReZero gate) to enable depth ≥ 5 training — addressing the falsified A5 result that standard PhasorDense chains have no usable operating zone at depth ≥ 3.
+
+### 7.1 Theoretical Basis
+
+From `docs/residual_lockin_analysis.md`:
+- Energy: `E = -Re⟨z_in ⊙ z_branch^α, z_out⟩` where `⊙` = complex multiplication (phase addition)
+- Forward: `z_out = normalize(z_in .* (normalize(W·z_in + b))^α)`
+- Jacobian at init: `∂y/∂x ≈ I` (identity mapping preserved) → no vanishing gradients
+- R_relax predicted ~constant with depth (vs 4× drop/layer for standard)
+- ReZero α adapts with depth (Phase 1: α grows from 0.1 at depth 1 to ~0.5 at depth 5)
+
+### 7.2 Implementation Plan
+
+| Component | Method | Key Detail |
+|-----------|--------|------------|
+| `ep_drive` | `z_in ⊙ z_branch^α` | Compute branch state on-the-fly, apply ReZero power |
+| `ep_feedback` | Adjoint through `v_bind` | Uses `z_in = z_out ./ z_branch^α` (unit modulus invertible) |
+| `ep_hebbian` | Branch weights + α | Branch: reuse `PhasorDense` hebbian; α: hand derivative `z^α log(z)` |
+| `_phasor_step` | Track `(z_out, z_branch)` tuples | States vector becomes `Vector{Any}` for mixed layer types |
+| `chain_hebbians` | Extract branch states | Unpack tuples from settle states |
+
+### 7.3 Alpha Gradient (Hand Derivative)
+
+For `|z_branch| = 1`: `z_branch = e^{iθ}`, `z_branch^α = e^{iαθ}`
+```
+d/dα (z_branch^α) = iθ · z_branch^α
+dE/dα = Re⟨z_self ⊙ conj(z_out), iθ⟩ = imag( (z_self ⊙ conj(z_out)) ⊙ θ )
+```
+In Phase units (θ ∈ [-1, 1] = [-π, π]):
+```julia
+phase_zb = angle.(z_branch) ./ (2f0 * pi_f32)
+alpha_grad = imag.(z_self .* conj.(z_branch_α) .* phase_zb) .* invB
+```
+
+### 7.4 Validation & Sweep
+
+- `scripts/ep_residual_static_test.jl`: StaticEP vs FD on toy ResidualBlock chains
+- `scripts/ep_depth_width_residual_lockin.jl`: LockinEP depth sweep (1-5, D=64,256)
+
+### 7.5 Success Criteria
+
+| Metric | Target |
+|--------|--------|
+| StaticEP vs FD cosine (toy) | > 0.95 |
+| LockinEP depth 5 operating zone | Non-empty (cos_min ≥ 0.9) |
+| Depth 5 test acc (LockinEP, FMNIST) | > 70% |
+
+---
+
+## 8. Future Work
 
 ### Tier 4 (Loose Ends)
 - **K_mode = :stored at scale** — closes gap to true R&F; one grid axis, already a LockinEP field
