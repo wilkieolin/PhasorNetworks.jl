@@ -1,4 +1,4 @@
-using Pkg; Pkg.activate(".")
+using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
 using PhasorNetworks
 using Lux
 using MLUtils

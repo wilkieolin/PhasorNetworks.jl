@@ -5,6 +5,9 @@
 /docs/build/
 *debug*
 *.jld2
+# Serialized model snapshots (e.g. results/ep_trained_vs_rescaled/snapshots_*.jls,
+# 8.4M each). Regenerate with scripts/ep_trained_vs_rescaled.jl.
+*.jls
 figures/*
 *.gif
 .DS_store
@@ -21,3 +24,9 @@ test/scratch/*
 *.log
 # Generated figures from demos/wave_dispersion.jl
 demos/wave_out/
+# LaTeX intermediates and compiled PDFs under docs/ (sources only are tracked)
+*.out
+*.toc
+*.bbl
+*.blg
+/docs/*.pdf

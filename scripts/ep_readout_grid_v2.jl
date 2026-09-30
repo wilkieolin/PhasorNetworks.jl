@@ -11,8 +11,8 @@
 # Outputs CSV with columns for aggregation.
 #
 # Usage:
-#   julia --project=. scripts/ep_readout_grid_v2.jl
-#   julia --project=. -t 8 scripts/ep_readout_grid_v2.jl  (parallel draws)
+#   julia --project=scripts scripts/ep_readout_grid_v2.jl
+#   julia --project=scripts -t 8 scripts/ep_readout_grid_v2.jl  (parallel draws)
 
 using PhasorNetworks, Lux, LinearAlgebra, Printf, Statistics, CSV, DataFrames
 using Random: Xoshiro

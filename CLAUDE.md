@@ -29,7 +29,16 @@ julia --project=docs docs/make.jl
 
 # Training script
 julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend :cuda
+
+# Experiment/figure scripts that need CSV, DataFrames, CairoMakie, etc.
+julia --project=scripts scripts/make_all_figures.jl
 ```
+
+Plotting and data-frame packages live in the separate `scripts/` environment
+(`scripts/Project.toml`, which develops PhasorNetworks from `..`), not in the
+core package, so library users don't install them. Scripts that need them
+activate `scripts/` themselves. Change any `Project.toml`/`Manifest.toml` only
+through the Pkg API (`Pkg.add`/`Pkg.rm`/`Pkg.compat`), never by editing it.
 
 There is no linter or formatter configured. Julia 1.11+ is required.
 
@@ -152,7 +161,7 @@ the load-dependency order.
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
 | `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
 | `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
-| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge. Runs on CPU or GPU (device-agnostic allocation via `gpu_zeros`); `fd_gradient_phasor` is CPU-only. **λ/ω split:** `ep_self_force` returns `½λz` only — ω is symplectic (`Re⟨z,(λ+iω)z⟩ = λ|z|²`, so it contributes nothing to Φ) and is applied instead as an exact multiplicative carrier rotation via `phasor_settle(carrier=ω, t0=…)`, never as an additive `iω·z`. For a chain with one shared ω the carrier cancels identically, so the rotating problem IS the static problem — see `docs/phasor_lockin_derivation.tex` §Rotating Substrate for the proof, `docs/ep_rotating_extension.md` for the narrative, `scripts/ep_rotating_gates.jl` for the gates that enforce it |
+| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge. Runs on CPU or GPU (device-agnostic allocation via `gpu_zeros`); `fd_gradient_phasor` is CPU-only. **λ/ω split:** `ep_self_force` returns `½λz` only — ω is symplectic (`Re⟨z,(λ+iω)z⟩ = λ|z|²`, so it contributes nothing to Φ) and is applied instead as an exact multiplicative carrier rotation via `phasor_settle(carrier=ω, t0=…)`, never as an additive `iω·z`. For a chain with one shared ω the carrier cancels identically, so the rotating **settle** IS the static settle — see `docs/phasor_lockin_derivation.tex` §Rotating Frame for the proof, `docs/ep_rotating_extension.md` for the narrative, `scripts/ep_rotating_gates.jl` for the gates that enforce it. **This stops at the readout:** `_quantize_phase` (`readout_δ > 0`) is the one non-U(1)-equivariant operation in the pipeline — rounding commutes with a rotation only on exact multiples of the grid — so with quantization the frame is a modelling choice about what the readout clock is locked to, not a change of variables (Gate F; `scripts/ep_readout_frame_check.jl`). **Scope:** the four extension hooks (`ep_drive`/`ep_feedback`/`ep_hebbian`/`ep_energy_contribution`) have one method each, on `PhasorDense`, over a strict feedforward chain — no binding, recurrence, or skips — and every headline result is `K_mode=:zero`. Program status, recap audit and the ranked follow-up list: `docs/ep_program_status.md` |
 
 ### Key Type Aliases
 

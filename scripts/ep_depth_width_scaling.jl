@@ -21,7 +21,7 @@ end
 
 repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
-Pkg.activate(repo_root)
+Pkg.activate(joinpath(repo_root, "scripts"))
 
 using PhasorNetworks, Lux, LinearAlgebra, Statistics, Random, Printf, CSV, DataFrames
 using Random: Xoshiro
@@ -61,7 +61,7 @@ const NCYC_VALS  = parse.(Int, split(_envs("EPS_NCYC", "4,8,16"), ","))  # n_cyc
 # Provenance
 const GITREV = try
     rev = strip(read(`git -C $(repo_root) rev-parse --short HEAD`, String))
-    d   = read(`git -C $(repo_root) diff HEAD -- ../src`, String)
+    d   = read(`git -C $(repo_root) diff HEAD -- src`, String)
     isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
 catch
     "unknown"

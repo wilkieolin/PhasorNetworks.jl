@@ -7,8 +7,8 @@
 # Uses trained weights from most recent fmnist checkpoint.
 #
 # Usage:
-#   julia --project=. scripts/ep_feedback_asymmetry.jl
-#   LOAD_CHECKPOINT=none julia --project=. scripts/ep_feedback_asymmetry.jl  # fresh training
+#   julia --project=scripts scripts/ep_feedback_asymmetry.jl
+#   LOAD_CHECKPOINT=none julia --project=scripts scripts/ep_feedback_asymmetry.jl  # fresh training
 
 using Pkg
 function find_repo_root(start_dir::String = pwd())
@@ -25,7 +25,7 @@ end
 
 repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
-Pkg.activate(repo_root)
+Pkg.activate(joinpath(repo_root, "scripts"))
 
 using PhasorNetworks, Lux, LinearAlgebra, Statistics, Random, Printf, CSV, DataFrames, MLUtils, OneHotArrays, Optimisers, Zygote
 using Random: Xoshiro
@@ -65,7 +65,7 @@ const STATIC_DT = 0.5f0
 # Provenance
 const GITREV = try
     rev = strip(read(`git -C $(repo_root) rev-parse --short HEAD`, String))
-    d   = read(`git -C $(repo_root) diff HEAD -- ../src`, String)
+    d   = read(`git -C $(repo_root) diff HEAD -- src`, String)
     isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
 catch
     "unknown"

@@ -5,10 +5,10 @@
 # Reports recovery fraction vs. impairment severity.
 #
 # Usage:
-#   julia --project=. scripts/ep_analog_finetune.jl
-#   PRETRAIN=both julia --project=. scripts/ep_analog_finetune.jl
-#   PRETRAIN=backprop STATIC_EPOCHS=0 julia --project=. scripts/ep_analog_finetune.jl
-#   RUN_GPU=0 julia --project=. scripts/ep_analog_finetune.jl  # force CPU
+#   julia --project=scripts scripts/ep_analog_finetune.jl
+#   PRETRAIN=both julia --project=scripts scripts/ep_analog_finetune.jl
+#   PRETRAIN=backprop STATIC_EPOCHS=0 julia --project=scripts scripts/ep_analog_finetune.jl
+#   RUN_GPU=0 julia --project=scripts scripts/ep_analog_finetune.jl  # force CPU
 
 using Pkg
 function find_repo_root(start_dir::String = pwd())
@@ -25,7 +25,7 @@ end
 
 repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
-Pkg.activate(repo_root)
+Pkg.activate(joinpath(repo_root, "scripts"))
 
 using PhasorNetworks, Lux, MLUtils, OneHotArrays, Statistics, Random, Optimisers, LinearAlgebra, CSV, DataFrames, Printf, Zygote
 using Random: Xoshiro

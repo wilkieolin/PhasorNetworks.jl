@@ -88,7 +88,7 @@ _envfs_or(k, default) = haskey(ENV, k) ?
 # different working states distinguishable.
 const GITREV = try
     rev = strip(read(`git -C $(@__DIR__) rev-parse --short HEAD`, String))
-    d   = read(`git -C $(@__DIR__) diff HEAD -- ../src`, String)
+    d   = read(`git -C $(@__DIR__) diff HEAD -- src`, String)
     isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
 catch
     "unknown"

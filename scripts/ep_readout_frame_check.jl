@@ -5,7 +5,7 @@
 #
 # WHY THIS FILE EXISTS
 # --------------------
-# `docs/phasor_lockin_derivation.tex` §Rotating Substrate proves that for one
+# `docs/phasor_lockin_derivation.tex` §Rotating Frame proves that for one
 # shared carrier ω the lab and co-rotating frames give the SAME settle, exactly,
 # at any dt. That proof is about the state. It says nothing about how the state
 # is observed, and a spiking substrate does not report a complex number — it

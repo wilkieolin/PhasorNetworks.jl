@@ -1,13 +1,8 @@
 #!/usr/bin/env julia
-#
 # scripts/ep_backprop_transfer.jl — A3: Does a backprop-trained chain survive EP settle?
-#
 # Train a 784→256→64 PhasorDense chain with `train()` (feedforward, Zygote),
 # then evaluate it with `ep_predict` (settle-based). Report the accuracy delta.
-#
-# Usage:
-#   julia --project=. scripts/ep_backprop_transfer.jl
-#   julia --project=. -t 4 scripts/ep_backprop_transfer.jl
+# Outputs CSV for Figure 3c.
 
 using Pkg
 function find_repo_root(start_dir::String = pwd())
@@ -24,10 +19,10 @@ end
 
 repo_root = find_repo_root(@__DIR__)
 cd(repo_root)
-Pkg.activate(repo_root)
+Pkg.activate(joinpath(repo_root, "scripts"))
 
 using PhasorNetworks, Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, CUDA
-using Dates, LinearAlgebra
+using Dates, LinearAlgebra, CSV, DataFrames
 using Random: Xoshiro
 
 const BATCHSIZE = 128
@@ -39,6 +34,9 @@ const HID = 256
 const DOUT = 64
 const SCALE = 0.4f0
 
+const OUT = joinpath(repo_root, "results", "ep_backprop_transfer")
+mkpath(OUT)
+
 cdev = cpu_device()
 gdev = gpu_device()
 dev = USE_CUDA ? gdev : cdev
@@ -49,12 +47,21 @@ args = Args(batchsize = BATCHSIZE,
             rng = Xoshiro(SEED),
             use_cuda = USE_CUDA)
 
+# Provenance
+const GITREV = try
+    rev = strip(read(`git -C $(repo_root) rev-parse --short HEAD`, String))
+    d   = read(`git -C $(repo_root) diff HEAD -- src`, String)
+    isempty(strip(d)) ? rev : rev * "-d" * string(hash(d), base = 16)[1:8]
+catch
+    "unknown"
+end
+
 println("Settings: lr=$LR, epochs=$EPOCHS, batchsize=$BATCHSIZE, use_cuda=$USE_CUDA")
 
-# ---- encode_phase (matching ep_fashionmnist.jl) ----
+# ---- encode_phase ----
 function encode_phase(imgs::AbstractArray{Float32,3})
     N = size(imgs, 3)
-    flat = reshape(imgs, :, N)                       # (784, N)
+    flat = reshape(imgs, :, N)
     μ = mean(flat; dims=1)
     σ = std(flat; dims=1) .+ 1f-6
     return Phase.(0.5f0 .* tanh.((flat .- μ) ./ σ))
@@ -71,11 +78,11 @@ Xte = encode_phase(Float32.(te.features[:, :, 1:nte]))
 ytr = Int.(tr.targets[1:ntr]) .+ 1
 yte = Int.(te.targets[1:nte]) .+ 1
 
-# DataLoaders for backprop training
+# DataLoaders
 train_loader = DataLoader((Xtr, ytr), batchsize=BATCHSIZE, shuffle=true)
 test_loader = DataLoader((Xte, yte), batchsize=BATCHSIZE, shuffle=false)
 
-# ---- Build EP chain (PhasorDense only) ----
+# Build EP chain
 import PhasorNetworks: default_bias, normalize_to_unit_circle
 
 function build_chain(rng)
@@ -103,17 +110,15 @@ if USE_CUDA
     cb_codes = cb_codes |> gdev
 end
 
-# Loss function for backprop training (feedforward)
+# Loss function for backprop training
 function bp_loss(x, y, model, ps, st, codebook, dev=dev)
     x = x |> dev
     y = y |> dev
-    z_out, _ = Lux.apply(model, x, ps, st)  # (64, B) Phase
-    # Convert to Complex for similarity
+    z_out, _ = Lux.apply(model, x, ps, st)
     z_out_c = ComplexF32.(angle_to_complex(z_out))
     codes_dev = codebook |> dev
-    logits = similarity_outer(z_out_c, codes_dev)  # (10, B)
+    logits = similarity_outer(z_out_c, codes_dev)
     y_onehot = onehotbatch(y .- 1, 0:9)
-    # Manual cross-entropy for logits (no softmax)
     log_probs = logits .- log.(sum(exp.(logits); dims=1))
     loss = -mean(sum(y_onehot .* log_probs; dims=1))
     return loss
@@ -160,10 +165,8 @@ function bp_accuracy(model, data_loader, ps, st, codebook, dev=dev)
         z_out, _ = Lux.apply(model, x, ps, st)
         z_out_c = ComplexF32.(angle_to_complex(z_out))
         logits = similarity_outer(z_out_c, codebook |> dev)
-        # Move logits to CPU for argmax to avoid scalar indexing issues on GPU
         logits_cpu = logits |> cdev
         pred_indices = argmax(logits_cpu; dims=1)
-        # pred_indices is (1, B) matrix, need to flatten to get 1D vector
         pred_labels = [idx[1] for idx in vec(pred_indices)]
         y_cpu = y |> cdev
         batch_correct = sum(pred_labels .== y_cpu)
@@ -201,20 +204,34 @@ println("EP settle accuracy:             $ep_acc")
 println("Difference (EP - BP):           $(ep_acc - bp_acc)")
 println("Relative drop:                  $(100 * (bp_acc - ep_acc) / bp_acc)%")
 
+# --- Write CSV output ---
+csv_file = joinpath(OUT, "backprop_transfer_$(GITREV).csv")
+CSV.write(csv_file, DataFrame(
+    gitrev = [GITREV],
+    bp_acc = [Float32(bp_acc)],
+    ep_acc = [Float32(ep_acc)],
+    drop = [Float32(bp_acc - ep_acc)],
+    rel_drop = [Float32((bp_acc - ep_acc) / bp_acc)],
+    seed = [SEED],
+    epochs = [EPOCHS],
+    lr = [LR],
+    hidden = [HID],
+    output = [DOUT],
+    scale = [SCALE]
+))
+println("\nResults written to: $csv_file")
+
 # Also test gradient fidelity
 println("\n=== Gradient fidelity check (LockinEP vs centered StaticEP) ===")
-# Use CPU to avoid scalar indexing issues on GPU
 x_test = Xte[:, 1:1] |> cdev
 y_test = yte[1:1] |> cdev
 y_target = cb_codes[:, y_test[1]] |> cdev
 
-# Move params and state to CPU for this check
 ps_cpu = ps |> cdev
 st_cpu = st |> cdev
 
 using PhasorNetworks: SimilarityCost, LockinEP, StaticEP, ep_gradient
 
-# Local cosine function
 cosine(a, b) = real(dot(vec(a), vec(b)) / (norm(vec(a)) * norm(vec(b)) + 1e-30))
 
 cost = SimilarityCost(y_target)
