@@ -1,0 +1,148 @@
+\section{Derivation}
+
+As a basic understanding of equilibrium propagation (EP) is necessary in order to understand LIEP, we first provide a brief introduction of the method and its key differences from standard backpropagation. Readers familiar with EP may proceed directly to the derivation of LIEP (Section \ref{sec:LIEP}).
+
+\subsection{Equilibrium Propagation}
+
+Standard neural networks are ``feedforward'' systems: given a set of inputs and an internal state, a series of linear and nonlinear operations are used to calculate the output of the network. As a result, the output of layers deeper in the network have no effect on earlier layers; they are causally unconnected. Therefore in order to carry out credit assignment --- that is, to understand how to adjust the network's parameters to improve performance given its current output --- the feedforward network must be ``unrolled'' backwards to allow cause and effect to be reversed \cite{rumelhartLearningRepresentationsBackpropagating1986}. While extremely effective and relatively simple, as backpropagation is essentially a specialized case of the chain rule of differentiation, this process requires separate computational steps and full memory of the state, inputs, and outputs of the network. For this and other reasons, backpropagation is not generally accepted as a biologically realistic model of learning \cite{ororbiaBrainInspiredMachineIntelligence2023, songCanBrainBackpropagation}.
+
+Equilibrium propagation (EP) was developed as one alternative method which can be used to train neural networks \cite{scellierEquilibriumPropagationBridging2017}. However, standard feedforward networks cannot be directly applied to EP; the core principle of EP is to define an energy function on a network of components in which influences are bidirectional. To provide a concrete example, let us consider a network of a neural network with a state $s$ containing its neuronal activations, and a set of parameters $\theta$ containing weights $W$. A Hopfield-like scalar energy function for this layer $\ell$ is defined as a function of the parameters and state:
+\begin{equation}
+E_{\ell}(\theta, s) = \frac{1}{2}\sum_{\ell} \|s_\ell\|^2 \;-\; \sum_{\ell} \rho(s_\ell)^\top W_\ell\, \rho(s_{\ell+1})
+\end{equation}
+Where the first term for this layer is a norm on its activations and the second term symmetrically couples the outputs of the layer $\ell$ and $\ell+1$ after they have been passed through the activation function $\rho$. These energy terms are summed across layers to provide a single, scalar energy function $E(\theta, s)$ for the entire network. Unlike a feedforward network, we cannot simply solve this state $s$ in one pass, as the symmetric connections between layers allow influences from one neuron to reach forward and backward across the entire network. Instead to find a state $s$ of the network given a set of inputs ``clamped'' at the first layer $\ell_0$, we iteratively solve an energy minimization equation through a simulated time:
+\begin{equation}
+\frac{ds}{dt} = -\frac{\partial E}{\partial s}(\theta, s)
+\end{equation}
+Given that the network satisfies Lyapunov conditions, it will eventually descend to a fixed point $s_0^*(\theta)$ which is defined as the ``free equilibrium.'' This energy descent allows us to find the state of the network given a set of inputs. While this descent appears laborious and unnecessary given the simple, single-step operation of feedforward networks, the crucial detail of this method is that it is assumed that a physical computing platform will compute this function implicitly via energy relaxation in continuous time, rather than simulating it step-by-step as is done in a digital computer. 
+
+The free equilibrium state may not provide an output which matches a desired value $y$. Therefore, a scalar cost term $C(s,y)$ is introduced which measures the distance of the state from a desired values. The energy of the network is then augmented with a contribution from this cost term, multiplied by the small scalar value $\beta$: 
+
+\begin{equation}
+F(\theta, s, \beta) = E(\theta, s) - \beta\, C(s, y)
+\end{equation}
+The minus sign means increasing $\beta$ lowers the energy toward the target.
+With this new contribution added to the energy term, the network descends on $F$ to reach a ``nudged'' fixed point. The central result of EP proves that the gradient of a loss function $L(\theta)$ can be found as a difference of values found at each fixed point:
+
+\begin{equation}\label{eq:ep-theorem}
+\frac{\partial L}{\partial \theta} = \lim_{\beta \to 0} \frac{1}{\beta}\left[\frac{\partial E}{\partial \theta}\big(\theta, s_\beta^*\big) - \frac{\partial E}{\partial \theta}\big(\theta, s_0^*\big)\right]
+\end{equation}
+where the minus sign in $F = E - \beta C$ is essential for the formula to hold as written. (Implementation note: the code returns $-\partial L/\partial \theta$ for direct use with gradient descent.) Therefore, by stepping through successive free and nudged equilibrium points, the network dynamics themselves express the information necessary to descend a loss function. 
+
+\subsection{Lock-in Equilibrium Propagation}
+\label{sec:LIEP}
+
+Rather than a single algorithm, we may also view EP as a ``recipe'' to develop variational methods applied to other network types and domains --- for instance, holomorphic EP extends it to the case of complex-valued networks \cite{laborieuxHolomorphicEquilibriumPropagation2022}. Following this example, lock-in EP demonstrates that the principles of EP may also be applied to the domain of oscillators which compute by exchanging relative phase values. To do so, we must first formally define the domain of our phase network's state $s$, define a scalar energy function on this state, and show that descending this energy function will reach a stable state. Next, we define a nudging function and cost term for the network's outputs, and show that the nudged and free states can be used to extract a useful gradient to reduce a loss term. 
+
+\subsubsection{Phase Energy Functions}
+
+Following our prior work, we start by considering a network of $N$ frequency-locked oscillators which produce a vector of complex states $z$ representing the phase of each oscillator with respect to a reference \cite{olin-ammentorpHyperdimensionalComputingProvides2023}. This vector lies on the unit torus in the complex plane, $z \in \T^{d_N} \subset \C^{d_N}$. To define an energy function on this state, the same cosine-similarity based metric used to calculate the ``closeness'' of two phase vectors may be applied directly as the scalar energy function for a single layer:
+
+\begin{equation}\label{eq:phasor_layer_energy}
+    \Phi_\ell =  \Re \langle W_\ell z_{\ell-1}, z_\ell \rangle \;
+\end{equation}
+where $W_\ell$ are real-valued weights. Cosine similarity in the complex plane is calculated by taking the real component of the Hermitian inner product between the weighted drive from the previous layer's state ($W_\ell z_{\ell-1}$) and the layer's current state ($z_\ell$). Similarly, we may define the cost function at the output based on the same metric:
+
+\begin{equation}\label{eq:phasor-cost}
+C(z_L, y) = 1 - \frac{1}{d}\Re\langle z_L, y \rangle.
+\end{equation}
+where $z_L$ is the network's output layer of $d$ oscillators and $y$ is the desired output expressed in terms of relative phases on the same domain as $z$. This allows us to produce the Hamiltonian energy function for the entire network:
+
+\begin{equation}\label{eq:phasor-energy}
+\Phi = \sum_{\ell=1}^L \Re\langle W_\ell z_{\ell-1}, z_\ell \rangle \;-\; \beta\, C(z_L, y),
+\end{equation}
+where $\beta$ is the ``nudging'' term which is manipulated to move the state between free and clamped values.
+
+\subsubsection{Phase Energy Descent}
+
+Given our energy functions, we must next define a settling function which guarantees that an initial state $z$ will descend to a stable fixed point $z_0$ given an input drive to the network, $x$. Our constraint on $z$ --- that it resides on a manifold within complex space, with $z \bar{z} =1$ --- places a restriction on the state which allows Wirtinger calculus to be applied to provide derivatives of our real, scalar energy function. In this case, it can be shown that:
+
+\begin{align}
+\frac{\partial \Phi}{\partial \bar{z}_\ell} &= W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1}, \qquad \ell = 1,\dots,L-1, \label{eq:grad-hidden}\\
+\frac{\partial \Phi}{\partial \bar{z}_L} &= W_L z_{L-1} + \frac{\beta}{d}\, y. \label{eq:grad-output}
+\end{align}
+for internal and output layers in the network. By negating these terms, we produce a continuous-time gradient flows in the complex plane $\C^{d_\ell}$ for each layer $\ell$ and the output layer $L+1$:
+
+\begin{align}\label{eq:continuous-flow}
+\frac{\dd z_\ell}{\dd t} = -\gamma z_\ell - \frac{\partial \Phi}{\partial \bar{z}_\ell}
+= -z_\ell + W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1},
+\qquad \ell = 1,\dots,L,\\
+W_{L+1}^\top z_{L+1} \equiv \frac{\beta}{d}\, y
+\end{align}
+
+where $\gamma$ is a linear decay term with $\gamma > 0$ to ensure that the dynamics converge to a Lyapunov-stable point. This decay is \emph{not} derived from the energy $\Phi$; it is a design choice (or from the oscillator physics) that provides dissipation. The energy provides only the coupling forces between layers. However, while we have utilized derivatives assuming that $z$ remains on the unit torus in $\C$, following the above gradient flow does not enforce this condition. To do so, we project the update onto the tangent space of the torus with each step and discretize the update equation to yield the following energy descent step:
+
+\begin{equation}\label{eq:discrete-settle}
+z_\ell \;\leftarrow\; \unitproject\Big( z_\ell + \dt\big( -\gamma z_\ell + W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1} \big) \Big),
+\qquad \ell = 1,\dots,L,
+\end{equation}
+where $\unitproject(g) = g/|g|$ (entrywise) normalizes each component to the unit circle. Setting $\gamma=1$ gives the form used in experiments. This projected Euler update descends to a stable fixed point $z_0$ on the unit torus. The projection onto the torus takes the place of a saturating nonlinearity in a standard, real-valued network; rather than applying a function like $\rho(s)$, the topological constraint $|z|=1$ enforces boundedness.
+
+\subsubsection{Nudged Phases}
+
+We have introduced the cost function $C(z_L,y)$ and nudging term $\beta$, but have not yet established how the free and clamped stable states reached through these terms can be used to derive useful update gradients; we next turn our attention to deriving these terms. 
+
+Given an input, output, and weights, we may view the relationship between the nudging term $\beta$ and the resulting fixed point as a map $z^*(\beta)$. In the case of phasor networks with a complex $z$ and the unit projection function as part of the update to reach a fixed point, this map is \textit{non-holomorphic}. Concretely, if we linearize this map for a small $\beta$ around the free equilibrium point $z^*_0$:
+
+\begin{equation}
+z^*(\beta) \approx z_0^* + a\,\beta + b\,\bar{\beta},
+\end{equation}
+we may again determine the Wirtinger derivatives:
+
+\begin{equation}
+a = \frac{\partial z^*}{\partial \beta}\Big|_{\beta=0},
+\qquad
+b = \frac{\partial z^*}{\partial \bar{\beta}}\Big|_{\beta=0}
+\end{equation}
+where both $a$ and $b$ are non-zero due to the non-holomorphic update step. As a result, calculating a loss dependent on the gradient of the state with respect to the nudge must be calculated from \textit{both} Wirtinger terms:
+
+\begin{equation}
+\frac{\dd z^*}{\dd \beta_R} = a + b.
+\end{equation}
+In order to extract these terms, we may first imagine varying $\beta$ as a complex value through time, with $\beta=e^{i\omega_p t}$, where $\omega_p$ is the frequency of the probe. Under the linear map, this probe will produce two, separate frequency sidebands:
+\begin{equation}
+z(t) - z_0^* \approx a\,\beta(t) + b\,\bar{\beta}(t) = a\varepsilon e^{\im\omega_p t} + b\varepsilon e^{-\im\omega_p t}.
+\end{equation}
+While the signal from this difference can provide both the $a$ and $b$ terms necessary to produce a loss gradient, their placement in different frequencies is inconvenient and would require separate decoding steps. However, if instead of a complex probe, we substitute a real, cosine-driven $\beta$ probe $\beta = \cos(\omega_p t)$, our substitution into the linear map shows that both Wirtinger components contribute \emph{coherently} to directly produce the sum $a+b$ needed to calculate our loss gradient at the frequency $\omega_p$:
+
+\begin{equation}
+z(t) - z_0^* \approx \frac{\varepsilon}{2}(a+b) e^{\im\omega_p t} + \frac{\varepsilon}{2}(a+b) e^{-\im\omega_p t} = \varepsilon(a+b)\cos(\omega_p t).
+\end{equation}
+Thus, by first reaching a stable, fixed fee point $z_0^*$ and then injecting the cost term into our energy with a temporally-varying magnitude controlled by $\beta=cos(\omega_p t)$, the resulting difference between the free and nudged states provides the information necessary to reduce the cost function of the network given the current weights.
+
+\subsubsection{Loss Descent}
+
+To close the loop from reducing cost at current weights into reduction of the loss function of the network as weights are varied, we derive the formal relation between the difference in free and nudged phases shown above ($z(t) - z_0^*$) and the gradient of loss with respect to weights ($\partial \mathcal{L} / \partial W$). First, we revisit our energy function (Eqn. \ref{eq:phasor-energy}) and derive it with respect to weights: 
+
+\begin{equation}
+\frac{\partial \Phi}{\partial W_\ell} = \Re\big( z_\ell z_{\ell-1}^H \big) \;\equiv\; H_\ell.
+\end{equation}
+where $z_{\ell-1}^H$ is the Hermitian conjugate of the presynaptic state $z_{\ell-1}$. $H_\ell$ represents the Hebbian product for each layer, which we may interpret as the similarity between each pre-synaptic state $z_{\ell-1}$ and post-synaptic state $z_\ell$. When the value $\beta$ controlling the contribution of the cost function to the network's total energy is varied following the cosine probe, the states of the network oscillate, with:
+
+\begin{equation}
+    z_\ell(t) \approx z_{\ell,0}^* + \delta z_\ell(t)
+\end{equation}
+where $\delta z_\ell(t)$ is proportional to the amplitude of the cosine probe $\epsilon$ and oscillates at $\omega_p$. Substituting this into into our Hebbian per-layer product, we obtain:
+
+\begin{equation}
+H_\ell(t) = \Re\big( z_\ell(t) z_{\ell-1}(t)^H \big)
+\approx H_{\ell,0} + \Re\big( \delta z_\ell(t) z_{\ell-1,0}^{*H} + z_{\ell,0}^* \delta z_{\ell-1}(t)^H \big).
+\end{equation}
+Thus, when the $\beta$ term is varied following the cosine probe, the Hebbian alignment of the entire network fluctuates at the frequency of the probe $\omega_p$ and with an amplitude proportional to the network's overall energy gradient ${\partial \Phi}/{\partial W_\ell}$. To demodulate this quantity, the per-layer Hebbian values are multiplied by another cosine probe and averaged over several sampling periods:
+
+\begin{equation}
+\langle H_\ell \rangle_{\omega_p} = \frac{2}{T}\int_0^T H_\ell(t) \cos(\omega_p t) \, \dd t
+\;\approx\; \frac{\varepsilon}{2}\,\frac{\partial \Phi}{\partial W_\ell}.
+\end{equation}
+In the linear regime where our approximations for the difference in fixed states and the beta map hold, we can therefore obtain the overall per-layer update:
+
+\begin{equation}\boxed{
+\frac{\partial \mathcal{L}}{\partial W_\ell}
+\;=\;
+-\frac{2}{\varepsilon}\,
+\Big\langle \Re\big(z_\ell z_{\ell-1}^H\big)\;\cos(\omega_p t) \Big\rangle_T
+}\label{eq:lockin-gradient}
+\end{equation}
+where $T$ is an integer number of the probe periods determined by $\omega_p$. This final formula enables the gradient of the network's loss --- equivalently, its cost at the free point --- with respect to weights to be approximated. As this operation involves injecting a known AC signal and demodulating a related quantity over several periods, we term it ``lock-in'' equilibrium propagation (LIEP), given its reference to the common technique for signal acquisition. 
+
+By applying standard methods such as stochastic gradient descent with the gradient estimates provided by LIEP, the phase-based network can be trained to produce specific output phases given a set of inputs and weights. This ability in itself is not novel, as other standard backpropagation-based methods have already established this capability. However, as far as the authors are aware, this is the first published method for training phase-based networks which does not require a separate backwards and forwards pass. Additionally, this method produces signals local to each oscillator in the network which allows its weights to be updated locally. After demonstrating the basic empirical proof of this method and its applications, we also derive a 3-factor learning rule implementation of LIEP as part of our results below.

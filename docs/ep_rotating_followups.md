@@ -1,6 +1,6 @@
 # Open questions after the rotating-substrate result
 
-> **Derivation:** `docs/phasor_lockin_derivation.tex` §Rotating Substrate &nbsp;|&nbsp;
+> **Derivation:** `docs/phasor_lockin_derivation.tex` §Rotating Frame &nbsp;|&nbsp;
 > **Narrative:** `docs/ep_rotating_extension.md` &nbsp;|&nbsp;
 > **Measurements:** `results/ep_readout_floor/FINDINGS.md` &nbsp;|&nbsp;
 > **Gates:** `scripts/ep_rotating_gates.jl` &nbsp;|&nbsp;

@@ -168,7 +168,7 @@ structural sources:
    exactly in the co-rotating frame, so it contributes nothing to the
    equilibrium structure. Cross-channel diversity comes from `λ` and
    from `W`. See `docs/phasor_lockin_derivation.tex` §Rotating
-   Substrate.
+   Frame.
 
 Because of (1), the natural variational principle is gradient flow on
 the **torus**, not on `ℂ^N`. In phase coordinates `z_l = e^{iπθ_l}`:

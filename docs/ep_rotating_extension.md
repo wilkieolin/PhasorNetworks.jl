@@ -1,6 +1,6 @@
 # Rotating (resonate-and-fire) EP: what changes, and what doesn't
 
-> **Formal derivation:** `docs/phasor_lockin_derivation.tex` §Rotating Substrate &nbsp;|&nbsp;
+> **Formal derivation:** `docs/phasor_lockin_derivation.tex` §Rotating Frame &nbsp;|&nbsp;
 > **Gates:** `scripts/ep_rotating_gates.jl` &nbsp;|&nbsp;
 > **CI:** `ep_carrier_tests()` in `test/test_ep.jl`
 >

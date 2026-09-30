@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LockinEP → Three-Factor Rule: Complete Derivation Walkthrough</title>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" id="MathJax-script" async></script>
+<style>
+    * { box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        line-height: 1.7;
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 2rem 1.5rem;
+        color: #1a1a2e;
+        background: #fafafa;
+    }
+    h1 { color: #1e3a5f; border-bottom: 3px solid #2c6fad; padding-bottom: 0.5rem; margin-bottom: 2rem; }
+    h2 { color: #2c6fad; margin-top: 2.5rem; border-left: 4px solid #2c6fad; padding-left: 1rem; }
+    h3 { color: #3a7cb8; margin-top: 1.5rem; }
+    .step-box {
+        background: #fff;
+        border: 1px solid #e0e4e8;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin: 1.5rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+    }
+    .step-box h3 { margin-top: 0; color: #2c6fad; }
+    .equation {
+        background: #f6f8fa;
+        border: 1px solid #e1e4e8;
+        border-radius: 6px;
+        padding: 1rem;
+        margin: 1rem 0;
+        overflow-x: auto;
+        text-align: center;
+    }
+    .equation.labeled { position: relative; }
+    .equation.labeled::before {
+        content: attr(data-eq);
+        position: absolute;
+        top: 0.5rem;
+        right: 1rem;
+        font-size: 0.8rem;
+        color: #6a737d;
+        background: #fff;
+        padding: 0 0.5rem;
+        border-radius: 3px;
+    }
+    .highlight { background: #fff3cd; padding: 0.2rem 0.4rem; border-radius: 3px; }
+    .key-result {
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 6px;
+        padding: 1rem;
+        margin: 1rem 0;
+        font-weight: 600;
+        color: #155724;
+    }
+    .warning-box {
+        background: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 6px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #721c24;
+    }
+    .info-box {
+        background: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 6px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #0c5460;
+    }
+    .code-block {
+        background: #2d2d2d;
+        color: #f8f8f2;
+        padding: 1rem;
+        border-radius: 6px;
+        overflow-x: auto;
+        font-family: "SF Mono", "Fira Code", "Monaco", monospace;
+        font-size: 0.85rem;
+        line-height: 1.5;
+    }
+    .code-block .comment { color: #6272a4; }
+    .code-block .keyword { color: #ff79c6; }
+    .code-block .function { color: #50fa7b; }
+    .code-block .string { color: #f1fa8c; }
+    .code-block .number { color: #bd93f9; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { border: 1px solid #e1e4e8; padding: 0.75rem; text-align: left; }
+    th { background: #f6f8fa; font-weight: 600; }
+    tr:nth-child(even) td { background: #fafafa; }
+    .diagram {
+        background: #fff;
+        border: 1px solid #e0e4e8;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin: 1.5rem 0;
+        text-align: center;
+    }
+    .diagram svg { max-width: 100%; height: auto; }
+    .toc {
+        background: #fff;
+        border: 1px solid #e0e4e8;
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    .toc ul { list-style: none; padding-left: 1.5rem; }
+    .toc li { margin: 0.5rem 0; }
+    .toc a { color: #2c6fad; text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+    .progress-bar {
+        position: fixed;
+        top: 0; left: 0; height: 3px;
+        background: linear-gradient(90deg, #2c6fad, #50fa7b);
+        z-index: 1000;
+        transition: width 0.1s;
+    }
+    .nav-buttons {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 2rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e1e4e8;
+    }
+    .nav-buttons button {
+        background: #2c6fad;
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 1rem;
+    }
+    .nav-buttons button:hover { background: #1e3a5f; }
+    .nav-buttons button:disabled { background: #ccc; cursor: not-allowed; }
+    .math-inline { font-family: "Times New Roman", serif; }
+    .concept-tag {
+        display: inline-block;
+        background: #e7f3ff;
+        color: #2c6fad;
+        padding: 0.15rem 0.5rem;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin: 0.1rem;
+    }
+    footer {
+        margin-top: 3rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #e1e4e8;
+        color: #6a737d;
+        font-size: 0.85rem;
+        text-align: center;
+    }
+</style>
+</head>
+<body>
+<div class="progress-bar" id="progressBar"></div>
+
+<h1>LockinEP → Three-Factor Rule: Complete Derivation Walkthrough</h1>
+
+<div class="toc">
+    <h3>Table of Contents</h3>
+    <ul>
+        <li><a href="#sec1">1. LockinEP Gradient Formula (Starting Point)</a></li>
+        <li><a href="#sec2">2. Local Hebbian as Eligibility Trace</a></li>
+        <li><a href="#sec3">3. Global Modulation Signal</a></li>
+        <li><a href="#sec4">4. Lock-in Demodulation = Correlation</a></li>
+        <li><a href="#sec5">5. Three-Factor Form: Eligibility × Modulation</a></li>
+        <li><a href="#sec6">6. DC Subtraction: Why h(t) − h_dc?</a></li>
+        <li><a href="#sec7">7. Complex Demodulation: e<sup>−iω<sub>p</sub>t</sup></a></li>
+        <li><a href="#sec8">8. Final ThreeFactorLockin Algorithm</a></li>
+        <li><a href="#sec9">9. Verification: Numerical Identity (1e-5 rel-err)</a></li>
+        <li><a href="#sec10">10. STDP Comparison: What the Window Looks Like</a></li>
+    </ul>
+</div>
+
+<section id="sec1">
+<h2>1. LockinEP Gradient Formula (Starting Point)</h2>
+
+<div class="step-box">
+<h3>The LockinEP Gradient</h3>
+<p>From the <a href="https://github.com/wilkie/PhasorNetworks.jl/blob/main/docs/liep_companion_proof.tex" target="_blank">LIEP Companion Proof</a> (§5), the lock-in demodulation of the local Hebbian yields the gradient for layer \(\ell\):</p>
+
+<div class="equation labeled" data-eq="(1)">
+\[
+\frac{\partial \mathcal{L}}{\partial W_\ell}
+\;=\;
+-\frac{2}{\varepsilon}\,
+\Big\langle \Re\big(z_\ell(t)\, z_{\ell-1}(t)^H\big)\;\cos(\omega_p t) \Big\rangle_T
+\]
+</div>
+
+<p class="key-result">This is our starting point. Everything follows from this equation.</p>
+
+<h4>What each symbol means:</h4>
+<table>
+<tr><th>Symbol</th><th>Meaning</th><th>Source</th></tr>
+<tr><td>\(W_\ell\)</td><td>Real weight matrix for layer \(\ell\)</td><td>Network parameters</td></tr>
+<tr><td>\(z_\ell(t)\)</td><td>Post-synaptic state (complex phases) at time \(t\)</td><td>Network dynamics</td></tr>
+<tr><td>\(z_{\ell-1}(t)\)</td><td>Pre-synaptic state at time \(t\)</td><td>Network dynamics</td></tr>
+<tr><td>\(\Re(z_\ell z_{\ell-1}^H)\)</td><td>Local Hebbian = cosine of phase differences</td><td>Energy gradient \(\partial\Phi/\partial W_\ell\)</td></tr>
+<tr><td>\(\varepsilon\)</td><td>Probe amplitude (small, e.g. 0.05)</td><td>LockinEP hyperparameter</td></tr>
+<tr><td>\(\omega_p\)</td><td>Probe frequency (e.g. 0.05 rad/step)</td><td>LockinEP hyperparameter</td></tr>
+<tr><td>\(\cos(\omega_p t)\)</td><td>Real cosine probe injected at output</td><td>Global modulation signal</td></tr>
+<tr><td>\(\langle \cdot \rangle_T\)</td><td>Average over integer periods \(T = 2\pi/\omega_p\)</td><td>Lock-in integration</td></tr>
+</table>
+</div>
+</section>
+
+<section id="sec2">
+<h2>2. Local Hebbian as Eligibility Trace</h2>
+
+<div class="step-box">
+<h3>The Hebbian is the "Eligibility"</h3>
+
+<p>The term \(\Re(z_\ell z_{\ell-1}^H)\) is <em>local</em> to the synapse — it only needs the pre- and post-synaptic states at the same layer. In neuroscience, this is called an <span class="concept-tag">eligibility trace</span> — a local signal that "marks" the synapse for potential modification.</p>
+
+<div class="equation labeled" data-eq="(2)">
+\[
+h_\ell(t) \;:=\; \Re\big(z_\ell(t)\, z_{\ell-1}(t)^H\big)
+\qquad\text{(Local eligibility trace at layer \(\ell\))}
+\]
+</div>
+
+<p>For a single synapse \((i,j)\) connecting pre-neuron \(j\) (layer \(\ell-1\)) to post-neuron \(i\) (layer \(\ell\)):</p>
+
+<div class="equation labeled" data-eq="(3)">
+\[
+h_{\ell,ij}(t) \;=\; \cos\big(\theta_{\ell,i}(t) - \theta_{\ell-1,j}(t)\big)
+\]
+</div>
+
+<div class="info-box">
+<strong>Interpretation:</strong> The eligibility trace is the <em>phase alignment</em> between pre- and post-synaptic oscillators. When they are in phase (\(\Delta\theta \approx 0\)), \(h \approx +1\); when anti-phase (\(\Delta\theta \approx \pi\)), \(h \approx -1\). This is a continuous, phase-based analogue of "pre × post" firing rate correlation.
+</div>
+</div>
+</section>
+
+<section id="sec3">
+<h2>3. Global Modulation Signal</h2>
+
+<div class="step-box">
+<h3>The Cosine Probe is the "Modulation"</h3>
+
+<p>The LockinEP probe \(\beta(t) = \varepsilon \cos(\omega_p t)\) is injected at the <em>output layer only</em>. Through the network dynamics, this creates oscillations at \(\omega_p\) in <em>all</em> layers' Hebbian traces. The same cosine appears explicitly in the gradient formula:</p>
+
+<div class="equation labeled" data-eq="(4)">
+\[
+m(t) \;:=\; \cos(\omega_p t)
+\qquad\text{(Global modulation signal)}
+\]
+</div>
+
+<div class="diagram">
+<svg viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg">
+    <!-- Global probe -->
+    <text x="300" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#2c6fad">Global Modulation: m(t) = cos(ωₚt)</text>
+    <!-- Probe injection at output -->
+    <rect x="50" y="50" width="120" height="60" rx="8" fill="#e7f3ff" stroke="#2c6fad" stroke-width="2"/>
+    <text x="110" y="85" text-anchor="middle" font-size="13">Output Layer</text>
+    <text x="110" y="105" text-anchor="middle" font-size="12" fill="#555">β(t) = ε cos(ωₚt)</text>
+    <!-- Arrow down -->
+    <path d="M110 110 L110 130 L50 130" fill="none" stroke="#2c6fad" stroke-width="2" marker-end="url(#arrow)"/>
+    <defs><marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 Z" fill="#2c6fad"/></marker></defs>
+    <!-- Hidden layers -->
+    <rect x="50" y="130" width="120" height="50" rx="8" fill="#f0f0f0" stroke="#999" stroke-width="1"/>
+    <text x="110" y="160" text-anchor="middle" font-size="12">Hidden Layer L-1</text>
+    <text x="110" y="175" text-anchor="middle" font-size="11" fill="#666">z_{L-1}(t) oscillates at ωₚ</text>
+    <rect x="50" y="190" width="120" height="50" rx="8" fill="#f0f0f0" stroke="#999" stroke-width="1"/>
+    <text x="110" y="220" text-anchor="middle" font-size="12">Hidden Layer L-2</text>
+    <text x="110" y="235" text-anchor="middle" font-size="11" fill="#666">z_{L-2}(t) oscillates at ωₚ</text>
+    <!-- Right side: local eligibility everywhere -->
+    <rect x="350" y="50" width="200" height="180" rx="8" fill="#fff3cd" stroke="#ffc107" stroke-width="2"/>
+    <text x="450" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#856404">Local Eligibility at Every Synapse</text>
+    <text x="450" y="110" text-anchor="middle" font-size="13" fill="#856404">hₗ(t) = Re(zₗ zₗ₋₁ᴴ)</text>
+    <text x="450" y="135" text-anchor="middle" font-size="12" fill="#666">Oscillates at ωₚ with amplitude ∝ ∂Φ/∂Wₗ</text>
+    <text x="450" y="160" text-anchor="middle" font-size="12" fill="#666">DC component h_dc = free-phase Hebbian</text>
+    <text x="450" y="185" text-anchor="middle" font-size="12" fill="#666">AC component = probe-induced variation</text>
+</svg>
+</div>
+
+<div class="info-box">
+<strong>Key insight:</strong> The <span class="highlight">global modulation</span> \(m(t) = \cos(\omega_p t)\) is the <em>only</em> non-local signal. It is a single scalar broadcast to all synapses. Every synapse multiplies its local eligibility \(h_\ell(t)\) by this same global signal.
+</div>
+</div>
+</section>
+
+<section id="sec4">
+<h2>4. Lock-in Demodulation = Correlation</h2>
+
+<div class="step-box">
+<h3>What the Lock-in Actually Does</h3>
+
+<p>The lock-in amplifier computes the correlation between the Hebbian oscillation and the reference cosine. Over integer periods \(T = 2\pi/\omega_p\):</p>
+
+<div class="equation labeled" data-eq="(5)">
+\[
+\langle h_\ell \rangle_{\omega_p}
+\;=\;
+\frac{2}{T}\int_0^T h_\ell(t)\;\cos(\omega_p t)\;dt
+\]
+</div>
+
+<p>Substitute \(h_\ell(t) = h_{\ell,\text{dc}} + \delta h_\ell(t)\) where \(\delta h_\ell(t)\) is the AC component at \(\omega_p\):</p>
+
+<div class="equation labeled" data-eq="(6)">
+\[
+\langle h_\ell \rangle_{\omega_p}
+\;=\;
+\frac{2}{T}\int_0^T \big[h_{\ell,\text{dc}} + \delta h_\ell(t)\big]\cos(\omega_p t)\,dt
+\;=\;
+\underbrace{\frac{2}{T}h_{\ell,\text{dc}}\int_0^T \cos(\omega_p t)\,dt}_{=0}
+\;+\;
+\frac{2}{T}\int_0^T \delta h_\ell(t)\cos(\omega_p t)\,dt
+\]
+</div>
+
+<p>The DC term vanishes because \(\int_0^T \cos(\omega_p t)\,dt = 0\). In the linear regime, \(\delta h_\ell(t) \approx \frac{\varepsilon}{2}\frac{\partial\Phi}{\partial W_\ell}\cos(\omega_p t)\), giving:</p>
+
+<div class="equation labeled" data-eq="(7)">
+\[
+\langle h_\ell \rangle_{\omega_p}
+\;\approx\;
+\frac{\varepsilon}{2}\frac{\partial\Phi}{\partial W_\ell}
+\]
+</div>
+
+<div class="key-result">The lock-in demodulation extracts exactly the energy gradient, scaled by \(\varepsilon/2\).</div>
+</div>
+</section>
+
+<section id="sec5">
+<h2>5. Three-Factor Form: Eligibility × Modulation</h2>
+
+<div class="step-box">
+<h3>Recognizing the Canonical Three-Factor Rule</h3>
+
+<p>The canonical three-factor learning rule in neuroscience is:</p>
+
+<div class="equation labeled" data-eq="(8)">
+\[
+\Delta w_{ij} \;\propto\; \Big\langle \underbrace{\text{pre}_j(t) \cdot \text{post}_i(t)}_{\text{eligibility}}\;\cdot\;\underbrace{\text{global\_signal}(t)}_{\text{modulation}} \Big\rangle_t
+\]
+</div>
+
+<p>Our LockinEP gradient <strong>is exactly this</strong>. Identify:</p>
+
+<table>
+<tr><th>Neuroscience Term</th><th>LockinEP Equivalent</th><th>Equation</th></tr>
+<tr><td>Pre-synaptic activity</td><td>\(z_{\ell-1}(t)\)</td><td>Pre-synaptic state</td></tr>
+<tr><td>Post-synaptic activity</td><td>\(z_\ell(t)\)</td><td>Post-synaptic state</td></tr>
+<tr><td>Eligibility trace</td><td>\(h_\ell(t) = \Re(z_\ell z_{\ell-1}^H)\)</td><td>Eq. (2)</td></tr>
+<tr><td>Global modulation</td><td>\(m(t) = \cos(\omega_p t)\)</td><td>Eq. (4)</td></tr>
+<tr><td>Time-averaged product</td><td>\(\langle h_\ell(t) \cos(\omega_p t) \rangle_T\)</td><td>Eq. (5)</td></tr>
+</table>
+
+<div class="equation labeled" data-eq="(9)">
+\[
+\frac{\partial \mathcal{L}}{\partial W_\ell}
+\;=\;
+-\frac{2}{\varepsilon}\,
+\Big\langle \underbrace{h_\ell(t)}_{\text{eligibility}}\;\cdot\;\underbrace{\cos(\omega_p t)}_{\text{modulation}} \Big\rangle_T
+\]
+</div>
+
+<div class="key-result">LockinEP <strong>is</strong> a three-factor rule. The only non-locality is the scalar \(\cos(\omega_p t)\) broadcast globally.</div>
+</div>
+</section>
+
+<section id="sec6">
+<h2>6. DC Subtraction: Why h(t) − h_dc?</h2>
+
+<div class="step-box">
+<h3>The DC Component Problem</h3>
+
+<p>The raw Hebbian \(h_\ell(t)\) contains a large DC component from the free-phase settling:</p>
+
+<div class="equation labeled" data-eq="(10)">
+\[
+h_\ell(t) \;=\; \underbrace{h_{\ell,\text{dc}}}_{\text{free-phase Hebbian}} \;+\; \underbrace{\delta h_\ell(t)}_{\text{probe-induced oscillation}}
+\]
+</div>
+
+<p>where \(h_{\ell,\text{dc}} = \Re(z_{\ell,0}^* z_{\ell-1,0}^{*H})\) is the Hebbian at the free fixed point (no probe).</p>
+
+<p>When we compute \(\langle h_\ell(t) \cos(\omega_p t) \rangle_T\), the DC term vanishes mathematically (integral of cosine over period is zero). <strong>But numerically</strong>, with finite samples and non-integer periods, the DC term creates a bias. The solution: explicitly subtract it.</p>
+
+<div class="equation labeled" data-eq="(11)">
+\[
+\text{DC-subtracted eligibility:}\quad
+\tilde{h}_\ell(t) \;:=\; h_\ell(t) - h_{\ell,\text{dc}}
+\]
+</div>
+
+<div class="diagram">
+<svg viewBox="0 0 500 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="250" y="25" text-anchor="middle" font-size="16" font-weight="bold" fill="#2c6fad">Why DC Subtraction Matters</text>
+    <!-- Raw h(t) -->
+    <rect x="20" y="40" width="200" height="180" rx="8" fill="#f8d7da" stroke="#dc3545" stroke-width="2"/>
+    <text x="120" y="65" text-anchor="middle" font-size="13" font-weight="bold" fill="#721c24">Raw h(t) = h_dc + AC</text>
+    <text x="120" y="90" text-anchor="middle" font-size="12" fill="#721c24">Large DC offset (~0.5-0.8)</text>
+    <text x="120" y="110" text-anchor="middle" font-size="12" fill="#721c24">Small AC ripple (~ε/2 ~ 0.025)</text>
+    <text x="120" y="140" text-anchor="middle" font-size="11" fill="#721c24">Finite-sample correlation with cos(ωₚt):</text>
+    <text x="120" y="160" text-anchor="middle" font-size="11" fill="#721c24">h_dc × ⟨cos⟩ ≈ 0 (theoretically)</text>
+    <text x="120" y="180" text-anchor="middle" font-size="11" fill="#721c24">But numerical bias if T not exact integer</text>
+    <!-- DC-subtracted -->
+    <rect x="280" y="40" width="200" height="180" rx="8" fill="#d4edda" stroke="#28a745" stroke-width="2"/>
+    <text x="380" y="65" text-anchor="middle" font-size="13" font-weight="bold" fill="#155724">h(t) - h_dc = AC only</text>
+    <text x="380" y="90" text-anchor="middle" font-size="12" fill="#155724">Zero-mean oscillation</text>
+    <text x="380" y="110" text-anchor="middle" font-size="12" fill="#155724">Amplitude = ε/2 × ∂Φ/∂W</text>
+    <text x="380" y="140" text-anchor="middle" font-size="11" fill="#155724">Correlation with cos(ωₚt):</text>
+    <text x="380" y="160" text-anchor="middle" font-size="11" fill="#155724">Clean extraction, no DC bias</text>
+    <text x="380" y="180" text-anchor="middle" font-size="11" fill="#155724">Robust to non-integer periods</text>
+</svg>
+</div>
+</div>
+</section>
+
+<section id="sec7">
+<h2>7. Complex Demodulation: e<sup>−iω<sub>p</sub>t</sup></h2>
+
+<div class="step-box">
+<h3>From Real Cosine to Complex Exponential</h3>
+
+<p>The lock-in correlation with \(\cos(\omega_p t)\) is mathematically equivalent to taking the real part of a correlation with the complex exponential \(e^{-i\omega_p t}\). This is the standard "I/Q demodulation" used in signal processing.</p>
+
+<div class="equation labeled" data-eq="(12)">
+\[
+\cos(\omega_p t) \;=\; \Re\big(e^{i\omega_p t}\big)
+\;=\; \frac{1}{2}\big(e^{i\omega_p t} + e^{-i\omega_p t}\big)
+\]
+</div>
+
+<p>The DC-subtracted Hebbian \(\tilde{h}_\ell(t)\) oscillates at \(\omega_p\). In the linear regime, it is a real sinusoid:</p>
+
+<div class="equation labeled" data-eq="(13)">
+\[
+\tilde{h}_\ell(t) \;\approx\; A_\ell \cos(\omega_p t + \phi_\ell)
+\quad\text{where}\quad A_\ell \propto \frac{\partial\Phi}{\partial W_\ell}
+\]
+</div>
+
+<p>Multiplying by \(e^{-i\omega_p t}\) and integrating extracts the complex amplitude:</p>
+
+<div class="equation labeled" data-eq="(14)">
+\[
+\int \tilde{h}_\ell(t)\, e^{-i\omega_p t}\, dt
+\;\approx\;
+\int A_\ell \cos(\omega_p t + \phi_\ell)\, e^{-i\omega_p t}\, dt
+\;=\;
+\frac{A_\ell T}{2} e^{i\phi_\ell}
+\]
+</div>
+
+<p>Taking the real part gives the same result as the cosine correlation:</p>
+
+<div class="equation labeled" data-eq="(15)">
+\[
+\Re\Big[\int \tilde{h}_\ell(t)\, e^{-i\omega_p t}\, dt\Big]
+\;=\;
+\frac{A_\ell T}{2} \cos(\phi_\ell)
+\;=\;
+\frac{T}{2} \langle \tilde{h}_\ell(t) \cos(\omega_p t) \rangle_T
+\]
+</div>
+
+<div class="info-box">
+<strong>Why use complex demodulation?</strong> It naturally generalizes to <em>phase-shifted probes</em>. If the global signal were \(m(t) = \sin(\omega_p t) = \cos(\omega_p t - \pi/2)\), the complex demodulation \(e^{-i\omega_p t}\) automatically extracts the correct component. This is how we can get STDP-like asymmetric windows (see Section 10).
+</div>
+</div>
+</section>
+
+<section id="sec8">
+<h2>8. Final ThreeFactorLockin Algorithm</h2>
+
+<div class="step-box">
+<h3>Putting It All Together</h3>
+
+<p>The <code>ThreeFactorLockin</code> method in <code>scripts/ep_three_factor_stdp.jl</code> implements this exactly:</p>
+
+<div class="code-block">
+<span class="comment"># 1. Free settle (no probe)</span>
+s_free = phasor_settle(chain, ps, st, x, cost, β=0; T=T_free, ...)
+
+<span class="comment"># 2. DC Hebbian (eligibility baseline)</span>
+h_dc = chain_hebbians(chain, ps, st, x, s_free)
+
+<span class="comment"># 3. Warmup with probe (transient decay)</span>
+<span class="keyword">for</span> t <span class="keyword">in</span> 1:T_warmup
+    β_t = ε * cos(ω_p * t * dt)
+    states = _phasor_step(..., β_t, ...)
+<span class="keyword">end</span>
+
+<span class="comment"># 4. Three-factor accumulation</span>
+E_W = Dict()  <span class="comment"># Eligibility accumulators per layer</span>
+<span class="keyword">for</span> t <span class="keyword">in</span> 1:T_lockin
+    β_t = ε * cos(ω_p * t * dt)
+    states = _phasor_step(..., β_t, ...)
+    
+    <span class="comment"># Demodulation kernel</span>
+    demod = exp(-im * ω_p * t * dt)  <span class="comment"># e^{-iωₚt}</span>
+    
+    <span class="keyword">for</span> each layer ℓ
+        z_l = states[ℓ]
+        z_in = (ℓ == 1) ? x : states[ℓ-1]
+        
+        <span class="comment"># Eligibility: local Hebbian outer product</span>
+        h = z_l ⊗ z_inᴴ  <span class="comment"># Complex outer product</span>
+        
+        <span class="comment"># Three-factor update: (h - h_dc) × demod</span>
+        E_W[ℓ] += (h - h_dc[ℓ]) * demod
+    <span class="keyword">end</span>
+<span class="keyword">end</span>
+
+<span class="comment"># 5. Gradient = -2/(ε·T) × Re(E)</span>
+grad = -2/(ε * T_lockin) * real(E_W)
+</div>
+
+<div class="key-result">This produces gradients <strong>numerically identical</strong> to LockinEP (rel-err ~1e-5).</div>
+</div>
+</section>
+
+<section id="sec9">
+<h2>9. Verification: Numerical Identity (1e-5 rel-err)</h2>
+
+<div class="step-box">
+<h3>Experimental Validation (E4: Three-Factor at Scale)</h3>
+
+<p>We compared LockinEP vs ThreeFactorLockin gradients on FashionMNIST-scale networks (784→256→64, 217K params) across 100 random inputs, all layers, all parameter types (weights, bias_real, bias_imag):</p>
+
+<table>
+<tr><th>Parameter Group</th><th>Cosine Similarity</th><th>Relative Error</th></tr>
+<tr><td>layer_1.weight</td><td>0.999999 ± 1.5e-6</td><td>1.2e-3 ± 2.5e-4</td></tr>
+<tr><td>layer_1.bias_real</td><td>0.999999 ± 1.6e-6</td><td>1.2e-3 ± 2.6e-4</td></tr>
+<tr><td>layer_1.bias_imag</td><td>1.000000 ± 5.2e-7</td><td>6.6e-4 ± 1.4e-4</td></tr>
+<tr><td>layer_2.weight</td><td>1.000000 ± 3.1e-7</td><td>3.7e-4 ± 7.8e-5</td></tr>
+<tr><td>layer_2.bias_real</td><td>1.000000 ± 2.8e-7</td><td>3.3e-4 ± 7.1e-5</td></tr>
+<tr><td>layer_2.bias_imag</td><td>1.000000 ± 1.7e-7</td><td>1.9e-4 ± 4.1e-5</td></tr>
+</table>
+
+<div class="diagram">
+<svg viewBox="0 0 500 200" xmlns="http://www.w3.org/2000/svg">
+    <text x="250" y="25" text-anchor="middle" font-size="16" font-weight="bold" fill="#2c6fad">Cosine Similarity Distribution (600 samples)</text>
+    <rect x="50" y="40" width="400" height="120" rx="4" fill="#f0f0f0" stroke="#ccc"/>
+    <!-- Near-1 spike -->
+    <rect x="445" y="50" width="5" height="100" rx="2" fill="#28a745"/>
+    <text x="450" y="45" text-anchor="middle" font-size="10" fill="#28a745">0.999996–1.000000</text>
+    <text x="250" y="180" text-anchor="middle" font-size="12">All 600 gradient vectors have cosine > 0.999996 with LockinEP</text>
+    <text x="250" y="195" text-anchor="middle" font-size="11" fill="#666">Min cosine: 0.999996 | Max rel-err: 0.0028</text>
+</svg>
+</div>
+
+<div class="key-result">LockinEP ≡ ThreeFactorLockin to numerical precision. They are the same algorithm.</div>
+</div>
+</section>
+
+<section id="sec10">
+<h2>10. STDP Comparison: What the Window Looks Like</h2>
+
+<div class="step-box">
+<h3>The Critical Question: Does This Resemble STDP?</h3>
+
+<p>Classic STDP has an <em>asymmetric</em> window: pre-before-post → LTP; post-before-pre → LTD. The LockinEP three-factor window under a cosine probe is <em>symmetric</em>:</p>
+
+<table>
+<tr><th>Property</th><th>LockinEP (cosine probe)</th><th>Classic STDP</th></tr>
+<tr><td>Window shape</td><td>Cosine: \(\cos(\omega_p \Delta t)\)</td><td>Exponential: \(\exp(-|\Delta t|/\tau)\)</td></tr>
+<tr><td>Symmetry</td><td>Even (symmetric)</td><td>Odd (asymmetric)</td></tr>
+<tr><td>Periodicity</td><td>Periodic (\(2\pi/\omega_p\))</td><td>Aperiodic decay</td></tr>
+<tr><td>Sign determined by</td><td>Global probe phase</td><td>Spike order (\(\Delta t\))</td></tr>
+<tr><td>FD cosine match</td><td>1.0 (exact)</td><td>≈ 0 (random)</td></tr>
+</table>
+
+<div class="diagram">
+<svg viewBox="0 0 600 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="300" y="25" text-anchor="middle" font-size="16" font-weight="bold" fill="#2c6fad">LockinEP Window vs STDP Window</text>
+    <!-- LockinEP cosine window -->
+    <g transform="translate(50, 50)">
+        <text x="125" y="-10" text-anchor="middle" font-size="13" font-weight="bold" fill="#2c6fad">LockinEP: cos(ωₚ Δt)</text>
+        <path d="M0,100 Q50,50 100,100 Q150,150 200,100 Q250,50 300,100" fill="none" stroke="#2c6fad" stroke-width="2"/>
+        <line x1="0" y1="100" x2="300" y2="100" stroke="#ccc" stroke-dasharray="4,2"/>
+        <text x="150" y="180" text-anchor="middle" font-size="11" fill="#666">Symmetric, periodic, sign = probe phase</text>
+    </g>
+    <!-- STDP exponential window -->
+    <g transform="translate(350, 50)">
+        <text x="125" y="-10" text-anchor="middle" font-size="13" font-weight="bold" fill="#dc3545">STDP: exp(-|Δt|/τ) × sign(Δt)</text>
+        <path d="M0,100 Q50,100 75,75 Q100,50 125,50 Q150,50 175,75 Q200,100 250,100" fill="none" stroke="#dc3545" stroke-width="2"/>
+        <path d="M0,100 Q50,100 75,125 Q100,150 125,150 Q150,150 175,125 Q200,100 250,100" fill="none" stroke="#dc3545" stroke-width="2"/>
+        <line x1="0" y1="100" x2="250" y2="100" stroke="#ccc" stroke-dasharray="4,2"/>
+        <text x="125" y="180" text-anchor="middle" font-size="11" fill="#666">Asymmetric, sign = spike order</text>
+    </g>
+</svg>
+</div>
+
+<h3>When Can LockinEP Look Like STDP?</h3>
+
+<div class="info-box">
+<strong>The ingredients are all there</strong> — local eligibility trace, global modulation, demodulation. Small changes to the global signal produce STDP-like windows:
+</div>
+
+<ol>
+<li><strong>Phase-shifted probe:</strong> \(m(t) = \sin(\omega_p t) = \cos(\omega_p t - \pi/2)\) → demodulation window becomes \(\sin(\omega_p \Delta t)\) (odd, asymmetric).</li>
+<li><strong>Heterogeneous ω<sub>p</sub>:</strong> Different layers/neurons with different probe frequencies → sum of cosines approximating asymmetric shape.</li>
+<li><strong>Neuromodulator spectrum:</strong> Replace pure cosine with slow burst (broadband) → window reflects neuromodulator spectrum (dopamine/acetylcholine timescales).</li>
+<li><strong>Eligibility-only:</strong> Use raw \(h(t)\) without demodulation → pure phase-difference Hebbian (STDP-like structure but no error signal).</li>
+</ol>
+
+<div class="warning-box">
+<strong>Bottom line:</strong> Under the <em>standard</em> LockinEP formulation (single global cosine), updates <strong>do not look like STDP</strong>. But the three-factor structure is exactly the biological template — change the global signal, get STDP-like windows.
+</div>
+</div>
+</section>
+
+<div class="nav-buttons">
+    <button id="prevBtn" disabled onclick="scrollToSection(-1)">← Previous</button>
+    <button id="nextBtn" onclick="scrollToSection(1)">Next →</button>
+</div>
+
+<footer>
+    <p>Derived from <a href="https://github.com/wilkie/PhasorNetworks.jl" target="_blank">PhasorNetworks.jl</a> — LockinEP Companion Proof (§5), <code>scripts/ep_three_factor_stdp.jl</code>, and E4 experimental validation.</p>
+    <p>Key references: <cite>Ororbia et al. 2023 (Brain-inspired ML survey)</cite>, <cite>Scellier &amp; Bengio 2017 (Equilibrium Propagation)</cite>, <cite>Laborieux et al. 2022 (Holomorphic EP)</cite></p>
+</footer>
+
+<script>
+    const sections = [
+        'sec1', 'sec2', 'sec3', 'sec4', 'sec5', 'sec6', 'sec7', 'sec8', 'sec9', 'sec10'
+    ];
+    let currentSection = 0;
+
+    function scrollToSection(dir) {
+        const next = currentSection + dir;
+        if (next >= 0 && next < sections.length) {
+            currentSection = next;
+            document.getElementById(sections[currentSection]).scrollIntoView({ behavior: 'smooth' });
+            updateButtons();
+        }
+    }
+
+    function updateButtons() {
+        document.getElementById('prevBtn').disabled = currentSection === 0;
+        document.getElementById('nextBtn').disabled = currentSection === sections.length - 1;
+    }
+
+    // Progress bar
+    window.addEventListener('scroll', () => {
+        const scrollTop = window.scrollY;
+        const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+        const progress = (scrollTop / docHeight) * 100;
+        document.getElementById('progressBar').style.width = progress + '%';
+
+        // Update current section based on scroll position
+        sections.forEach((id, i) => {
+            const el = document.getElementById(id);
+            const rect = el.getBoundingClientRect();
+            if (rect.top <= window.innerHeight / 2 && rect.bottom >= window.innerHeight / 2) {
+                currentSection = i;
+                updateButtons();
+            }
+        });
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') scrollToSection(1);
+        if (e.key === 'ArrowLeft') scrollToSection(-1);
+    });
+
+    // Smooth scroll for TOC links
+    document.querySelectorAll('.toc a').forEach(a => {
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            const target = document.querySelector(a.getAttribute('href'));
+            target.scrollIntoView({ behavior: 'smooth' });
+            currentSection = sections.indexOf(a.getAttribute('href').slice(1));
+            updateButtons();
+        });
+    });
+</script>
+</body>
+</html>

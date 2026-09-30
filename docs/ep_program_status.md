@@ -113,7 +113,7 @@ Understated in one direction, overstated in another.
 - For the **analog settle** the conditions are not "roughly" the same, they
   are *identically* the same. With one shared ω the carrier cancels exactly —
   continuous and discrete, at any `dt`, not an adiabatic approximation
-  (`docs/phasor_lockin_derivation.tex` §Rotating Substrate). Gate C measures
+  (`docs/phasor_lockin_derivation.tex` §Rotating Frame). Gate C measures
   rel-err 1e-7–1.3e-4, cos ≥ 0.9999998; Gate E measures the *gradient*
   equivalence at cos = 1.00000000.
 - But "shown for the rotating case" means shown **by equivalence**, not by an
@@ -185,7 +185,7 @@ What is established, and how strongly.
 | EP gradient ≈ true FD on toy chains | **strong** (gated in CI) | `test/test_ep.jl`, rel-err 0.004–0.054 |
 | Lock-in ≈ centered StaticEP at 217K params | **strong** | `lockin_calibration.csv`, cos 0.9983 |
 | Lock-in trains FashionMNIST to static parity | **strong** | `epoch_curves.csv`, 0.8423 vs 0.8361 |
-| Carrier cancels exactly (analog settle) | **proved + gated** | `.tex` §Rotating Substrate; Gates B/C/E |
+| Carrier cancels exactly (analog settle) | **proved + gated** | `.tex` §Rotating Frame; Gates B/C/E |
 | Hebbian is U(1)-invariant (adjoint form) | **gated, with teeth** | Gate D: 9.3e-8 invariant / 1.84 for transpose |
 | Quantizer is *not* U(1)-equivariant | **gated, with teeth** | Gate F: 4e-7 on-grid / 0.021–0.030 off-grid |
 | Adiabatic zone shape at width 256 | **strong** | 960-row grid above |
@@ -581,7 +581,7 @@ cosine against a drifting snapshot reads as noise, indistinguishable from
 | `scripts/ep_readout_frame_check.jl` | reproduces the frame/quantizer measurement |
 | `scripts/ep_adiabatic_sweep.jl` (685 lines) | the sweep harness; stages `variance` / `grid` / `report`; `EPS_*` env knobs |
 | `demos/ep_fashionmnist.jl` | training harness; `EP_MODE=train\|calibrate\|sweep`, `EP_*` env knobs |
-| `docs/phasor_lockin_derivation.tex` | the formal statements (§Rotating Substrate, §Boundary of validity) |
+| `docs/phasor_lockin_derivation.tex` | the formal statements (§Rotating Frame, §Boundary of validity) |
 | `docs/ep_rotating_extension.md` | narrative: what changed, gate results, prototype post-mortem |
 | `docs/ep_rotating_followups.md` | prior open-questions list (superseded in priority by §4 here) |
 | `results/ep_fashionmnist/FINDINGS.md` | scale-up results, basin hopping, GPU characterization |

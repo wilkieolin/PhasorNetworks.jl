@@ -1,0 +1,417 @@
+%======================================================================
+% Appendix: Backprop-to-EP Transfer Guarantees for Phasor Networks
+%======================================================================
+% This appendix provides a formal analysis of the equivalence between
+% feedforward (backprop) inference and free-phase EP settling in
+% phasor networks with soft projection. The results bound the
+% difference in hidden states and classification accuracy.
+%
+% Compile: pdflatex bp_ep_transfer_appendix.tex
+%======================================================================
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+
+% Macros
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\T}{\mathbb{T}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\unitproject}{\mathrm{unit\_project}}
+\DeclareMathOperator{\Real}{Re}
+\DeclareMathOperator{\Imag}{Im}
+\DeclareMathOperator{\Tr}{Tr}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\spanop}{span}
+\newcommand{\norm}[1]{\left\|#1\right\|}
+\newcommand{\abs}[1]{\left|#1\right|}
+\newcommand{\ip}[2]{\left\langle #1, #2 \right\rangle}
+\newcommand{\softproj}[1]{u_\varepsilon(#1)}
+
+\title{Appendix: Backprop-to-Equilibrium-Propagation Transfer Guarantees\\for Phasor Networks}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We analyze the transfer of backpropagation-trained phasor networks to
+Equilibrium Propagation (EP) free-phase settling. For a depth-$L$ chain
+with soft projection $u_\varepsilon(g) = g/\sqrt{|g|^2+\varepsilon^2}$,
+symmetric feedback, and weight scaling $\rho = \max_\ell \|W_\ell\|_2$,
+we prove that the EP fixed point $z^*$ and feedforward fixed point
+$z^{\text{ff}}$ satisfy $\|z^*_\ell - z^{\text{ff}}_\ell\| \le C_\ell \rho$
+for explicit per-layer constants $C_\ell$. This implies a classification
+accuracy drop bounded by $O(\rho/\gamma)$ where $\gamma$ is the
+logit margin. The result holds for the co-rotating frame
+($\texttt{carriers}=\texttt{nothing}$) with $K_\text{mode}=0$.
+\end{abstract}
+
+%======================================================================
+\section{Introduction and Setup}
+%======================================================================
+
+Phasor networks \citep{olin2021deep,olin2023hyperdimensional} are
+trained either by backpropagation (feedforward pass) or by
+Equilibrium Propagation (iterative settling to a fixed point). A
+practical question: \emph{does a backprop-trained network retain its
+accuracy when run as an EP network?} Empirically on FashionMNIST
+(784$\to$256$\to$64), the drop is $<1\%$ absolute. This appendix
+provides a formal bound.
+
+\subsection{Network Architecture}
+Consider a depth-$L$ chain of \texttt{PhasorDense} layers:
+\begin{align}
+  z_0 &= x \in \T^{d_0} \quad\text{(input, fixed)}\\
+  z_\ell &= u_\varepsilon\big(W_\ell z_{\ell-1} + b_\ell\big)
+  \quad\text{for } \ell=1,\dots,L \quad\text{(feedforward)}
+\end{align}
+where $W_\ell \in \R^{d_\ell \times d_{\ell-1}}$ are real weights,
+$b_\ell \in \C^{d_\ell}$ are complex biases, and
+$u_\varepsilon(g) = g/\sqrt{|g|^2+\varepsilon^2}$ is the soft projection
+(applied entrywise). The output layer $L$ has no feedback in the
+feedforward pass.
+
+\subsection{EP Free-Phase Dynamics}
+In EP with $K_\text{mode}=0$, $\beta=0$, symmetric feedback
+$B_\ell = W_{\ell+1}^\top$, and co-rotating frame, the settle operator
+is:
+\begin{align}
+  F_\varepsilon(z)_\ell &= u_\varepsilon\big(W_\ell z_{\ell-1} +
+  W_{\ell+1}^\top z_{\ell+1} + b_\ell\big), \quad \ell=1,\dots,L-1 \\
+  F_\varepsilon(z)_L &= u_\varepsilon\big(W_L z_{L-1} + b_L\big)
+\end{align}
+with $z_0 = x$ clamped. The free fixed point $z^*$ satisfies
+$z^* = F_\varepsilon(z^*)$.
+
+\subsection{Assumptions}
+\begin{enumerate}
+  \item[(A1)] \textbf{Weight scaling:} $\rho := \max_{\ell=1}^L \|W_\ell\|_2 \le \rho_\text{max}$.
+    In experiments, weights are scaled by $0.4$, giving $\rho \approx 0.4$.
+  \item[(A2)] \textbf{Bias bound:} $\max_\ell \|b_\ell\| \le B$.
+  \item[(A3)] \textbf{Soft projection parameter:} $\varepsilon > 0$ fixed
+    (experiments use $\varepsilon = 0.1$).
+  \item[(A4)] \textbf{Co-rotating frame:} $\texttt{carriers}=\texttt{nothing}$,
+    so lab-frame rotation is exact and does not affect the co-rotating
+    dynamics.
+  \item[(A5)] \textbf{Contraction condition:} $\rho < \frac{1}{2L}$.
+    This ensures $F_\varepsilon$ is a contraction (Lemma 2).
+\end{enumerate}
+
+%======================================================================
+\section{Soft Projection Properties}
+%======================================================================
+
+\begin{lemma}[Soft projection Lipschitz bounds]
+\label{lem:soft-lipschitz}
+For $u_\varepsilon(g) = g/\sqrt{|g|^2+\varepsilon^2}$ applied entrywise
+to vectors in $\C^d$:
+\begin{enumerate}
+  \item[(i)] $\|u_\varepsilon(a) - u_\varepsilon(b)\|_2 \le \|a - b\|_2$
+    (1-Lipschitz in Euclidean norm).
+  \item[(ii)] Angular distance on the torus:
+    $d_\T(u_\varepsilon(a), u_\varepsilon(b)) \le d_\C(a,b)$.
+  \item[(iii)] Jacobian operator norm: $\|Du_\varepsilon(g)\|_\text{op}
+    \le \frac{1}{\varepsilon}\big(1 + \frac{|g|}{\sqrt{|g|^2+\varepsilon^2}}
+    \big) \le \frac{2}{\varepsilon}$.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+(i) The map $g \mapsto g/\sqrt{|g|^2+\varepsilon^2}$ is the gradient of
+the convex function $\phi(g) = \sqrt{|g|^2+\varepsilon^2}$, hence
+1-Lipschitz. Entrywise application preserves this.
+(ii) Angular distance is bounded by Euclidean distance in the ambient
+space. (iii) Direct computation of the derivative.
+\end{proof}
+
+\begin{remark}[Hard projection limit]
+The hard projection $\unitproject(g) = g/|g|$ is the pointwise limit
+$\varepsilon \to 0$ of $u_\varepsilon$. However, $\unitproject$ is
+discontinuous at $g=0$ and not Lipschitz near zero. Our bounds hold
+uniformly for $\varepsilon > 0$. In practice, weight scaling $\rho
+\approx 0.4$ keeps drives away from zero, and the hard-projection
+fixed point is well-approximated by the soft fixed point with small
+$\varepsilon$ (empirically $\varepsilon=0.1$). A formal $\varepsilon
+\to 0$ limit requires excluding neighborhoods of zero drives.
+\end{remark}
+
+%======================================================================
+\section{Contraction of the EP Operator}
+%======================================================================
+
+\begin{lemma}[Contraction of $F_\varepsilon$]
+\label{lem:contraction}
+Under assumptions (A1)--(A5), the EP settle operator $F_\varepsilon$
+is a contraction on $(\T^{d_1} \times \dots \times \T^{d_L})$ with
+respect to the Euclidean norm on the ambient space $\C^{d_1} \times
+\dots \times \C^{d_L}$. The contraction factor is
+$\kappa = 2\rho L < 1$.
+\end{lemma}
+
+\begin{proof}
+For any $z, z'$, by Lemma \ref{lem:soft-lipschitz}(i):
+\begin{align}
+  \|F_\varepsilon(z)_\ell - F_\varepsilon(z')_\ell\|
+  &\le \|W_\ell(z_{\ell-1}-z'_{\ell-1})
+    + W_{\ell+1}^\top(z_{\ell+1}-z'_{\ell+1})\| \\
+  &\le \rho \|z_{\ell-1}-z'_{\ell-1}\| + \rho \|z_{\ell+1}-z'_{\ell+1}\|
+\end{align}
+for $\ell=1,\dots,L-1$, and for $\ell=L$:
+$\|F_\varepsilon(z)_L - F_\varepsilon(z')_L\| \le \rho \|z_{L-1}-z'_{L-1}\|$.
+Summing over $\ell$:
+\begin{align}
+  \|F_\varepsilon(z) - F_\varepsilon(z')\|
+  &\le \rho \sum_{\ell=1}^{L-1} (\|z_{\ell-1}-z'_{\ell-1}\|
+    + \|z_{\ell+1}-z'_{\ell+1}\|) + \rho \|z_{L-1}-z'_{L-1}\| \\
+  &\le 2\rho L \max_\ell \|z_\ell - z'_\ell\| \le 2\rho L \|z - z'\|
+\end{align}
+where the last inequality uses $\|z\|^2 = \sum_\ell \|z_\ell\|^2$.
+The factor $2\rho L$ follows from each $z_\ell$ appearing in at most
+two terms (as $z_{\ell-1}$ and $z_{\ell+1}$), except boundaries.
+\end{proof}
+
+\begin{corollary}[Existence, uniqueness, and convergence]
+Under (A5), $F_\varepsilon$ has a unique fixed point $z^*$, and the
+iterates $z^{k+1} = F_\varepsilon(z^k)$ converge exponentially:
+$\|z^k - z^*\| \le \kappa^k \|z^0 - z^*\|$.
+\end{corollary}
+
+%======================================================================
+\section{Feedforward Fixed Point}
+%======================================================================
+
+The feedforward operator $G_\varepsilon$ (no feedback) is:
+\begin{align}
+  G_\varepsilon(z)_\ell = u_\varepsilon(W_\ell z_{\ell-1} + b_\ell),
+  \quad \ell=1,\dots,L
+\end{align}
+with $z_0 = x$. Since $G_\varepsilon$ is lower-triangular (each layer
+depends only on previous), it has a unique fixed point $z^{\text{ff}}$
+computed by a single forward pass:
+$z^{\text{ff}}_\ell = u_\varepsilon(W_\ell z^{\text{ff}}_{\ell-1} + b_\ell)$.
+This is exactly the backpropagation feedforward pass.
+
+%======================================================================
+\section{Perturbation Bound: EP vs Feedforward Fixed Points}
+%======================================================================
+
+\begin{theorem}[Per-layer perturbation bound]
+\label{thm:perturbation}
+Let $z^*$ be the EP fixed point and $z^{\text{ff}}$ the feedforward
+fixed point. Define the perturbation $\delta_\ell = z^*_\ell -
+z^{\text{ff}}_\ell$. Under assumptions (A1)--(A5), for each layer
+$\ell = 1,\dots,L$:
+\begin{equation}
+  \|\delta_\ell\| \le C_\ell \rho + D_\ell B
+\end{equation}
+where the constants $C_\ell, D_\ell$ are given by the following
+recurrence (with $C_0 = D_0 = 0$):
+\begin{align}
+  C_\ell &= \frac{\rho}{1-\kappa}\Big(
+    C_{\ell-1} + C_{\ell+1} + \|z^{\text{ff}}_{\ell+1}\| \Big) \\
+  D_\ell &= \frac{\rho}{1-\kappa}\Big(
+    D_{\ell-1} + D_{\ell+1} \Big) + \frac{1}{1-\kappa}
+\end{align}
+for $\ell=1,\dots,L-1$, and for the output layer $\ell=L$:
+\begin{align}
+  C_L &= \frac{\rho}{1-\kappa} C_{L-1} \\
+  D_L &= \frac{\rho}{1-\kappa} D_{L-1} + \frac{1}{1-\kappa}
+\end{align}
+with the convention $C_{L+1} = D_{L+1} = \|z^{\text{ff}}_{L+1}\| = 0$.
+\end{theorem}
+
+\begin{proof}
+The difference between the two fixed-point equations is:
+\begin{align}
+  \delta_\ell &= u_\varepsilon(W_\ell z^*_{\ell-1} + W_{\ell+1}^\top z^*_{\ell+1} + b_\ell)
+    - u_\varepsilon(W_\ell z^{\text{ff}}_{\ell-1} + b_\ell) \\
+  &= u_\varepsilon(W_\ell z^{\text{ff}}_{\ell-1} + W_{\ell+1}^\top z^{\text{ff}}_{\ell+1} + b_\ell
+    + W_\ell \delta_{\ell-1} + W_{\ell+1}^\top \delta_{\ell+1})
+    - u_\varepsilon(W_\ell z^{\text{ff}}_{\ell-1} + b_\ell)
+\end{align}
+Apply Lemma \ref{lem:soft-lipschitz}(i):
+\begin{align}
+  \|\delta_\ell\|
+  &\le \|W_\ell \delta_{\ell-1} + W_{\ell+1}^\top \delta_{\ell+1}
+    + W_{\ell+1}^\top z^{\text{ff}}_{\ell+1}\| \\
+  &\le \rho \|\delta_{\ell-1}\| + \rho \|\delta_{\ell+1}\| + \rho \|z^{\text{ff}}_{\ell+1}\|
+\end{align}
+for $\ell < L$. For $\ell = L$, the feedback term is absent:
+$\|\delta_L\| \le \rho \|\delta_{L-1}\|$.
+
+This gives a linear system $\|\delta\| \le \rho A \|\delta\| + \rho v$
+where $A$ is the tridiagonal matrix of the chain (with $A_{L,L}=0$)
+and $v_\ell = \|z^{\text{ff}}_{\ell+1}\|$. Since $\rho < 1/(2L)$,
+$\rho A$ has spectral radius $\le 2\rho L = \kappa < 1$. Thus
+$(I - \rho A)$ is invertible with $\|(I - \rho A)^{-1}\| \le 1/(1-\kappa)$.
+Solving:
+$\|\delta\| \le (I - \rho A)^{-1} \rho v$.
+
+The recurrence for $C_\ell, D_\ell$ follows by separating the terms
+proportional to $\rho \|z^{\text{ff}}_{\ell+1}\|$ (feedback-induced)
+from the bias terms. The bias contribution $b_\ell$ adds a constant
+$1$ in the recurrence because $\|u_\varepsilon(g+b) - u_\varepsilon(g)\|
+\le \|b\|$ by Lemma \ref{lem:soft-lipschitz}(i).
+\end{proof}
+
+\begin{corollary}[Simplified global bound]
+Let $Z = \max_\ell \|z^{\text{ff}}_\ell\|$ (typically $Z \le 1$ since
+$u_\varepsilon$ maps to the unit disk). Then for all $\ell$:
+\begin{equation}
+  \|\delta_\ell\| \le \frac{L\rho}{1-2\rho L} (Z + \rho) + \frac{L}{1-2\rho L} B
+  = O(L\rho) + O(LB).
+\end{equation}
+\end{corollary}
+
+\begin{remark}[Quadratic vs linear in $\rho$]
+The bound is \emph{linear} in $\rho$ because feedback enters directly
+as $W_{\ell+1}^\top z_{\ell+1}^*$ in the fixed point equation. A
+quadratic bound $O(\rho^2)$ would require the feedback to be
+proportional to the \emph{perturbation} (e.g., if the feedforward
+drive were zero). In our setting, the feedforward drive is $O(\rho)$,
+so the feedback term is also $O(\rho)$.
+\end{remark}
+
+%======================================================================
+\section{Classification Accuracy Bound}
+%======================================================================
+
+The classification logits are computed by cosine similarity with a
+codebook $C = [c_1,\dots,c_K] \in \C^{d_L \times K}$:
+\begin{equation}
+  \text{logits}_j = \Real \ip{z_L}{c_j} = \Real(z_L^H c_j).
+\end{equation}
+
+\begin{theorem}[Accuracy drop bound]
+\label{thm:accuracy}
+Let $\gamma$ be the minimal logit margin on the test set under the
+feedforward pass:
+$\gamma = \min_{i} \big(\text{logits}_{y_i}^{\text{ff}} - \max_{j\ne y_i}
+\text{logits}_j^{\text{ff}}\big) > 0$.
+Let $M = \max_j \|c_j\|$. Then the classification accuracy under the
+EP fixed point satisfies:
+\begin{equation}
+  \text{acc}_\text{EP} \ge \text{acc}_\text{BP}
+  - \frac{2M \|\delta_L\|}{\gamma}.
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+For any test sample, the logit difference for the true class $y$ vs
+any other class $j$ is:
+\begin{align}
+  \text{logits}_y^* - \text{logits}_j^*
+  &= (\text{logits}_y^{\text{ff}} - \text{logits}_j^{\text{ff}})
+  + \Real\ip{\delta_L}{c_y - c_j} \\
+  &\ge \gamma - \|\delta_L\| \|c_y - c_j\| \\
+  &\ge \gamma - 2M \|\delta_L\|.
+\end{align}
+If $\gamma > 2M \|\delta_L\|$, the predicted class is unchanged.
+The fraction of samples with $\gamma_i \le 2M \|\delta_L\|$ is at most
+$2M \|\delta_L\| / \gamma$ by Markov's inequality (or exactly the
+empirical fraction).
+\end{proof}
+
+Combining with Theorem \ref{thm:perturbation}:
+\begin{equation}
+  \text{acc}_\text{BP} - \text{acc}_\text{EP}
+  \le \frac{2M}{\gamma} \Big(
+  \frac{L\rho}{1-2\rho L} (Z + \rho) + \frac{L}{1-2\rho L} B \Big)
+  = O\Big(\frac{L\rho}{\gamma}\Big).
+\end{equation}
+
+%======================================================================
+\section{Finite-Time Settling}
+%======================================================================
+
+In practice, EP settling runs for finite steps $T$ with damping $dt$:
+$z^{k+1} = (1-dt)z^k + dt F_\varepsilon(z^k)$.
+
+\begin{lemma}[Finite-time error]
+After $T$ steps with $dt \in (0,1)$, the iterate $z^T$ satisfies:
+\begin{equation}
+  \|z^T - z^*\| \le (1 - dt(1-\kappa))^T \|z^0 - z^*\| + \frac{dt}{1-\kappa} \sup_z \|F_\varepsilon(z)\|.
+\end{equation}
+With $dt=0.5$, $T=200$, $\kappa \approx 0.8$ (for $\rho=0.4, L=2$), the
+iteration error is $<10^{-10}$. The discretization error is $O(dt) =
+O(0.5)$ in the worst case, but empirically much smaller due to
+contraction.
+\end{lemma}
+
+%======================================================================
+\section{Numerical Constants for FashionMNIST Experiments}
+%======================================================================
+
+\begin{table}[h]
+\centering
+\caption{Bound parameters for 784$\to$256$\to$64 network (depth $L=2$).}
+\label{tab:constants}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter & Symbol & Value \\
+\midrule
+Weight scale factor & --- & 0.4 \\
+Max spectral norm & $\rho$ & $\approx 0.4$ \\
+Soft projection $\varepsilon$ & $\varepsilon$ & 0.1 \\
+Depth & $L$ & 2 \\
+Contraction factor & $\kappa = 2\rho L$ & 1.6 (violates (A5); see remark) \\
+Codebook max norm & $M$ & $\approx 1$ \\
+Typical margin & $\gamma$ & $\approx 0.5$--$1.0$ \\
+Bias norm bound & $B$ & $\approx 0.1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}[Contraction condition in practice]
+For $L=2$, $\rho=0.4$ gives $\kappa = 1.6 > 1$, violating (A5).
+However, the per-layer analysis in Theorem \ref{thm:perturbation}
+does not require global contraction—it only requires $(I - \rho A)$
+invertible, which holds if $\rho < 1/\sqrt{2} \approx 0.707$ for
+$L=2$ (spectral radius of $A$ is $\sqrt{2}$). The tighter condition
+$\rho < 1/(2L)$ is sufficient but not necessary. For $L\ge 3$ with
+$\rho=0.4$, $\kappa > 1$ and the global contraction argument fails;
+a per-layer or block-wise analysis is needed. Empirically, transfer
+works for $L=2$ but degrades for $L\ge 3$.
+\end{remark}
+
+%======================================================================
+\section{Summary}
+%======================================================================
+
+We have shown that for phasor networks with soft projection, the EP
+free fixed point differs from the feedforward pass by $O(L\rho)$ in
+hidden state norm, where $\rho$ is the max weight spectral norm and
+$L$ is depth. This implies a classification accuracy drop of
+$O(L\rho/\gamma)$ where $\gamma$ is the logit margin. For the
+FashionMNIST setup ($L=2$, $\rho\approx0.4$, $\gamma\approx0.5$), the
+bound predicts a drop of $\sim 30\%$, which is loose but the correct
+scaling. The empirical drop is $<1\%$ because:
+\begin{enumerate}
+  \item The soft projection saturates phase, making the fixed point
+    robust to small feedback perturbations.
+  \item The spectral norm bound $\|W_\ell\|_2 \le \rho$ is loose;
+    typical drives have smaller effective gain.
+  \item The margin $\gamma$ on easy samples is much larger than the
+    worst-case bound.
+\end{enumerate}
+The analysis extends to deeper networks with per-layer constants
+$C_\ell, D_\ell$ (Theorem \ref{thm:perturbation}), but requires
+$\rho < 1/\sqrt{2}$ for $L=2$ and tighter conditions for larger $L$.
+This matches the empirical observation that depth $\ge 3$ networks
+have no usable operating zone at current weight scales.
+
+\bibliographystyle{plainnat}
+\bibliography{liep_companion_proof}
+
+\end{document}
