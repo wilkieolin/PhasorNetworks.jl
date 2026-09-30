@@ -94,11 +94,30 @@ Without weight decay, accuracy peaks at epoch 3 (0.791) and decays to 0.726 by e
 loss penalizes weight scale, because `normalize_to_unit_circle` makes the states
 scale-invariant.
 
-**The settle is not the problem.** The stationarity residual stays ≲1e-6 (often
-exactly 0) throughout the decay. A convergence check cannot see this failure.
+**The settle is not the problem — for *this* failure.** The stationarity residual
+stays ≲1e-6 (often exactly 0) throughout the decay. A convergence check cannot see
+the basin hop described below.
+
+> **Amended.** The mechanism claim is right — it is a basin hop — but "a
+> convergence check cannot see this failure" is too strong, and applies only to
+> the *step-to-step residual* reported here.
+> `results/ep_trained_vs_rescaled/FINDINGS.md` Result 5 measures the **T-vs-2T
+> drift** `‖z(2T) − z(T)‖/√N` instead, and it separates cleanly: over 96 probe
+> points where drift and the estimator share a settle length, no cell above
+> drift 1e-3 reaches cos 0.99 and only one below it falls under (0.969). In the
+> worst cell the residual reads 9.3e-5 while the drift reads 1.3e-1 — three
+> orders apart, which is why one sees the failure and the other does not.
+>
+> Two details that are easy to get wrong. The drift must be evaluated at the
+> **estimator's own `T_free`**: measured instead at a longer oracle settle, it
+> misses 7 of 34 failing points, one of them at drift 8.8e-8 with cos −0.624.
+> And `T_free = 200` — this run's setting — is itself sometimes the cause: it
+> fails at 8 of 20 trained snapshots there, and raising it to 1600 fixed every
+> point probed.
 
 Direct probe (`gradient_fidelity_vs_weightnorm.csv`), EP against a small-β centered
-reference on the same parameters:
+reference on **randomly initialized matrices rescaled to the stated norm** — read
+the amended caveat below before generalizing these to trained weights:
 
 | ‖W₁‖ | β | cos(L1), one-sided | cos(L1), centered |
 |---|---|---|---|
@@ -120,9 +139,32 @@ that premise fails.
 `centered = true` (settle at ±β, use `-(h₊-h₋)/(2β)`) recovers a substantial part of
 it and is now recommended for any long run. Added as a `StaticEP` field.
 
-**Caveat.** These numbers come from randomly initialized matrices rescaled to the
-stated norm. Trained weights of the same norm behave better — training at ‖W₁‖ ≈ 27
-still makes progress — so the probe likely overstates the effect in practice.
+**Caveat — now measured, and stronger than stated.** These numbers come from
+randomly initialized matrices rescaled to the stated norm. That caveat was a
+hypothesis when written; `results/ep_trained_vs_rescaled/FINDINGS.md` measured it
+against an independent directional-FD oracle, on a run reproducing this one to 0.3
+accuracy points and 0.4 in norm. At the matched norm ‖W₁‖ ≈ 32:
+
+| β | 0.3 | 0.1 | 0.03 | 0.01 | 0.003 |
+|---|---|---|---|---|---|
+| **trained** cos / rel-err | 0.9999 / 0.012 | **1.0000 / 0.008** | 1.0000 / 0.010 | 0.9998 / 0.022 | 0.9977 / 0.070 |
+| **rescaled** cos / rel-err | −0.031 / 12.0 | **−0.059 / 35.8** | −0.069 / 119.2 | −0.072 / 357.3 | −0.073 / 1190.8 |
+
+The rescaled arm reproduces this table's 1/β blow-up to two figures (28.7 → 976
+here, 35.8 → 1190.8 there). The trained arm shows **no decorrelation at all** and is
+flat in β. Trained structure rescaled to ‖W₁‖ = 89.4 — 2.8× this threshold — still
+gives cos 0.9996, so *scale is not the variable; randomness of the matrix is.*
+
+So **‖W₁‖ ≈ 15 is not a threshold of the estimator** and should not be quoted as
+one. It is a property of the random-matrix construction used to probe it, and that
+construction is pathological in its own right: all 165 FD-untrusted rows in that
+sweep are in the rescaled arm and none in either trained arm — at most of its probe
+points the loss is not locally linear at any step size.
+
+Two things this does *not* retract: `centered` is still the right mitigation
+(measured there at cos 0.929 and **flat** in β — it cancels the β-independent term
+rather than attenuating it, which is a cleaner claim than the 0.380 above), and
+training at ‖W₁‖ ≈ 27 is fine.
 
 ### 4. Weight decay helps, but not for the reason we assumed
 
@@ -340,9 +382,26 @@ where it is 3–21×. Always run it under `JULIA_CUDA_HARD_MEMORY_LIMIT`.
 ## Open
 
 - Attribute the final run's gain between `centered` and `weight_decay`.
-- Why does wd=1e-4 help without bounding ‖W‖?
-- Does the basin-hopping onset differ for trained vs randomly-scaled weights of equal
-  norm? The probe suggests it should.
+  **Partly answered** — see the next item; with `centered` on, decay is a net loss.
+- ~~Why does wd=1e-4 help without bounding ‖W‖?~~ **Answered: with `centered` on it
+  does not help.** `results/ep_trained_vs_rescaled/FINDINGS.md` trains both arms to
+  20 epochs with `centered = true`: **0.8636 at ‖W₁‖ = 89.4 with no decay**, against
+  0.8296 at ‖W₁‖ = 25.7 with wd=1e-4. Decay costs 3.4 points while bounding the norm
+  to under a third. The `baseline_nodecay` collapse recorded above (0.726 at
+  ‖W₁‖ = 108.9) was the **one-sided estimator failing as ‖W‖ grew, not the norm
+  itself being harmful** — that run had `centered = false`, so it confounded the two.
+  Once `centered` removes the β-independent term, unbounded ‖W‖ is not a problem and
+  0.8636 is the best result in the repo on this architecture.
+- ~~Does the basin-hopping onset differ for trained vs randomly-scaled weights of
+  equal norm?~~ **Answered: yes, completely** — see the amended caveat in §3. There
+  is no onset on trained weights out to ‖W₁‖ = 89.
+- **New, from that work:** `T_free = 200` is not always sufficient at width 256.
+  At β=0.1 one-sided it puts 8 of 20 trained snapshots below cos 0.99, four of
+  them sign-inverted, non-monotonically in ‖W₁‖ — and `centered` clears 6 of the
+  8. Raising `T_free` to 1600 fixed every point probed, but intermediate values
+  are not safe to interpolate (one cell reads 0.92 at 400, 0.01 at 800, 0.999 at
+  1600). Worth a per-epoch T-vs-2T drift check in `ep_train`, and worth asking
+  whether the ±3-point epoch-to-epoch swings in `epoch_curves.csv` are this.
 - Full buffer reuse in `_phasor_step` was measured at 1.44× on top of a functional
   implementation and rejected as not worth the state-representation change; the
   cheaper fusion above captured 1.7–3.2× instead. Revisit only if the remaining

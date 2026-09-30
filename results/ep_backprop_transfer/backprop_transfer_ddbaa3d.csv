@@ -1,0 +1,2 @@
+gitrev,bp_acc,ep_acc,drop,rel_drop,seed,epochs,lr,hidden,output,scale
+ddbaa3d,0.8594,0.857,0.0024,0.002792646,42,5,0.001,256,64,0.4

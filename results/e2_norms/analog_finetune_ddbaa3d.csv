@@ -1,0 +1,1 @@
+gitrev,pretrain,impairment_type,param,rep,acc_clean,acc_impaired,acc_tuned,acc_bp_ft,acc_readout_only,recovery_frac,bp_recovery_frac,readout_recovery_frac,width,depth

@@ -1,0 +1,9 @@
+gitrev,pretrain,impairment_type,param,rep,acc_clean,acc_impaired,acc_tuned,acc_bp_ft,acc_readout_only,recovery_frac,bp_recovery_frac,readout_recovery_frac,width,depth
+ddbaa3d,backprop,stuck_zero,0.95,1,0.8609,0.1,0.8096,0.8553,0.6981,0.9325798,0.9926403,0.78604287,256,2
+ddbaa3d,backprop,stuck_zero,0.95,2,0.8609,0.1,0.8101,0.8578,0.7271,0.93323696,0.9959259,0.8241556,256,2
+ddbaa3d,backprop,stuck_zero,0.95,3,0.8609,0.1,0.8017,0.8515,0.5393,0.9221974,0.9876462,0.5773426,256,2
+ddbaa3d,backprop,stuck_zero,0.95,4,0.8609,0.1,0.8051,0.8516,0.6151,0.9266658,0.98777765,0.6769615,256,2
+ddbaa3d,backprop,stuck_zero,0.95,5,0.8609,0.1,0.8037,0.8544,0.6889,0.92482585,0.99145746,0.7739519,256,2
+ddbaa3d,backprop,stuck_zero,0.95,6,0.8609,0.1,0.8043,0.8533,0.5789,0.9256144,0.9900118,0.62938625,256,2
+ddbaa3d,backprop,stuck_zero,0.95,7,0.8609,0.1,0.809,0.8498,0.7201,0.9317913,0.985412,0.81495595,256,2
+ddbaa3d,backprop,stuck_zero,0.95,8,0.8609,0.1,0.8098,0.8551,0.6661,0.9328427,0.99237746,0.7439874,256,2
