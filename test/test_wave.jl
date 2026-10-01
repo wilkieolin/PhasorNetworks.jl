@@ -1506,5 +1506,18 @@ function test_wave_ode_convention()
         ys, _ = lp(sc, pp, sp)
         cm = mean(cispi.(Float32.(yd) .- Float32.(ys)))
         @test abs(cm) > 0.95 && abs(angle(cm)) < 0.1f0
+
+        # Input calibration: one input spike must deliver the same unit impulse the
+        # discrete forward injects. A soft-:spike sheet is sensitive to |z|/θ, so an
+        # under-driven ODE (spike charge 2·t_window ≈ 0.02 instead of 1) decorrelates.
+        lk = PhasorWaveSheet(S2, S2; transmit = :spike, init_log_g = log(0.05))
+        pk, sk = Lux.setup(Xoshiro(1), lk)
+        xk = repeat(reshape(xin, S2 * S2, 1, 2), 1, 6, 1)
+        ykd, _ = lk(xk, pk, sk)
+        sck = SpikingCall(ssm_phases_to_train(xk; spk_args = lk.spk_args), lk.spk_args,
+                          (0f0, 6f0 * lk.spk_args.t_period))
+        yks, _ = lk(sck, pk, sk)
+        Rk = vec(abs.(mean(cispi.(Float32.(ykd) .- Float32.(yks)); dims = (1, 3))))
+        @test minimum(Rk) > 0.98
     end
 end

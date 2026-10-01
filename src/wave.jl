@@ -1954,13 +1954,20 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
         u = similar(sample_I, ComplexF32, H, W, B); u .= zero(ComplexF32); return u
     end
 
+    # Input calibration: the discrete forward injects each input phase as a UNIT phasor
+    # per period, while a spike current carries charge kernel_integral·spk_scale
+    # (2·t_window ≈ 0.02 by default). Rescale so one input spike delivers a unit
+    # impulse; otherwise the ODE sheet is ~50× under-driven relative to the discrete
+    # model it is supposed to reproduce (drive-vs-coupling ratio and |z|/θ both wrong).
+    drive_gain = 1f0 / (kernel_integral(spk_args) * spk_args.spk_scale)
+
     function dzdt(u, p, t)
         _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD
         λ = -exp.(p.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω_val)
         coupled = ifft(reshape(_physical_kernel(W_hat), H, W, 1) .*
                        fft(_transmit(l, u, _ode_theta(l, p)), (1, 2)), (1, 2))
-        drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B)
+        drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B) .* drive_gain
         return reshape(k, 1, 1, 1) .* u .+ reshape(g, 1, 1, 1) .* coupled .+ drive
     end
 
