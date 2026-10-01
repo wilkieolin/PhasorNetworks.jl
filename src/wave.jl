@@ -1234,6 +1234,11 @@ _transmit(l::PhasorWaveSheet, z) = _transmit(l, z, _static_theta(l))
 _static_theta(l::PhasorWaveSheet) =
     _thresholded(l) ? _configured_theta(l) : 1f0
 
+# θ for the continuous (ODE) paths: the *trained* base threshold exp(log_theta),
+# held fixed over the solve (homeostasis is a discrete-time recurrence and is not
+# run inside the ODE). Using `_static_theta` here would silently ignore a trained θ.
+_ode_theta(l::PhasorWaveSheet, ps) = _thresholded(l) ? exp.(ps.log_theta) : 1f0
+
 # Fire indicator driving the homeostat: hard `|z| > θ` forward, sigmoid
 # `σ((|z|−θ)/(βθ))` backward — the same straight-through estimator `moe_gate`
 # uses for its top-1 selection.
@@ -1802,7 +1807,8 @@ function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
     gr  = reshape(g, 1, 1, 1)
     Whr = reshape(W_hat, H, W, 1)
 
-    dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(_transmit(l, u), (1, 2)), (1, 2))
+    θ = _ode_theta(l, ps)
+    dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(_transmit(l, u, θ), (1, 2)), (1, 2))
     tspan = (0.0f0, Float32(L) * T)
     sol = oscillator_bank(ComplexF32.(z0), dzdt; tspan = tspan, spk_args = l.spk_args)
 
@@ -1925,7 +1931,7 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
         _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD
         λ = -exp.(p.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω_val)
-        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(_transmit(l, u), (1, 2)), (1, 2))
+        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(_transmit(l, u, _ode_theta(l, p)), (1, 2)), (1, 2))
         drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B)
         return reshape(k, 1, 1, 1) .* u .+ reshape(g, 1, 1, 1) .* coupled .+ drive
     end

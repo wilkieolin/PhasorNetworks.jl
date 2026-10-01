@@ -1456,5 +1456,15 @@ function test_wave_strict_transmission()
 
         @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential,
                                                    homeostasis = :global)
+
+        # (h) The ODE path uses the TRAINED θ (ps.log_theta), not the configured one:
+        #     raising θ far above every |z| must silence a :strict sheet in ODE mode.
+        zo = zeros(ComplexF32, S, S); zo[S ÷ 2, S ÷ 2] = 3f0 * θ0
+        hiθ = merge(ps, (log_theta = Float32[log(1f3 * θ0)],))
+        to_lo = wave_simulate(strict, psl, st; z0 = zo, L = 3, mode = :ode)
+        to_hi = wave_simulate(strict, hiθ, st; z0 = zo, L = 3, mode = :ode)
+        oth(t) = (c = copy(t); c[S ÷ 2, S ÷ 2, :] .= 0; maximum(abs.(c)))
+        @test oth(to_lo) > 0f0
+        @test oth(to_hi) == 0f0
     end
 end
