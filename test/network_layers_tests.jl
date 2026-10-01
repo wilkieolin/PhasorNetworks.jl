@@ -341,6 +341,49 @@ function residual_block_tests()
 
         # Gradient flow should work
         @test all(isfinite.(y))
+
+        # Spiking dispatch: spike train in → spike train out, with the skip
+        # combine done in the spike domain (spike_phase_bind: phase addition
+        # as a delay of the skip spike; the ReZero α scales the branch spike's
+        # lead/lag vs the cycle reference). Equivalence with the discrete 3D
+        # Dirac path, measured as circular agreement
+        # R = |mean(exp(iπ(φ_spk − φ_disc)))| over all (channel, cycle, batch)
+        # outputs (spk_args: dt=0.005, t_window=0.01). The combine itself is
+        # exact (see transformer_block tests); the gap is the two branch
+        # PhasorDense ODE solves (branch phase errors ≤ ~0.08, largest in the
+        # first cycles). Measured: gate=:none R ≈ 0.9993. gate=:rezero
+        # R ≈ 0.990, and that whole gap is ONE element whose branch phase sits
+        # at the wrap (φ_b = 0.94 discrete vs −0.99 spiking, a 0.07 error): the
+        # discrete ReZero term α·φ_b is discontinuous at φ_b = ±1, so the 0.07
+        # branch error becomes a ≈2α jump in the output. That discontinuity is
+        # in the discrete definition, so it is reproduced, not introduced, by
+        # the spiking path; hence a looser bound for :rezero plus an outlier
+        # count.
+        @testset "ResidualBlock SpikingCall ≡ discrete (gate=$gate)" for gate in (:none, :rezero)
+            D, L, B = 8, 8, 3
+            rb = ResidualBlock((D, D, D); gate = gate, branch_init_scale = 1f0,
+                               init_mode = :hippo)
+            ps_rb, st_rb = Lux.setup(Xoshiro(7), rb)
+            if gate === :rezero
+                ps_rb = merge(ps_rb, (alpha = Float32[0.45f0],))   # trained-like α
+            end
+            x3 = Phase.(2f0 .* rand(Xoshiro(8), Float32, D, L, B) .- 1f0)
+            sc = SpikingCall(ssm_phases_to_train(x3, spk_args = spk_args), spk_args,
+                             (0f0, Float32(L) * spk_args.t_period))
+            y_disc, _ = rb(x3, ps_rb, st_rb)
+            y_spk, _ = rb(sc, ps_rb, st_rb)
+            @test y_spk isa SpikingCall
+            φ = ssm_train_to_phases(y_spk)
+            @test size(φ) == (D, L, B)
+            @test !any(isnan, Float32.(φ))             # one spike per neuron per cycle
+            Δ = mod.(Float32.(φ) .- Float32.(y_disc) .+ 1f0, 2f0) .- 1f0
+            R = abs(mean(cis.(Float32(π) .* Δ)))
+            n_outliers = count(abs.(Δ) .> 0.1f0)
+            @info "ResidualBlock spiking ≡ discrete" gate R n_outliers
+            @test R > (gate === :none ? 0.999 : 0.98)
+            @test n_outliers <= 1                       # of D·L·B = 192
+            @test_throws ArgumentError rb(CurrentCall(sc), ps_rb, st_rb)
+        end
     end
 end
 

@@ -1126,10 +1126,16 @@ and/or `branch_init_scale < 1`):
   `init_mode` defaults to `:default`). Note `λ` only shapes dynamics in the
   3D SSM / ODE path — it is a no-op in 2D static.
 
-Phase-domain only: operates on `(d_model, L, B)` (or `(d_model, B)`) Phase
-arrays. For spiking evaluation, run an upstream encoder through the ODE
-path and feed the sampled per-period phases here in discrete dispatch
-(see `scripts/local_attention_compare.jl`).
+Modes: operates on `(d_model, L, B)` (or `(d_model, B)`) Phase arrays in
+discrete dispatch, and end-to-end on spike trains when given a
+`SpikingCall` (spike train in, spike train out). In spiking mode the skip
+combines are [`spike_phase_bind`](@ref) (phase addition as a spike delay; the
+ReZero α scales the branch spike's lead/lag), the optional pre-norm is
+[`spike_phase_recenter`](@ref), the FFN `PhasorDense` layers run their ODE and
+emit spikes (`return_type = :spiking`, the default), and the attention layer
+runs its `SpikingCall` dispatch (for `PhasorLSA`/`PhasorLCA`: reconstruct a
+per-cycle phase field from the incoming spikes, attend discretely, re-emit
+one spike per channel per cycle). Stacks of blocks: [`ScanStack`](@ref).
 
 # Fields
 - `attn_res::PhasorResidual` — residual-wrapped attention (+ optional pre-norm).
@@ -1191,7 +1197,9 @@ compiles **one** block body and reuses it for every depth. Per-step FLOPs are
 unchanged; the win is compile-once + (optionally) checkpointed memory.
 
 Mode-agnostic: the loop just threads `x` through `block`, so the stack runs in
-whatever mode `block` supports.
+whatever mode `block` supports — discrete 3D Phase, or spiking (`SpikingCall`
+in, `SpikingCall` out) for [`PhasorTransformerBlock`](@ref),
+[`PhasorResidual`](@ref) and [`ResidualBlock`](@ref).
 
 # Parameters / state
 - Params: `(blocks = [p_1, …, p_depth],)` — a Vector of the block's own param
@@ -1227,3 +1235,268 @@ function (s::ScanStack)(x, ps::LuxParams, st::NamedTuple)
     end
     return x, st
 end
+
+# ================================================================
+# 9. Spike-domain residual combine (SpikingCall dispatch for the
+#    residual / stacking layers)
+# ================================================================
+#
+# Ground rule for the spiking path: the only thing that crosses between
+# layers is spike *timing* — at most one event per neuron per carrier cycle,
+# whose time relative to the cycle's reference encodes the phase (the
+# `ssm_phases_to_train` / `solution_to_train` convention: cycle `l` covers
+# `[offset + (l-1)T, offset + lT)`, and phase φ sits at
+# `offset + (l-1)T + T·(φ/2 + 1/2)`, so phase 0 is the mid-cycle reference
+# time `t_ref(l) = offset + (l-1)T + T/2`). No amplitude crosses.
+#
+# In the phase domain the residual combine is `v_bind(x, g·b) =
+# remap_phase(φ_x + g·φ_b)`: phase addition. In the time domain phase
+# addition is a *delay*: the skip spike is delayed by the branch spike's lead/
+# lag relative to the reference, `Δ_b = t_b − t_ref`, scaled by the gate,
+#
+#     t_out = start(l) + mod(t_x − start(l) + g·Δ_b, T)
+#
+# which is exactly `phase_to_time(remap_phase(φ_x + g·φ_b))` (the `mod T` is
+# the oscillator's natural phase wrap — the straight-through wrap of
+# `remap_phase`).
+#
+# Why the ReZero gate is a time-scaling, not an amplitude gain: `α` scales the
+# branch's *phase offset*, so it is realised as a gain on a time interval — the
+# interval between the reference tick and the branch spike — e.g. a ramp that
+# charges at rate α during [t_ref, t_b] and is read out as a delay on the skip
+# spike. That ramp is internal to the single combine unit of each channel; the
+# only signals entering or leaving it are the skip spike, the branch spike and
+# the reference clock, and the only signal it emits is one spike per cycle.
+# No branch amplitude ever reaches another neuron, and α = 0 makes the unit a
+# pure relay (exact identity), α = 1 recovers plain `v_bind`.
+#
+# ⚠ Timing idealisation (cost: zero phase error, one cycle of latency in a
+# causal realisation). A combine unit can only emit its delayed spike after
+# *both* its inputs have arrived; when g·Δ_b < 0 (or the branch spike arrives
+# after t_x) the ideal output time precedes an input. We place the output in
+# the same cycle `l` as its inputs — the same convention `solution_to_train`
+# already uses for every `PhasorDense` (it samples the potential at the *end* of
+# cycle `l` and places the spike *inside* cycle `l`). A causal circuit would
+# emit the identical phase one cycle later; because every channel and every
+# residual would carry the same one-cycle pipeline delay, phases are unchanged
+# and only the cycle index shifts. This is why the equivalence tests can demand
+# agreement with the discrete path cycle-by-cycle.
+#
+# Event-driven implementation: the helpers below tabulate spike *times* per
+# (neuron, cycle) and do the time arithmetic above on them. This is an exact
+# simulation of the delay units, not a phase-domain shortcut: the tables hold
+# times, not potentials, and `NaN` marks a silent neuron in that cycle.
+
+# Number of carrier cycles covered by a call's time span.
+_n_cycles(call::SpikingCall) =
+    round(Int, (call.t_span[2] - call.t_span[1]) / call.spk_args.t_period)
+
+# (N, L) table of spike times, N = prod(shape), NaN where a neuron is silent in
+# a cycle. At most one event per neuron per cycle is the spiking convention; if a
+# neuron nevertheless fires more than once in a cycle the last event wins.
+function _spike_time_table(train::SpikeTrain, L::Int, T::Real)
+    T = Float32(T)
+    shape = train.shape
+    lin = LinearIndices(shape)
+    tab = fill(Float32(NaN), prod(shape), L)
+    for (idx, t) in zip(train.indices, train.times)
+        l = floor(Int, (t - train.offset) / T) + 1
+        (1 <= l <= L) || continue
+        tab[lin[idx], l] = t
+    end
+    return tab
+end
+_spike_time_table(train::SpikeTrainGPU, L::Int, T::Real) =
+    _spike_time_table(SpikeTrain(train), L, T)
+
+# Inverse of `_spike_time_table`: drop silent entries, rebuild a train on the
+# same device as `like`.
+function _table_to_train(tab::AbstractMatrix{Float32}, shape::Tuple, offset::Real, like)
+    cart = CartesianIndices(shape)
+    keep = findall(!isnan, tab)
+    inds = [cart[k[1]] for k in keep]
+    times = Float32[tab[k] for k in keep]
+    train = SpikeTrain(inds, times, shape, offset)
+    return like isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
+end
+
+# Cycle start times, shaped (1, L) to broadcast against an (N, L) table.
+_cycle_starts(offset::Real, L::Int, T::Real) =
+    reshape(Float32(offset) .+ Float32(T) .* Float32.(0:L-1), 1, L)
+
+function _check_compatible(x::SpikingCall, b::SpikingCall)
+    x.train.shape == b.train.shape ||
+        throw(DimensionMismatch("skip train shape $(x.train.shape) ≠ branch train shape $(b.train.shape); the residual branch must be shape-preserving"))
+    x.t_span == b.t_span ||
+        throw(ArgumentError("skip t_span $(x.t_span) ≠ branch t_span $(b.t_span). The spike-domain residual combine needs both trains on the same cycles; SpikingArgs(warmup_periods > 0) inside a residual branch is not supported."))
+    isapprox(x.train.offset, b.train.offset; atol = 1f-6) ||
+        throw(ArgumentError("skip and branch spike trains have different reference offsets ($(x.train.offset) vs $(b.train.offset))"))
+    return nothing
+end
+
+"""
+    spike_phase_bind(x::SpikingCall, b::SpikingCall; gain = 1f0) -> SpikingCall
+
+Spike-domain residual combine: the spiking counterpart of
+`v_bind(φ_x, gain · φ_b)` (phase addition with wrap), computed purely from
+spike times. In every cycle, each channel's skip spike `t_x` is delayed by
+`gain · (t_b − t_ref)`, the branch spike's lead/lag relative to the cycle's
+phase-0 reference, and wrapped back into the cycle (`mod T`). `gain` scales a
+*time interval*, so the ReZero gate α is realised without any amplitude
+crossing between neurons (see the section comment above for the circuit
+reading and the ⚠ timing idealisation).
+
+Silent neurons: a silent branch contributes no shift (the `v_bind` identity
+element, phase 0); a silent skip neuron stays silent.
+
+Inference only — not differentiable (the event-driven table is built
+outside the AD graph).
+"""
+function spike_phase_bind(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
+    _check_compatible(x, b)
+    T = x.spk_args.t_period
+    L = _n_cycles(x)
+    off = x.train.offset
+    tx = _spike_time_table(x.train, L, T)
+    tb = _spike_time_table(b.train, L, T)
+    start = _cycle_starts(off, L, T)
+    t_ref = start .+ Float32(T) / 2f0
+    Δb = ifelse.(isnan.(tb), 0f0, tb .- t_ref)          # branch lead/lag vs reference
+    t_out = start .+ mod.(tx .- start .+ Float32(gain) .* Δb, Float32(T))
+    train = _table_to_train(t_out, x.train.shape, off, x.train)
+    return SpikingCall(train, x.spk_args, x.t_span)
+end
+
+"""
+    spike_phase_recenter(x::SpikingCall) -> SpikingCall
+
+Spiking counterpart of [`PhaseRecenter`](@ref): per cycle and per batch
+column, subtract the circular mean phase across channels (dim 1 of the train
+shape).
+
+Circuit reading: one *mean unit* per batch column receives every channel's
+spike in the cycle and integrates them as a non-leaky resonator that resets at
+the cycle boundary; its phase at cycle end is `angle(Σ_c exp(iπφ_c))`, the
+circular mean, which it emits as a single spike. Each channel's spike is then
+advanced by the mean unit's lead/lag relative to the reference — the same
+delay unit as [`spike_phase_bind`](@ref) with gain −1. Only spike times cross
+between units (the resonator's amplitude stays inside the mean unit). Silent
+channels do not contribute to the mean. Same ⚠ timing idealisation as
+`spike_phase_bind`.
+"""
+function spike_phase_recenter(x::SpikingCall)
+    T = Float32(x.spk_args.t_period)
+    L = _n_cycles(x)
+    off = x.train.offset
+    shape = x.train.shape
+    tx = _spike_time_table(x.train, L, T)                # (N, L)
+    start = _cycle_starts(off, L, T)
+    t_ref = start .+ T / 2f0
+    # phase of each spike relative to its cycle's reference, in units of π
+    φ = 2f0 .* (tx .- t_ref) ./ T
+    zc = ifelse.(isnan.(φ), zero(ComplexF32), cis.(Float32(π) .* φ))
+    C = shape[1]
+    rest = prod(shape[2:end]; init = 1)
+    zc3 = reshape(zc, C, rest, L)
+    m = sum(zc3; dims = 1)                               # (1, rest, L) mean-unit state
+    t_mean = reshape(T / 2f0 .* angle.(m) ./ Float32(π), 1, rest, L)   # mean unit lead/lag
+    tx3 = reshape(tx, C, rest, L)
+    st3 = reshape(start, 1, 1, L)
+    t_out = st3 .+ mod.(tx3 .- st3 .- t_mean, T)
+    train = _table_to_train(reshape(t_out, :, L), shape, off, x.train)
+    return SpikingCall(train, x.spk_args, x.t_span)
+end
+
+"""
+    ssm_train_to_phases(call::SpikingCall) -> Array{Phase}
+
+Inverse of [`ssm_phases_to_train`](@ref): decode a spike train with one event
+per neuron per carrier cycle into a `(C, L, B)` Phase array (or `(C, L)` for a
+1-D train shape), reading each spike's time relative to its cycle's reference.
+Silent neurons decode to `NaN`. Pure timing readout — no ODE.
+"""
+function ssm_train_to_phases(call::SpikingCall)
+    T = Float32(call.spk_args.t_period)
+    L = _n_cycles(call)
+    tr = call.train
+    tab = _spike_time_table(tr, L, T)
+    start = _cycle_starts(tr.offset, L, T)
+    φ = Phase.(2f0 .* (tab .- start) ./ T .- 1f0)        # (N, L)
+    shape = tr.shape
+    if length(shape) == 1
+        return φ
+    end
+    C = shape[1]
+    rest = shape[2:end]
+    φ3 = reshape(φ, C, prod(rest), L)
+    return reshape(permutedims(φ3, (1, 3, 2)), C, L, rest...)
+end
+
+# Bring a branch output back onto spikes, as the branch's output neurons
+# emitting one spike per cycle at their phase. Layers whose spiking dispatch
+# already emits a train pass through; layers whose spiking dispatch returns a
+# per-cycle phase field (PhasorLSA / PhasorLCA / SSMSelfAttention return
+# Complex 3D or Phase 3D after `reconstruct_from_current`) are re-encoded with
+# the canonical `ssm_phases_to_train` timing.
+_as_spike_call(y::SpikingCall, ref::SpikingCall) = y
+_as_spike_call(y::AbstractArray{<:Complex, 3}, ref::SpikingCall) =
+    _as_spike_call(complex_to_angle(y), ref)
+function _as_spike_call(y::AbstractArray{<:Phase, 3}, ref::SpikingCall)
+    L = _n_cycles(ref)
+    size(y, 2) == L ||
+        throw(DimensionMismatch("branch returned $(size(y, 2)) cycles, expected $L"))
+    train = ssm_phases_to_train(Array(y); spk_args = ref.spk_args)
+    off = ref.train.offset
+    if off != 0f0
+        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off)
+    end
+    train = ref.train isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
+    return SpikingCall(train, ref.spk_args, ref.t_span)
+end
+_as_spike_call(y, ref::SpikingCall) =
+    throw(ArgumentError("residual branch returned $(typeof(y)) for a SpikingCall input; " *
+                        "it must return a SpikingCall (e.g. PhasorDense with " *
+                        "return_type = SolutionType(:spiking)) or a per-cycle (C, L, B) phase field"))
+
+_gate_value(alpha) = Float32(only(Array(alpha)))
+
+# ---- PhaseRecenter ----
+
+function (::PhaseRecenter)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    return spike_phase_recenter(x), st
+end
+
+# ---- PhasorResidual ----
+
+function (r::PhasorResidual)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    branch, st_layer = r.layer(x, ps.layer, st.layer)
+    b = _as_spike_call(branch, x)
+    g = r.gate === :rezero ? _gate_value(ps.alpha) : 1f0
+    return spike_phase_bind(x, b; gain = g), (layer = st_layer,)
+end
+
+const _RESIDUAL_CURRENT_MSG =
+    "The residual skip must carry spike timing (one event per neuron per cycle), " *
+    "so the spike-domain combine has no CurrentCall method: a continuous current " *
+    "is an amplitude signal and cannot be combined without passing amplitude " *
+    "between neurons. Feed a SpikingCall (e.g. emit with " *
+    "return_type = SolutionType(:spiking) upstream)."
+
+(r::PhasorResidual)(x::CurrentCall, ps::LuxParams, st::NamedTuple) =
+    throw(ArgumentError("PhasorResidual: " * _RESIDUAL_CURRENT_MSG))
+
+# ---- ResidualBlock (defined in network.jl) ----
+
+function (rb::ResidualBlock)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
+    b = _as_spike_call(ff_out, x)
+    g = rb.gate === :rezero ? _gate_value(ps.alpha) : 1f0
+    return spike_phase_bind(x, b; gain = g), (ff = st_ff,)
+end
+
+(rb::ResidualBlock)(x::CurrentCall, ps::LuxParams, st::NamedTuple) =
+    throw(ArgumentError("ResidualBlock: " * _RESIDUAL_CURRENT_MSG))
+
+# PhasorTransformerBlock and ScanStack need no extra methods: their forward
+# passes are mode-agnostic compositions of PhasorResidual / PhaseRecenter /
+# the wrapped block, so a SpikingCall flows through them spike-in, spike-out.
