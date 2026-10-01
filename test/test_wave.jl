@@ -15,6 +15,7 @@
 #   7. Emission threshold θ + homeostatic regulation (the :spike firing threshold)
 #   8. Spectral occupancy → transport forecast (report §4.6: a code's own
 #      spatial-frequency content decides how far it survives)
+#   9. Strict transmission (:strict — unit phase above θ, nothing below)
 
 function wave_tests()
     @testset "PhasorWaveSheet" begin
@@ -43,6 +44,7 @@ function wave_tests()
         test_wave_chain_integration()
         test_wave_stencil_coupling()
         test_wave_spike_transmission()
+        test_wave_strict_transmission()
         test_wave_emission_threshold()
         test_soliton_wave_sheet()
     end
@@ -1374,5 +1376,85 @@ function test_wave_emission_threshold()
         pd, sd = Lux.setup(rng, ld)
         @test_throws ArgumentError wave_simulate(ld, pd, sd;
             z0 = zeros(ComplexF32, 16, 16), L = 6, mode = :deq)
+    end
+end
+
+# ---- Strict transmission (phase or no event) ----------------------------
+#
+# transmit=:strict sends z/|z| when |z| > θ and exactly 0 otherwise, so no
+# graded amplitude crosses the coupling (unlike :spike, whose sub-threshold
+# emit is ≈ z/θ). Ground rule of the ARC programme: phases on S¹, or no event.
+
+function test_wave_strict_transmission()
+    @testset "strict transmission (phase or no event)" begin
+        rng = Xoshiro(43)
+        S = 16; L = 12; B = 2
+        relerr(a, b) = maximum(abs.(a .- b)) / (maximum(abs.(a)) + 1f-20)
+
+        # (a) The emit itself: unit phasor above θ, exactly 0 below, NaN-free at 0.
+        strict = PhasorWaveSheet(S, S; transmit = :strict)
+        soft   = PhasorWaveSheet(S, S; transmit = :spike)
+        θ = 1f0
+        z = ComplexF32[2f0 * cis(0.3f0), 0.5f0 * cis(-1.2f0), 0f0, 1.001f0 * cis(2f0)]
+        s = PhasorNetworks._transmit(strict, z, θ)
+        @test all(isfinite, s)
+        @test abs.(s) ≈ Float32[1, 0, 0, 1]
+        @test angle(s[1]) ≈ 0.3f0 && angle(s[4]) ≈ 2f0
+        @test abs(PhasorNetworks._transmit(soft, z, θ)[2]) > 0.3f0   # :spike leaks sub-threshold
+
+        # (b) Same θ parameter and derived default as :spike; homeostasis allowed.
+        ps, st = Lux.setup(rng, strict)
+        pss, _ = Lux.setup(rng, soft)
+        @test ps.log_theta ≈ pss.log_theta
+        @test occursin("transmit=:strict", sprint(show, strict))
+        @test PhasorWaveSheet(8, 8; transmit = :strict, homeostasis = :global) isa PhasorWaveSheet
+
+        # (c) A sub-threshold kick never reaches a neighbour: the kicked site just
+        #     decays by A each step and everything else stays exactly 0. Under
+        #     :spike the same kick spreads (graded amplitude crosses the synapse).
+        θ0 = exp(only(ps.log_theta))
+        z0 = zeros(ComplexF32, S, S); z0[S ÷ 2, S ÷ 2] = 0.5f0 * θ0
+        tr = wave_simulate(strict, ps, st; z0 = z0, L = L)
+        others = copy(tr); others[S ÷ 2, S ÷ 2, :] .= 0
+        @test maximum(abs.(others)) == 0f0
+        A = exp(-exp(only(ps.log_neg_lambda)) * strict.spk_args.t_period)
+        @test abs(tr[S ÷ 2, S ÷ 2, end]) ≈ 0.5f0 * θ0 * A^L rtol = 1f-3
+        trs = wave_simulate(soft, pss, st; z0 = z0, L = L)
+        others_s = copy(trs); others_s[S ÷ 2, S ÷ 2, :] .= 0
+        @test maximum(abs.(others_s)) > 0f0
+
+        # (d) Above threshold it spreads, stays bounded, and every emitted event has
+        #     magnitude exactly 0 or 1.
+        z1 = zeros(ComplexF32, S, S); z1[S ÷ 2, S ÷ 2] = 3f0 * θ0
+        psl = merge(ps, (log_theta = Float32[log(0.3f0 * θ0)],))
+        tr1 = wave_simulate(strict, psl, st; z0 = z1, L = L)
+        @test all(isfinite, tr1) && maximum(abs.(tr1)) < 1f3
+        @test count(abs.(tr1[:, :, end]) .> 0f0) > 1
+        em = abs.(PhasorNetworks._transmit(strict, tr1, 0.3f0 * θ0))
+        @test all(e -> e == 0f0 || isapprox(e, 1f0; atol = 1f-5), em)
+
+        # (e) DEQ with n_sweeps == L reproduces the sequential :strict rollout.
+        zb = zeros(ComplexF32, S, S, B); zb[S ÷ 2, S ÷ 2, :] .= 3f0 * θ0
+        ref = PhasorNetworks._wave_rollout(strict, psl, st, zb, nothing, L)
+        deq = PhasorNetworks._wave_rollout_deq(strict, psl, st, zb, nothing, L;
+                                               n_sweeps = L, emit_mode = :unit)
+        @test relerr(ref, deq) < 1f-4
+
+        # (f) Gradient flows (finite) through the Phase forward when sites fire.
+        x = Phase.(2f0 .* rand(rng, Float32, S * S, L, B) .- 1f0)
+        val, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(strict(x, p, st)))), psl)
+        @test isfinite(val)
+        @test all(isfinite, gs[1].log_g) && any(abs.(gs[1].A_exc) .> 0)
+
+        # (g) Linearisations: subthreshold medium is uncoupled (M = A); above
+        #     threshold the Kuramoto generator is the same as :spike's.
+        d = dispersion(strict, ps, st)
+        @test all(d.M .≈ ComplexF32(A))
+        dd_strict = dispersion_diagnostics(strict, ps, st)
+        dd_spike  = dispersion_diagnostics(strict, ps, st; mode = :spike)
+        @test dd_strict.growth ≈ dd_spike.growth && dd_strict.v_g ≈ dd_spike.v_g
+
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential,
+                                                   homeostasis = :global)
     end
 end

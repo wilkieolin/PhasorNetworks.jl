@@ -71,6 +71,13 @@ speed) for analysis and demos.
   can run away, so it needs the legacy state-level `saturating` snap). Use
   `:potential` for the *linear* medium whose dispersion matches
   [`dispersion`](@ref) exactly.
+  `:strict` is the torus-only channel: a site sends the unit phasor `z/|z|`
+  when `|z| > θ` and **nothing** otherwise (a hard gate, no sub-threshold
+  leak). Under `:spike` the sub-threshold emit is `≈ z/θ`, so graded amplitude
+  still crosses the synapse; `:strict` removes that. Same `θ` parameter,
+  derived default and homeostasis as `:spike`. The gate is hard in the forward
+  and backward pass (non-firing sites get no gradient); `homeostasis` still
+  trains `θ` through its own straight-through fire indicator.
 - `init_log_theta::Union{Real,Nothing} = nothing` — `log θ`, the **emission
   threshold** (units of `|z|`); the spike is `z/√(|z|²+θ²)`, i.e. the `ε` of
   [`normalize_to_unit_circle`](@ref) with `ε = θ²`. **The default is derived**:
@@ -187,7 +194,7 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     grid_w::Int
     coupling::Symbol          # :dog (parametric DoG) | :stencil (free learnable) | :aniso (DoG + directed advection)
     stencil_radius::Int       # R: the learnable stencil is (2R+1)×(2R+1); used when coupling=:stencil
-    transmit::Symbol          # :potential (send full z) | :spike (send unit-magnitude z/|z|)
+    transmit::Symbol          # :potential (send full z) | :spike (soft z/√(|z|²+θ²)) | :strict (z/|z| if |z|>θ, else 0)
     saturating::Bool
     use_adaptation::Bool
     homeostasis::Symbol       # :none | :global (scalar θ_g) | :local (θ_g × per-site θ_l)
@@ -242,13 +249,13 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          spk_args::SpikingArgs = SpikingArgs())
     coupling in (:dog, :stencil, :aniso, :shift) ||
         throw(ArgumentError("coupling must be :dog, :stencil, :aniso or :shift, got :$coupling"))
-    transmit in (:potential, :spike) ||
-        throw(ArgumentError("transmit must be :potential or :spike, got :$transmit"))
+    transmit in (:potential, :spike, :strict) ||
+        throw(ArgumentError("transmit must be :potential, :spike or :strict, got :$transmit"))
     homeostasis in (:none, :global, :local) ||
         throw(ArgumentError("homeostasis must be :none, :global or :local, got :$homeostasis"))
-    homeostasis !== :none && transmit !== :spike &&
+    homeostasis !== :none && transmit === :potential &&
         throw(ArgumentError("homeostasis=:$homeostasis regulates the emission threshold, " *
-              "which only exists under transmit=:spike (got transmit=:$transmit)"))
+              "which only exists under transmit=:spike or :strict (got transmit=:$transmit)"))
     coupling === :stencil && (2 * stencil_radius + 1 > min(H, W)) &&
         throw(ArgumentError("stencil_radius=$stencil_radius too large for $(H)×$(W) sheet"))
     # Default conduction speed is DERIVED, not a constant: c = 2σ_I/T puts the
@@ -278,7 +285,7 @@ function Base.show(io::IO, l::PhasorWaveSheet)
     print(io, "PhasorWaveSheet($(l.grid_h)×$(l.grid_w); coupling=:$(l.coupling)")
     l.coupling === :stencil && print(io, "(R=$(l.stencil_radius))")
     print(io, ", transmit=:$(l.transmit), saturating=$(l.saturating), use_adaptation=$(l.use_adaptation), ")
-    l.transmit === :spike &&
+    _thresholded(l) &&
         print(io, "theta=$(l.init_log_theta === nothing ? "derived" : exp(l.init_log_theta)), ")
     l.homeostasis !== :none && print(io, "homeostasis=:$(l.homeostasis), ")
     print(io, "t_period=$(l.spk_args.t_period))")
@@ -350,7 +357,7 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorWaveSheet)
         base = merge(base, (log_rho_a   = Float32[l.init_log_rho_a],
                             log_delta_a = Float32[l.init_log_delta_a]))
     end
-    if l.transmit === :spike
+    if _thresholded(l)
         # Emission threshold. Derived by default (θ = g·max|Ŵ|) rather than a
         # constant, because θ* ∝ g exactly and the usable band is only ≈1.3×
         # wide — a fixed value silently leaves the regime once g moves.
@@ -534,7 +541,10 @@ the phase / growth band curvatures at the carrier (both →0 = dispersionless).
 function dispersion_diagnostics(l::PhasorWaveSheet, ps::LuxParams, st::NamedTuple;
                                 axis::Symbol = :h, mode::Symbol = l.transmit)
     axis in (:h, :w) || throw(ArgumentError("axis must be :h or :w, got :$axis"))
-    mode in (:potential, :spike) || throw(ArgumentError("mode must be :potential or :spike"))
+    mode in (:potential, :spike, :strict) ||
+        throw(ArgumentError("mode must be :potential, :spike or :strict"))
+    # Above threshold :strict and :spike both emit z/|z|: same Kuramoto generator.
+    mode === :strict && (mode = :spike)
     ω = period_to_angfreq(l.spk_args.t_period)
     A_step, g, W_hat = _build_coupling(l, ps, st, ω)
     H, W = size(W_hat)
@@ -1197,8 +1207,24 @@ end
 # ~5 orders of magnitude below the derived reference g·max|Ŵ| ≈ 7.6, so every
 # site above 1e-4 emitted a FULL spike and an impulse became an ignition cascade
 # rather than a wave. See `emission_threshold`.
+#   :strict    — z/|z| where |z| > θ, exactly 0 elsewhere: a phase or no event.
 _transmit(l::PhasorWaveSheet, z, θ) =
-    l.transmit === :spike ? normalize_to_unit_circle(z; ε = θ .^ 2) : z
+    l.transmit === :spike  ? normalize_to_unit_circle(z; ε = θ .^ 2) :
+    l.transmit === :strict ? _strict_emit(z, θ) : z
+
+# Hard-gated unit emit. The denominator is |z| on firing sites and ≥ 1 on silent
+# ones (which are then multiplied by 0), so it is NaN-free at z = 0 and AD-safe;
+# silent sites carry no gradient.
+function _strict_emit(z, θ)
+    r = abs.(z)
+    fire = ignore_derivatives() do
+        Float32.(r .> θ)
+    end
+    return fire .* z ./ (r .+ (1f0 .- fire))
+end
+
+# Does this sheet have an emission threshold θ (a `log_theta` parameter)?
+_thresholded(l::PhasorWaveSheet) = l.transmit === :spike || l.transmit === :strict
 
 _transmit(l::PhasorWaveSheet, z) = _transmit(l, z, _static_theta(l))
 
@@ -1206,7 +1232,7 @@ _transmit(l::PhasorWaveSheet, z) = _transmit(l, z, _static_theta(l))
 # configured threshold. Homeostasis is a discrete-time recurrence and is not
 # available on that path, so the ODE mode holds θ fixed.
 _static_theta(l::PhasorWaveSheet) =
-    l.transmit === :spike ? _configured_theta(l) : 1f0
+    _thresholded(l) ? _configured_theta(l) : 1f0
 
 # Fire indicator driving the homeostat: hard `|z| > θ` forward, sigmoid
 # `σ((|z|−θ)/(βθ))` backward — the same straight-through estimator `moe_gate`
@@ -1299,7 +1325,7 @@ function _wave_rollout(l::PhasorWaveSheet, ps, st, z0, drive, L::Int)
     # rollout-local, initialized fresh each forward pass so the layer stays a
     # pure function of (ps, st, input).
     θg = η_g = η_l = target = β = θl = nothing
-    if l.transmit === :spike && l.homeostasis !== :none
+    if _thresholded(l) && l.homeostasis !== :none
         ones_B = ignore_derivatives() do
             o = similar(st.rgrid, Float32, B); o .= 1f0; return o
         end
@@ -1313,7 +1339,7 @@ function _wave_rollout(l::PhasorWaveSheet, ps, st, z0, drive, L::Int)
                 t = similar(st.rgrid, Float32, H, W, B); t .= 1f0; return t
             end
         end
-    elseif l.transmit === :spike
+    elseif _thresholded(l)
         θg = ignore_derivatives() do
             o = similar(st.rgrid, Float32, B); o .= 1f0; return o
         end .* exp.(ps.log_theta)                              # fixed θ, still per-batch
@@ -1547,7 +1573,8 @@ _emit_dirac(z, k, T) =
     _wave_rollout_deq(l, ps, st, z0, drive, L; n_sweeps, emit_mode) -> (H,W,L,B)
 
 Parallel spike-mode trainer via the DEQ fixed point (§5.6b). `emit_mode` is
-`:unit` (`z/|z|`, the sheet default) or `:dirac` (`exp(k·dt)`, `PhasorDense`-
+`:unit` (the sheet's own emit: soft `z/√(|z|²+θ²)` for `:spike`, gated `z/|z|`
+for `:strict`) or `:dirac` (`exp(k·dt)`, `PhasorDense`-
 consistent; §5.6a). `n_sweeps == L` reproduces the sequential spike rollout;
 fewer sweeps settle toward it.
 """
@@ -1588,7 +1615,7 @@ function _wave_rollout_deq(l::PhasorWaveSheet, ps, st, z0, drive, L::Int;
 
     θ_deq = exp.(ps.log_theta)                       # fixed (homeostasis :none)
     emit = emit_mode === :dirac ? (zz -> _emit_dirac(zz, kk, T)) :
-                                  (zz -> normalize_to_unit_circle(zz; ε = θ_deq .^ 2))
+                                  (zz -> _transmit(l, zz, θ_deq))
 
     z = homog
     for _ in 1:n_sweeps
@@ -1717,8 +1744,8 @@ Only meaningful for `transmit = :spike`.
 function wave_homeostat_trace(l::PhasorWaveSheet, ps::LuxParams, st::NamedTuple;
                               z0::AbstractArray, L::Integer,
                               keep_fields::Bool = false)
-    l.transmit === :spike ||
-        throw(ArgumentError("wave_homeostat_trace needs transmit=:spike (no threshold otherwise)"))
+    _thresholded(l) ||
+        throw(ArgumentError("wave_homeostat_trace needs transmit=:spike or :strict (no threshold otherwise)"))
     ω = period_to_angfreq(l.spk_args.t_period)
     A_step, g, W_hat = _build_coupling(l, ps, st, ω)
     H, W = l.grid_h, l.grid_w
@@ -1828,6 +1855,10 @@ involved an unknown mean-field amplitude `r`, with a computable one — and it i
 what makes [`radial_band`](@ref) and [`wave_transport`](@ref) meaningful on a
 spike sheet.
 
+For `transmit = :strict` nothing is sent below threshold, so `g_eff = 0`: the
+subthreshold medium is uncoupled and `M = A`. Use [`dispersion_diagnostics`](@ref)
+(the above-threshold Kuramoto generator, shared with `:spike`) instead.
+
 !!! warning "Only valid below threshold"
     Once the sheet is firing (`|z| ≳ θ`) the emit saturates and the linearization
     stops applying — the true dynamics are then the amplitude-blind regime of §3.
@@ -1841,6 +1872,8 @@ function dispersion(l::PhasorWaveSheet, ps, st; mode::Symbol = :discrete)
     A_step, g, W_hat = _build_coupling(l, ps, st, ω)
     # Subthreshold linearization of the spike emit: s ≈ z/θ ⇒ g_eff = g/θ.
     l.transmit === :spike && (g = g ./ exp.(ps.log_theta))
+    # :strict sends nothing below threshold, so the subthreshold medium is uncoupled.
+    l.transmit === :strict && (g = g .* 0f0)
     if mode === :continuous
         λ = -exp.(ps.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω)
@@ -2086,7 +2119,7 @@ function (l::WaveExpertSheet)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::N
                         hard = l.hard, τ = l.tau)                    # (E,L,B)
         drive2 = _apply_wave_experts(drive, st.masks, phis, gate)
         nsw = l.n_sweeps > 0 ? l.n_sweeps : L
-        Y = l.sheet.transmit === :spike ?
+        Y = _thresholded(l.sheet) ?
             _wave_rollout_deq(l.sheet, ps.sheet, st.sheet, z0, drive2, L;
                               n_sweeps = nsw, emit_mode = :unit) :
             _wave_rollout_scan(l.sheet, ps.sheet, st.sheet, z0, drive2, L)
