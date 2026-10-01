@@ -23,6 +23,7 @@ function transformer_block_tests()
         phase_recenter_tests()
         phasor_residual_tests()
         phasor_transformer_block_tests()
+        scan_stack_tests()
     end
 end
 
@@ -175,5 +176,36 @@ function phasor_transformer_block_tests()
                 @test size(y) == (D, L, B)
             end
         end
+    end
+end
+
+# ----------------------------------------------------------------------
+# ScanStack (discrete)
+# ----------------------------------------------------------------------
+
+function scan_stack_tests()
+    @testset "ScanStack" begin
+        rng = Xoshiro(42)
+        D, L, B, H = 8, 5, 2, 2
+        x = Phase.(2f0 .* rand(rng, Float32, D, L, B) .- 1f0)
+        blk = PhasorTransformerBlock(D, PhasorLSA(D => D, H); gate = :rezero)
+        s = ScanStack(blk, 3)
+        ps, st = Lux.setup(rng, s)
+        @test length(ps.blocks) == 3
+        @test Lux.parameterlength(s) == 3 * Lux.parameterlength(blk)
+        y, _ = s(x, ps, st)
+        # same as applying the blocks one after another
+        h = x
+        for i in 1:3
+            h, _ = blk(h, ps.blocks[i], st.block)
+        end
+        @test Float32.(y) == Float32.(h)
+        # checkpointed variant: identical forward, finite gradients
+        sc = ScanStack(blk, 3; checkpoint = true)
+        @test Float32.(first(sc(x, ps, st))) == Float32.(y)
+        loss(p) = sum(abs2, real.(angle_to_complex(first(sc(x, p, st)))))
+        l, gs = Zygote.withgradient(loss, ps)
+        @test isfinite(l)
+        @test _grad_all_finite(gs[1])
     end
 end

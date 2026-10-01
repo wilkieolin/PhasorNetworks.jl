@@ -20,7 +20,7 @@ using NNlib: batched_mul, softmax
 using FFTW  # registers CPU FFT methods with AbstractFFTs
 using AbstractFFTs: fft, ifft
 using Base: @kwdef
-using Zygote: withgradient, Buffer
+using Zygote: withgradient, Buffer, checkpointed
 using Random: Xoshiro
 
 import LuxLib: dropout

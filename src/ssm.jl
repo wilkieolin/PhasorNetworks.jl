@@ -1178,3 +1178,52 @@ function (b::PhasorTransformerBlock)(x, ps::LuxParams, st::NamedTuple)
     y, st_f = b.ffn_res(h, ps.ffn_res, st.ffn_res)
     return y, (attn_res = st_a, ffn_res = st_f)
 end
+
+"""
+    ScanStack(block, depth; checkpoint = false) <: Lux.AbstractLuxLayer
+
+Apply `depth` independent copies of `block` (same shape, distinct params) in
+sequence via a runtime loop instead of a length-`depth` `Lux.Chain`.
+
+A `Chain` of N layers is a length-N tuple, so every distinct depth forces a new
+`applychain` specialization; a loop over a homogeneous parameter container
+compiles **one** block body and reuses it for every depth. Per-step FLOPs are
+unchanged; the win is compile-once + (optionally) checkpointed memory.
+
+Mode-agnostic: the loop just threads `x` through `block`, so the stack runs in
+whatever mode `block` supports.
+
+# Parameters / state
+- Params: `(blocks = [p_1, …, p_depth],)` — a Vector of the block's own param
+  NamedTuples (distinct random init per copy).
+- State: `(block = st,)` — the block's (shared, param-free) state.
+
+`checkpoint = true` wraps each step in `Zygote.checkpointed` to recompute
+activations in the backward pass (O(1) tape instead of O(depth)).
+"""
+struct ScanStack{B} <: Lux.AbstractLuxLayer
+    block::B
+    depth::Int
+    checkpoint::Bool
+end
+ScanStack(block, depth::Int; checkpoint::Bool = false) = ScanStack(block, depth, checkpoint)
+
+function Lux.initialparameters(rng::AbstractRNG, s::ScanStack)
+    return (blocks = [Lux.initialparameters(rng, s.block) for _ in 1:s.depth],)
+end
+Lux.initialstates(rng::AbstractRNG, s::ScanStack) = (block = Lux.initialstates(rng, s.block),)
+# Default parameterlength doesn't recurse the `blocks` Vector → undercounts.
+Lux.parameterlength(s::ScanStack) = s.depth * Lux.parameterlength(s.block)
+
+# One block application (top-level so Zygote.checkpointed can target it).
+_scan_apply_block(block, x, p, bst) = first(block(x, p, bst))
+
+function (s::ScanStack)(x, ps::LuxParams, st::NamedTuple)
+    bst = st.block
+    for i in 1:s.depth
+        p = ps.blocks[i]
+        x = s.checkpoint ? checkpointed(_scan_apply_block, s.block, x, p, bst) :
+                           _scan_apply_block(s.block, x, p, bst)
+    end
+    return x, st
+end

@@ -175,49 +175,9 @@ function make_block(D::Int; use_bias::Bool, use_residual::Bool, lnl,
     return recenter ? Chain(block, PhaseRecenter()) : block
 end
 
-"""
-    ScanStack(block, depth; checkpoint=false) <: Lux.AbstractLuxLayer
-
-Apply `depth` independent copies of `block` (same shape, distinct params) in
-sequence via a runtime loop instead of a length-`depth` `Lux.Chain`.
-
-Why: a `Chain` of N layers is a length-N tuple, so every distinct depth forces
-a *new* `applychain` specialization — across a 1..50 sweep that is N separate
-compiles. A loop over a homogeneous parameter container compiles **one** block
-body and reuses it for every depth. Per-step FLOPs are unchanged (depth is
-FLOP-bound); the win is compile-once + (optionally) checkpointed memory.
-
-Params: `(blocks = [p_1, …, p_depth],)` — a Vector of the block's own param
-NamedTuples (distinct random init per layer). State: the block's (shared,
-param-free) state. `checkpoint=true` wraps each step in `Zygote.checkpointed`
-to recompute activations in the backward pass (O(1) tape instead of O(depth)).
-"""
-struct ScanStack{B} <: Lux.AbstractLuxLayer
-    block::B
-    depth::Int
-    checkpoint::Bool
-end
-ScanStack(block, depth::Int; checkpoint::Bool = false) = ScanStack(block, depth, checkpoint)
-
-function Lux.initialparameters(rng::AbstractRNG, s::ScanStack)
-    return (blocks = [Lux.initialparameters(rng, s.block) for _ in 1:s.depth],)
-end
-Lux.initialstates(rng::AbstractRNG, s::ScanStack) = (block = Lux.initialstates(rng, s.block),)
-# Default parameterlength doesn't recurse the `blocks` Vector → undercounts.
-Lux.parameterlength(s::ScanStack) = s.depth * Lux.parameterlength(s.block)
-
-# One block application (top-level so Zygote.checkpointed can target it).
-_apply_block(block, x, p, bst) = first(block(x, p, bst))
-
-function (s::ScanStack)(x, ps, st)
-    bst = st.block
-    for i in 1:s.depth
-        p = ps.blocks[i]
-        x = s.checkpoint ? Zygote.checkpointed(_apply_block, s.block, x, p, bst) :
-                           _apply_block(s.block, x, p, bst)
-    end
-    return x, st
-end
+# `ScanStack` (compile-once loop over `depth` copies of a block) now lives in
+# PhasorNetworks (src/ssm.jl) so it can be used — and tested — in both the
+# discrete and the spiking mode.
 
 """
     build_depth_model(path, D, depth; use_bias, use_residual, scan=false, checkpoint=false) -> Lux.Chain
