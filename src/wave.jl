@@ -1792,6 +1792,33 @@ function wave_homeostat_trace(l::PhasorWaveSheet, ps::LuxParams, st::NamedTuple;
     return keep_fields ? merge(base, (; z = Zf, theta = Tf)) : base
 end
 
+# ---- Discrete ↔ physical (ODE) convention ------------------------------
+#
+# The discrete map works on the code phasor e^{iπφ}. A spike at code phase φ fires
+# at t_s = (φ/2 + ½)T (`phase_to_time`), so the physical oscillator potential at
+# the sample point t = nT is e^{iω(nT − t_s)} = −conj(e^{iπφ}): the two conventions
+# are mirror images, M(z) = −conj(z) (M∘M = id), which is also what
+# `potential_to_phase` / `unrotate_solution` undo for the other layers.
+#
+# Under M the discrete step z' = A z + g W⊛s(z) + d becomes
+# M(z') = A M(z) + g conj(W)⊛s(M(z)) + M(d)   (A is real: e^{iωT} = 1),
+# so the trained discrete kernel W is realised physically by the spatially
+# conjugated kernel conj(W(d)), i.e. Ŵ_phys(q) = conj(Ŵ(−q)). For real kernels
+# (`:shift`, the `:aniso` advection term, an undelayed DoG) nothing changes; for
+# the delayed `:dog` the discrete "delay" e^{−iωr/c} is physically an advance.
+# The ODE paths below therefore integrate the PHYSICAL system (kernel Ŵ_phys,
+# state M(z)) and map back with M, so `mode = :ode` / `CurrentCall` run the same
+# model as the discrete recurrence.
+_mirror(z) = .-conj.(z)
+
+function _physical_kernel(W_hat::AbstractMatrix)
+    H, W = size(W_hat)
+    ih, iw = ignore_derivatives() do
+        (mod.(-(0:H-1), H) .+ 1, mod.(-(0:W-1), W) .+ 1)
+    end
+    return conj.(W_hat[ih, iw])
+end
+
 # Tier-2 continuous rollout: integrate dz/dt = k·z + g·(FFT-coupling) with the
 # layer's ODE solver (Tsit5 + BacksolveAdjoint by default) and sample at each
 # period. Closes over the coupling built from `ps` — used for pure-forward
@@ -1805,14 +1832,14 @@ function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
     H, W, B = size(z0)
     kr  = reshape(k, 1, 1, 1)
     gr  = reshape(g, 1, 1, 1)
-    Whr = reshape(W_hat, H, W, 1)
+    Whr = reshape(_physical_kernel(W_hat), H, W, 1)
 
     θ = _ode_theta(l, ps)
     dzdt(u, p, t) = kr .* u .+ gr .* ifft(Whr .* fft(_transmit(l, u, θ), (1, 2)), (1, 2))
     tspan = (0.0f0, Float32(L) * T)
-    sol = oscillator_bank(ComplexF32.(z0), dzdt; tspan = tspan, spk_args = l.spk_args)
+    sol = oscillator_bank(_mirror(ComplexF32.(z0)), dzdt; tspan = tspan, spk_args = l.spk_args)
 
-    samples = [ComplexF32.(sol(Float32(j) * T)) for j in 1:L]     # each (H,W,B)
+    samples = [_mirror(ComplexF32.(sol(Float32(j) * T))) for j in 1:L]   # each (H,W,B), code convention
     return cat([reshape(s, H, W, 1, B) for s in samples]...; dims = 3)  # (H,W,L,B)
 end
 
@@ -1931,7 +1958,8 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
         _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD
         λ = -exp.(p.log_neg_lambda)
         k = ComplexF32.(λ .+ 1im .* ω_val)
-        coupled = ifft(reshape(W_hat, H, W, 1) .* fft(_transmit(l, u, _ode_theta(l, p)), (1, 2)), (1, 2))
+        coupled = ifft(reshape(_physical_kernel(W_hat), H, W, 1) .*
+                       fft(_transmit(l, u, _ode_theta(l, p)), (1, 2)), (1, 2))
         drive   = reshape(ComplexF32.(x.current.current_fn(t)), H, W, B)
         return reshape(k, 1, 1, 1) .* u .+ reshape(g, 1, 1, 1) .* coupled .+ drive
     end
@@ -1948,8 +1976,8 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
     prob = ODEProblem(dzdt, u0, tspan, ps)
     sol  = solve(prob, spk_args.solver, p = ps; save_args...)
 
-    Z = cat([reshape(ComplexF32.(u), H * W, 1, B) for u in sol.u]...; dims = 2)  # (H*W, L, B)
-    return complex_to_angle(Z), st
+    Z = cat([reshape(ComplexF32.(u), H * W, 1, B) for u in sol.u]...; dims = 2)  # (H*W, L, B) physical
+    return complex_to_angle(_mirror(Z)), st                                         # code convention
 end
 
 function (l::PhasorWaveSheet)(x::SpikingCall, ps::LuxParams, st::NamedTuple)

@@ -45,6 +45,7 @@ function wave_tests()
         test_wave_stencil_coupling()
         test_wave_spike_transmission()
         test_wave_strict_transmission()
+        test_wave_ode_convention()
         test_wave_emission_threshold()
         test_soliton_wave_sheet()
     end
@@ -1466,5 +1467,44 @@ function test_wave_strict_transmission()
         oth(t) = (c = copy(t); c[S ÷ 2, S ÷ 2, :] .= 0; maximum(abs.(c)))
         @test oth(to_lo) > 0f0
         @test oth(to_hi) == 0f0
+    end
+end
+
+# ---- Discrete ↔ physical (ODE) convention --------------------------------
+#
+# The ODE integrates the mirrored state M(z) = −conj(z) under the spatially
+# conjugated kernel, so `mode = :ode` / SpikingCall run the same model as the
+# discrete recurrence and return code-convention phases. For the autonomous ODE
+# this is equivalent to the old path (it only flips the carrier's sense, which
+# period sampling hides) — the first check is a consistency check. It matters for
+# SpikingCall, where the input arrives as physical spikes: before the fix the
+# output came back reflected (φ → 1 − φ, uncorrelated with the discrete forward)
+# and, for a delayed :dog kernel, ran the conjugate (advance ↔ delay) model.
+
+function test_wave_ode_convention()
+    @testset "discrete ↔ ODE convention (mirror + conjugated kernel)" begin
+        S2 = 28
+        ld = PhasorWaveSheet(S2, S2; transmit = :strict, init_log_g = log(0.3))
+        pd, sd = Lux.setup(Xoshiro(1), ld)
+        θd = exp(only(pd.log_theta))
+        zr = 3f0 * θd .* cis.(2f0π .* rand(Xoshiro(2), Float32, S2, S2)) .*
+             (rand(Xoshiro(3), Float32, S2, S2) .< 0.3f0)
+        zd = wave_simulate(ld, pd, sd; z0 = ComplexF32.(zr), L = 8, mode = :discrete)
+        zo = wave_simulate(ld, pd, sd; z0 = ComplexF32.(zr), L = 8, mode = :ode)
+        Rt = vec(abs.(mean(cis.(angle.(zd) .- angle.(zo)); dims = (1, 2))))
+        @test minimum(Rt) > 0.98
+
+        # SpikingCall output is in the code convention: at weak coupling it matches
+        # the discrete forward with no reflection.
+        lp = PhasorWaveSheet(S2, S2; transmit = :potential, init_log_g = log(0.05))
+        pp, sp = Lux.setup(Xoshiro(1), lp)
+        xin = Phase.(0.5f0 .* (2f0 .* rand(Xoshiro(4), Float32, S2 * S2, 2) .- 1f0))
+        xL = repeat(reshape(xin, S2 * S2, 1, 2), 1, 4, 1)
+        yd, _ = lp(xL, pp, sp)
+        sc = SpikingCall(ssm_phases_to_train(xL; spk_args = lp.spk_args), lp.spk_args,
+                         (0f0, 4f0 * lp.spk_args.t_period))
+        ys, _ = lp(sc, pp, sp)
+        cm = mean(cispi.(Float32.(yd) .- Float32.(ys)))
+        @test abs(cm) > 0.95 && abs(angle(cm)) < 0.1f0
     end
 end
