@@ -46,14 +46,14 @@ To batch, pass a `(d, B)` phase matrix and a batched cost
     `fd_gradient_phasor` (`O(n_params)` settles) is unaffordable.
 
 !!! note "Finite-difference step size"
-    `fd_gradient_phasor`'s default `ε = 1e-5` is tuned for the toy chains'
-    `O(1)` `SimilarityCost`. Against a 10-class `CodebookCost` (loss
-    `O(log 10)`, `O(1)` gradients) that step is too small for Float32: the
-    difference falls below machine resolution and the *oracle* becomes
-    noise. Measured on a 49→12→10 proxy, EP-vs-FD relative error runs
-    0.24 at `ε=1e-5`, 0.027 at `1e-4`, **0.004 at `1e-3`**, 0.036 at
-    `1e-2` — the usual cancellation/truncation U-curve. Tune `ε` to the
-    loss scale before concluding anything about gradient quality.
+    `fd_gradient_phasor` defaults to `ε = 1e-3`, the bottom of the Float32
+    cancellation/truncation U-curve for `O(1)` losses. The old default of
+    `1e-5` left about 1% absolute Float32 noise in every component, so the
+    *oracle*, not EP, dominated the measured error, and the value depended
+    on CPU and BLAS (0.067–0.132 relative error on the toy bias test, vs
+    0.002 at `1e-3`). Measured on a 49→12→10 `CodebookCost` proxy, EP-vs-FD
+    relative error runs 0.24 at `ε=1e-5`, 0.027 at `1e-4`, **0.004 at
+    `1e-3`**, 0.036 at `1e-2`. Re-tune `ε` if the loss scale is far from 1.
 
 ```@autodocs
 Modules = [PhasorNetworks]

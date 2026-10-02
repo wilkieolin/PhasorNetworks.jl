@@ -37,6 +37,24 @@ PhasorLCA
 ```@docs
 MakeSpikingSSM
 ssm_phases_to_train
+ssm_train_to_phases
+```
+
+## Residual blocks and stacks
+
+Residual combination on the torus (phase addition of the branch onto the skip),
+the transformer block built from it, and `ScanStack` for weight-tied or stacked
+blocks. All three run in discrete, Dirac and spiking modes. In spiking mode,
+`spike_phase_bind` adds phases by shifting spike times, and
+`spike_phase_recenter` rotates a spike train by a phase offset.
+
+```@docs
+PhasorResidual
+PhaseRecenter
+PhasorTransformerBlock
+ScanStack
+spike_phase_bind
+spike_phase_recenter
 ```
 
 ## Output extraction

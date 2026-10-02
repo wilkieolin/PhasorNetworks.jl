@@ -26,6 +26,7 @@ makedocs(;
             "Metrics" => "api/metrics.md",
             "SSM" => "api/ssm.md",
             "Attractor SSM" => "api/attractor_ssm.md",
+            "Wave Sheets" => "api/wave.md",
             "Datasets" => "api/datasets.md",
             "Backend" => "api/backend.md",
             "Equilibrium Propagation" => "api/ep.md",
