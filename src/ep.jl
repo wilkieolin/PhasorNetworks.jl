@@ -114,9 +114,9 @@ nudge_force(c::SimilarityCost, z_o, β) = (Float32(β) / _feature_dim(z_o)) .* c
 
 # Single-sample path keeps the original `dot` reduction verbatim. Both
 # this loss and `fd_gradient_phasor` are cancellation-sensitive in
-# Float32 (FD at ε=1e-5 against an O(1) loss), so changing the
-# summation algorithm here visibly moves the FD oracle. Do not merge
-# these two methods.
+# Float32 (historically FD at ε=1e-5 against an O(1) loss; the default
+# is now 1e-3), so changing the summation algorithm here can move the
+# FD oracle. Do not merge these two methods.
 ep_loss(c::SimilarityCost, z_o::AbstractVector) =
     one(Float32) - real(dot(c.y, z_o)) / length(z_o)
 
@@ -1039,7 +1039,7 @@ _phase_input_to_complex(x::AbstractArray{<:Real})    = ComplexF32.(angle_to_comp
 # ================================================================
 
 """
-    fd_gradient_phasor(chain, ps, st, x, cost::AbstractEPCost; ε=1e-5, T=200, dt=0.5, K_mode=:zero)
+    fd_gradient_phasor(chain, ps, st, x, cost::AbstractEPCost; ε=1e-3, T=200, dt=0.5, K_mode=:zero)
     fd_gradient_phasor(chain, ps, st, x, y; kwargs...)
 
 Coordinate-by-coordinate forward finite-difference gradient of
@@ -1054,6 +1054,13 @@ Returns a NamedTuple matching `ps`'s structure; entries for
 parameters EP does not update (e.g., `log_neg_lambda`, `omega`)
 are zero.
 
+The step `ε` defaults to `1e-3`, the bottom of the Float32
+cancellation/truncation U-curve for O(1) losses. At the old default of
+`1e-5`, Float32 rounding of the loss (~1e-7) divided by ε left ~1%
+absolute noise in every component, and the oracle (not EP) set the
+measured error: the toy-chain bias test read 0.067–0.132 rel-err
+depending on CPU/BLAS, vs 0.002 at `ε = 1e-3`.
+
 This is the **ground-truth oracle** for the EP gradient. O(n_params)
 expensive — for a chain with n_p trainable params (weight + bias),
 runs n_p + 1 free-phase settles. Use for tests and small-network
@@ -1061,7 +1068,7 @@ analysis only.
 """
 function fd_gradient_phasor(chain::Lux.Chain, ps, st, x,
                             cost::AbstractEPCost;
-                            ε::Real = 1e-5, T::Int = 200, dt::Real = 0.5f0,
+                            ε::Real = 1e-3, T::Int = 200, dt::Real = 0.5f0,
                             K_mode::Symbol = :zero,
                             omega_override::Union{Nothing, Vector} = nothing,
                             project::Symbol = :hard)
@@ -1448,42 +1455,6 @@ end
 # sidebands so the +ω_p Fourier coefficient picks up the full
 # d/dβ_real = ∂/∂β + ∂/∂β̄, matching FD on real weights.
 
-"""
-    LockinEP(; ε=0.05, ω_p=0.05, n_cycles=8, T_warmup_cycles=2,
-             T_free=200, dt=0.1)
-
-Lock-in / temporal-Cauchy EP gradient extraction. The nudge is
-swept as `β(t) = ε·cos(ω_p t)` and the gradient is recovered by
-demodulating the per-layer Hebbian outer products at the probe
-frequency.
-
-# Knobs
-
-* `ε` — probe amplitude. Smaller → more linear, but eventually
-  hits the FD-precision noise floor.
-* `ω_p` — probe angular frequency (rad / time-unit, where one
-  step is `dt` time-units). Must be slow enough that the network
-  tracks the probe adiabatically — i.e. `ω_p ≪ relaxation_rate ≈
-  1/T_settle`.
-* `n_cycles` — integer number of probe periods over which to
-  integrate the lock-in. More → better demodulator selectivity at
-  proportional compute cost.
-* `T_warmup_cycles` — discarded probe periods at the start to let
-  the equilibrium catch up to the modulation. Two is usually
-  enough.
-* `T_free` — free-phase settle steps (β = 0) to reach the
-  base equilibrium.
-* `dt` — per-step time increment. The product `ω_p · dt` is the
-  per-step phase increment of the probe, so `dt` and `ω_p` are
-  coupled — fine `dt` lets you use higher `ω_p` without aliasing.
-
-# Defaults
-
-The defaults `(ε=0.05, ω_p=0.05, dt=0.1, n_cycles=8)` give roughly
-the deep-adiabatic regime visible in
-`demos/phasor_ep_demo.ipynb` Section 6 (matches FD to a few
-percent on a 2-layer chain).
-"""
 # ---- spike-timing readout floor ---------------------------------
 #
 # On a real spiking substrate a neuron's phase is not read off a complex
@@ -1565,6 +1536,42 @@ function _readout(z, δ::Float32, jitter::Float32, noise)
     return _dither_quantize.(z, 1f0 / δ, noise)
 end
 
+"""
+    LockinEP(; ε=0.05, ω_p=0.05, n_cycles=8, T_warmup_cycles=2,
+             T_free=200, dt=0.1)
+
+Lock-in / temporal-Cauchy EP gradient extraction. The nudge is
+swept as `β(t) = ε·cos(ω_p t)` and the gradient is recovered by
+demodulating the per-layer Hebbian outer products at the probe
+frequency.
+
+# Knobs
+
+* `ε` — probe amplitude. Smaller → more linear, but eventually
+  hits the FD-precision noise floor.
+* `ω_p` — probe angular frequency (rad / time-unit, where one
+  step is `dt` time-units). Must be slow enough that the network
+  tracks the probe adiabatically — i.e. `ω_p ≪ relaxation_rate ≈
+  1/T_settle`.
+* `n_cycles` — integer number of probe periods over which to
+  integrate the lock-in. More → better demodulator selectivity at
+  proportional compute cost.
+* `T_warmup_cycles` — discarded probe periods at the start to let
+  the equilibrium catch up to the modulation. Two is usually
+  enough.
+* `T_free` — free-phase settle steps (β = 0) to reach the
+  base equilibrium.
+* `dt` — per-step time increment. The product `ω_p · dt` is the
+  per-step phase increment of the probe, so `dt` and `ω_p` are
+  coupled — fine `dt` lets you use higher `ω_p` without aliasing.
+
+# Defaults
+
+The defaults `(ε=0.05, ω_p=0.05, dt=0.1, n_cycles=8)` give roughly
+the deep-adiabatic regime visible in
+`demos/phasor_ep_demo.ipynb` Section 6 (matches FD to a few
+percent on a 2-layer chain).
+"""
 Base.@kwdef struct LockinEP <: AbstractEPMethod
     ε::Float32                 = 0.05f0
     ω_p::Float32               = 0.05f0

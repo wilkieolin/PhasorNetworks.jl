@@ -14,7 +14,8 @@ const EP_T_FREE  = 100
 const EP_T_NUDGE = 50
 const EP_DT      = 0.5f0
 const EP_BETA    = 0.001f0       # small enough to suppress O(β) bias
-const EP_FD_TOL  = 0.05          # 5% rel-err target on each layer
+const EP_FD_TOL  = 0.02          # 2% rel-err; measured ≤0.3% with the ε=1e-3 FD oracle
+                                # (the old 5% absorbed ε=1e-5 Float32 noise in the oracle)
 
 function ep_tests()
     @testset "Phasor EP" begin
@@ -331,7 +332,7 @@ function ep_bias_support_tests()
             g_fd = fd.layer_1[pname]
             re   = norm(g_ep .- g_fd) / norm(g_fd)
             @info "Bias EP vs FD on layer_1.$pname: rel-err=$(round(re, digits=4))"
-            @test re < EP_FD_TOL * 2          # bias is looser; 10% target is fine
+            @test re < EP_FD_TOL              # bias matches as tightly as weights (≤0.2%)
         end
 
         # Sanity: layer_2 weight still matches at the tighter tolerance.
@@ -666,8 +667,8 @@ function ep_mlp_proxy_fd_tests()
         # Equilibrium is exactly stationary by T=100 here (measured:
         # ||z(T+1)-z(T)|| == 0 in Float32), so T=150 is ample.
         #
-        # FD step size: the default ε=1e-5 is tuned for the toy chains'
-        # O(1) SimilarityCost. The 10-class cross-entropy loss is O(2.4)
+        # FD step size (now also the library default): the old default
+        # ε=1e-5 was too small here. The 10-class cross-entropy loss is O(2.4)
         # with O(1) gradients, so at ε=1e-5 the FD difference falls below
         # Float32 resolution and the ORACLE — not EP — becomes noise
         # (measured rel-err 0.24 at 1e-5, 0.027 at 1e-4, 0.004 at 1e-3,
