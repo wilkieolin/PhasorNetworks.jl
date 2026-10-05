@@ -16,6 +16,7 @@
 #   8. Spectral occupancy → transport forecast (report §4.6: a code's own
 #      spatial-frequency content decides how far it survives)
 #   9. Strict transmission (:strict — unit phase above θ, nothing below)
+#  10. Silent = reference phase (:strict, silent = :reference)
 
 function wave_tests()
     @testset "PhasorWaveSheet" begin
@@ -45,6 +46,7 @@ function wave_tests()
         test_wave_stencil_coupling()
         test_wave_spike_transmission()
         test_wave_strict_transmission()
+        test_wave_silent_reference()
         test_wave_ode_convention()
         test_wave_emission_threshold()
         test_soliton_wave_sheet()
@@ -1467,6 +1469,81 @@ function test_wave_strict_transmission()
         oth(t) = (c = copy(t); c[S ÷ 2, S ÷ 2, :] .= 0; maximum(abs.(c)))
         @test oth(to_lo) > 0f0
         @test oth(to_hi) == 0f0
+    end
+end
+
+# ---- Silent = reference phase (:strict, silent = :reference) ---------------
+#
+# Under `silent = :reference` a sub-threshold site is read by its neighbours as
+# the unit phasor e^{iπ·silent_phase} instead of "no event" (the ARC "silent =
+# phase 0" proposition, TH4). Firing sites are unchanged. A uniformly silent
+# sheet therefore receives the uniform drive g·Ŵ(0)·ref, which vanishes only if
+# the kernel sums to zero — the exactness condition for reading silence as
+# phase 0. `:absent` (the default) must stay bit-identical to plain :strict.
+
+function test_wave_silent_reference()
+    @testset "silent = reference phase (:strict)" begin
+        rng = Xoshiro(44)
+        S = 16; L = 10; B = 2
+        relerr(a, b) = maximum(abs.(a .- b)) / (maximum(abs.(a)) + 1f-20)
+        θ = 1f0
+        z = ComplexF32[2f0 * cis(0.3f0), 0.5f0 * cis(-1.2f0), 0f0, 1.001f0 * cis(2f0)]
+
+        # (a) The emit: firing sites unchanged; silent sites read as the reference.
+        absent = PhasorWaveSheet(S, S; transmit = :strict)
+        ref0   = PhasorWaveSheet(S, S; transmit = :strict, silent = :reference)
+        refh   = PhasorWaveSheet(S, S; transmit = :strict, silent = :reference, silent_phase = 0.5)
+        @test absent.silent === :absent
+        s_abs = PhasorNetworks._transmit(absent, z, θ)
+        @test s_abs == PhasorNetworks._strict_emit(z, θ)                 # default path unchanged
+        s0 = PhasorNetworks._transmit(ref0, z, θ)
+        sh = PhasorNetworks._transmit(refh, z, θ)
+        @test all(isfinite, s0) && all(isfinite, sh)
+        @test s0[[1, 4]] == s_abs[[1, 4]] && sh[[1, 4]] == s_abs[[1, 4]]
+        @test s0[2] ≈ 1f0 + 0f0im && s0[3] ≈ 1f0 + 0f0im
+        @test sh[2] ≈ 0f0 + 1f0im && sh[3] ≈ 0f0 + 1f0im                  # e^{iπ/2}
+
+        # (b) Exactness condition: from an all-silent state one step gives the
+        #     uniform drive g·Ŵ(0)·ref; :absent gives exactly 0.
+        ps, st = Lux.setup(rng, ref0)
+        ω = period_to_angfreq(ref0.spk_args.t_period)
+        _, g, Wh = PhasorNetworks._build_coupling(ref0, ps, st, ω)
+        z0 = zeros(ComplexF32, S, S, B)
+        z1 = PhasorNetworks._wave_rollout(ref0, ps, st, z0, nothing, 1)
+        @test maximum(abs.(z1 .- z1[1])) < 1f-4
+        @test z1[1] ≈ only(g) * Wh[1, 1] rtol = 1f-3
+        @test maximum(abs.(PhasorNetworks._wave_rollout(absent, ps, st, z0, nothing, 1))) == 0f0
+        #     The default delayed :dog has its band peak at q = 0, so reading silence
+        #     as phase 0 is far from exact there; removing the delay nearly balances it.
+        undelayed = PhasorWaveSheet(S, S; transmit = :strict, silent = :reference,
+                                    init_log_speed = log(1f6))
+        psu, stu = Lux.setup(rng, undelayed)
+        _, _, Whu = PhasorNetworks._build_coupling(undelayed, psu, stu, ω)
+        @test abs(Wh[1, 1]) ≈ maximum(abs.(Wh)) rtol = 1f-3
+        @test abs(Whu[1, 1]) < 0.2f0 * maximum(abs.(Whu))
+
+        # (c) DEQ with n_sweeps == L reproduces the sequential rollout under :reference.
+        θ0 = exp(only(ps.log_theta))
+        zb = zeros(ComplexF32, S, S, B); zb[S ÷ 2, S ÷ 2, :] .= 3f0 * θ0
+        seq = PhasorNetworks._wave_rollout(ref0, ps, st, zb, nothing, L)
+        deq = PhasorNetworks._wave_rollout_deq(ref0, ps, st, zb, nothing, L;
+                                               n_sweeps = L, emit_mode = :unit)
+        @test all(isfinite, seq)
+        @test relerr(seq, deq) < 1f-4
+
+        # (d) Gradient flows (finite) through the Phase forward.
+        x = Phase.(2f0 .* rand(rng, Float32, S * S, L, B) .- 1f0)
+        val, gs = Zygote.withgradient(p -> sum(abs2, Float32.(first(ref0(x, p, st)))), ps)
+        @test isfinite(val)
+        @test all(isfinite, gs[1].log_g)
+
+        # (e) Validation and the ODE guard.
+        @test occursin("silent=:reference", sprint(show, ref0))
+        @test !occursin("silent", sprint(show, absent))
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :strict, silent = :bogus)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :spike, silent = :reference)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential, silent = :reference)
+        @test_throws ArgumentError wave_simulate(ref0, ps, st; z0 = zb[:, :, 1], L = 2, mode = :ode)
     end
 end
 
