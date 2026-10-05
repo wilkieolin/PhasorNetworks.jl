@@ -78,6 +78,20 @@ speed) for analysis and demos.
   derived default and homeostasis as `:spike`. The gate is hard in the forward
   and backward pass (non-firing sites get no gradient); `homeostasis` still
   trains `θ` through its own straight-through fire indicator.
+- `silent::Symbol = :absent` — how a **sub-threshold** site is read by its
+  neighbours under `transmit = :strict`. `:absent` (default): it sends nothing,
+  so it contributes nothing to the coupling field. `:reference`: it is read as
+  the unit phasor at the reference phase `silent_phase` — "in sync with the
+  passing wave, so it need not spike". The two agree exactly when the kernel
+  sums to zero over the silent neighbourhood (`Ŵ(0) = 0` for a uniformly
+  silent sheet, which the *undelayed* default DoG satisfies); otherwise
+  `:reference` adds a bias-like drive `Σ_silent W·e^{iπ·silent_phase}`.
+  Only valid with `transmit = :strict`, and only on the discrete paths
+  (Lux forward, `wave_simulate` `:discrete`/`:scan`/`:deq`); the ODE paths
+  (`CurrentCall`, `SpikingCall`, `wave_simulate(mode=:ode)`) raise an
+  `ArgumentError`, since there a silent site emits no physical event.
+- `silent_phase::Real = 0` — the reference phase (units of π, code
+  convention) used by `silent = :reference`.
 - `init_log_theta::Union{Real,Nothing} = nothing` — `log θ`, the **emission
   threshold** (units of `|z|`); the spike is `z/√(|z|²+θ²)`, i.e. the `ε` of
   [`normalize_to_unit_circle`](@ref) with `ε = θ²`. **The default is derived**:
@@ -217,6 +231,8 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     init_log_eta_l::Float32    # per-site homeostatic rate
     init_logit_target::Float32 # target mean soft-fire fraction (logit-parameterized)
     init_log_theta_beta::Float32  # sigmoid width in the fire indicator's STE backward pass
+    silent::Symbol             # :absent (sub-threshold sends nothing) | :reference (read as e^{iπ·silent_phase}); :strict only
+    silent_phase::Float32      # reference phase for silent = :reference (units of π, code convention)
     spk_args::SpikingArgs
 end
 
@@ -246,6 +262,8 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          init_log_eta_l::Real = log(0.02),
                          init_logit_target::Real = log(0.02 / 0.98),
                          init_log_theta_beta::Real = log(0.05),
+                         silent::Symbol = :absent,
+                         silent_phase::Real = 0,
                          spk_args::SpikingArgs = SpikingArgs())
     coupling in (:dog, :stencil, :aniso, :shift) ||
         throw(ArgumentError("coupling must be :dog, :stencil, :aniso or :shift, got :$coupling"))
@@ -256,6 +274,11 @@ function PhasorWaveSheet(H::Integer, W::Integer;
     homeostasis !== :none && transmit === :potential &&
         throw(ArgumentError("homeostasis=:$homeostasis regulates the emission threshold, " *
               "which only exists under transmit=:spike or :strict (got transmit=:$transmit)"))
+    silent in (:absent, :reference) ||
+        throw(ArgumentError("silent must be :absent or :reference, got :$silent"))
+    silent === :reference && transmit !== :strict &&
+        throw(ArgumentError("silent=:reference defines what a sub-threshold site sends, " *
+              "which is only a hard 'no event' under transmit=:strict (got transmit=:$transmit)"))
     coupling === :stencil && (2 * stencil_radius + 1 > min(H, W)) &&
         throw(ArgumentError("stencil_radius=$stencil_radius too large for $(H)×$(W) sheet"))
     # Default conduction speed is DERIVED, not a constant: c = 2σ_I/T puts the
@@ -278,6 +301,7 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                            Float32(init_theta_frac),
                            Float32(init_log_eta_g), Float32(init_log_eta_l),
                            Float32(init_logit_target), Float32(init_log_theta_beta),
+                           silent, Float32(silent_phase),
                            spk_args)
 end
 
@@ -288,6 +312,7 @@ function Base.show(io::IO, l::PhasorWaveSheet)
     _thresholded(l) &&
         print(io, "theta=$(l.init_log_theta === nothing ? "derived" : exp(l.init_log_theta)), ")
     l.homeostasis !== :none && print(io, "homeostasis=:$(l.homeostasis), ")
+    l.silent !== :absent && print(io, "silent=:$(l.silent)(phase $(l.silent_phase)), ")
     print(io, "t_period=$(l.spk_args.t_period))")
 end
 
@@ -1208,19 +1233,35 @@ end
 # site above 1e-4 emitted a FULL spike and an impulse became an ignition cascade
 # rather than a wave. See `emission_threshold`.
 #   :strict    — z/|z| where |z| > θ, exactly 0 elsewhere: a phase or no event.
+#                With silent = :reference a sub-threshold site is instead read as
+#                the reference phasor e^{iπ·silent_phase} ("silent = phase 0").
 _transmit(l::PhasorWaveSheet, z, θ) =
     l.transmit === :spike  ? normalize_to_unit_circle(z; ε = θ .^ 2) :
-    l.transmit === :strict ? _strict_emit(z, θ) : z
+    l.transmit === :strict ? _strict_emit(z, θ, _silent_ref(l)) : z
+
+# The phasor a silent site is read as: `nothing` (absent) or the unit reference.
+_silent_ref(l::PhasorWaveSheet) =
+    l.silent === :reference ? ComplexF32(cospi(l.silent_phase), sinpi(l.silent_phase)) : nothing
+
+# The ODE paths integrate physical events; a silent site emits none there, so
+# reading it as a reference phase has no continuous-time counterpart yet.
+_check_silent_ode(l::PhasorWaveSheet) =
+    l.silent === :absent ||
+        throw(ArgumentError("silent=:$(l.silent) is implemented on the discrete paths only; " *
+              "the ODE/CurrentCall/SpikingCall paths need silent=:absent"))
 
 # Hard-gated unit emit. The denominator is |z| on firing sites and ≥ 1 on silent
 # ones (which are then multiplied by 0), so it is NaN-free at z = 0 and AD-safe;
-# silent sites carry no gradient.
-function _strict_emit(z, θ)
+# silent sites carry no gradient. With a reference `ref`, silent sites emit the
+# constant `ref` instead of 0 (still no gradient through them).
+function _strict_emit(z, θ, ref = nothing)
     r = abs.(z)
     fire = ignore_derivatives() do
         Float32.(r .> θ)
     end
-    return fire .* z ./ (r .+ (1f0 .- fire))
+    out = fire .* z ./ (r .+ (1f0 .- fire))
+    ref === nothing && return out
+    return out .+ (1f0 .- fire) .* ref
 end
 
 # Does this sheet have an emission threshold θ (a `log_theta` parameter)?
@@ -1824,6 +1865,7 @@ end
 # period. Closes over the coupling built from `ps` — used for pure-forward
 # simulation/validation (the trainable AD path is the CurrentCall dispatch).
 function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
+    _check_silent_ode(l)
     ω = period_to_angfreq(l.spk_args.t_period)
     T = Float32(l.spk_args.t_period)
     _, g, W_hat = _build_coupling(l, ps, st, ω)
@@ -1940,6 +1982,7 @@ end
 # matching the discrete Lux forward's interface.
 
 function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
+    _check_silent_ode(l)
     spk_args = x.spk_args
     tspan    = x.t_span
     H, W     = l.grid_h, l.grid_w
