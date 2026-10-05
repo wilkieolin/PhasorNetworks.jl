@@ -669,3 +669,30 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
     ls = stack(ls) ./ num
     return ls, correct
 end
+
+"""
+    near_wrap_fraction(x; tol = 1f-4) -> Float32
+
+Fraction of elements whose phase lies within `tol` (units of π) of the Dirac
+slot edge θ = ±1. `x` is a phase array (`Phase` or real, in [-1, 1]) or an
+array of complex potentials (converted with [`complex_to_angle`](@ref)); NaN
+phases (silent neurons) are ignored.
+
+At the slot edge a spike's contribution keeps its phase but its magnitude jumps
+by `e^{λT}` (see [`_spike_dt`](@ref)), so units there are not differentiable and
+flip branch under any perturbation. Report this fraction alongside finite-
+difference gradient checks, Hessian/gain analyses and perturbation sweeps; a
+non-zero value on clean data usually means the real-axis invariance is intact
+(real weights, real bias, inputs on {0, ±1}) — see [`default_bias`](@ref).
+"""
+near_wrap_fraction(x::AbstractArray{<:Complex}; tol::Real = 1f-4) =
+    near_wrap_fraction(complex_to_angle(x); tol = tol)
+
+function near_wrap_fraction(x::AbstractArray; tol::Real = 1f-4)
+    θ = Float32.(x)
+    valid = .!isnan.(θ)
+    n = count(valid)
+    n == 0 && return 0f0
+    edge = ((1f0 .- abs.(θ)) .<= Float32(tol)) .& valid
+    return Float32(count(edge) / n)
+end

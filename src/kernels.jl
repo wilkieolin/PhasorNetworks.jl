@@ -223,13 +223,49 @@ end
 # ================================================================
 
 """
+    _spike_dt(phases, T) -> Float32 array
+
+Time from a spike at phase θ to the end-of-slot sample point. The spike sits at
+`t_s = mod((θ/2 + ½)·T, T)` — the same arithmetic as [`phase_to_time`](@ref) — so
+`dt = T − t_s`. Both θ = +1 and θ = −1 map to the **start** of the slot
+(`dt = T`), exactly as the spiking encoder places them, so the discrete (Dirac)
+and spiking paths agree on the slot edge.
+
+The edge itself is a genuine discontinuity of the slotted representation: just
+below θ = +1 the spike is at the end of the slot (`dt → 0`, full weight); at
+θ = ±1 it is at the start (`dt = T`, weight `e^{λT}`). The contribution's phase
+is continuous (ωT = 2π); its magnitude jumps by `e^{λT}`. Real weights and
+real biases keep the real axis invariant, so inputs on {0, ±1} (e.g. blank
+rows) can park units exactly on the edge — see [`near_wrap_fraction`](@ref) and
+[`default_bias`](@ref).
+
+Gradient: `∂dt/∂θ = −T/2` (almost everywhere), as before.
+"""
+function _spike_dt(phases, T::Real)
+    T_f = Float32(T)
+    return T_f .- mod.((Float32.(phases) ./ 2f0 .+ 0.5f0) .* T_f, T_f)
+end
+
+function ChainRulesCore.rrule(::typeof(_spike_dt), phases, T::Real)
+    y = _spike_dt(phases, T)
+    half = Float32(T) / 2f0
+    function _spike_dt_pullback(ȳ_)
+        ȳ = unthunk(ȳ_)
+        ȳ isa ChainRulesCore.AbstractZero && return (NoTangent(), ȳ, NoTangent())
+        return (NoTangent(), -half .* ȳ, NoTangent())
+    end
+    return y, _spike_dt_pullback
+end
+
+"""
     dirac_encode(phases, λ, ω, T) -> ComplexF32 array (C_out × C_in × L × B)
 
 Encode phase inputs as single-oscillator Dirac spike responses.
 
 Each R&F neuron integrates incoming spikes directly.  A spike at phase θ
 arrives at time `t_s = (θ/2 + 0.5)·T` within the period, leaving
-`dt = T·(0.5 - θ/2)` until the next sample point.  The neuron with
+`dt = T·(0.5 - θ/2)` until the next sample point (θ = ±1 both mean the slot
+start, `dt = T`; see [`_spike_dt`](@ref)).  The neuron with
 eigenvalue k_c responds as `exp(k_c · dt)`.
 
 All neurons in a layer share the same resonant frequency — spikes carry
@@ -248,7 +284,7 @@ only on its own dynamics k_c and the elapsed time dt.
 function dirac_encode(phases::AbstractArray{<:Real, 3},
                       λ::AbstractVector, ω::AbstractVector, T::Real)
     k_c = ComplexF32.(λ .+ im .* ω)                            # (C_out,)
-    dt = Float32(T) .* (0.5f0 .- Float32.(phases) ./ 2f0)     # (C_in, L, B)
+    dt = _spike_dt(phases, T)                                  # (C_in, L, B)
 
     k_c_r = reshape(k_c, :, 1, 1, 1)                           # (C_out, 1, 1, 1)
     dt_r = reshape(dt, 1, size(dt)...)                          # (1, C_in, L, B)
@@ -339,7 +375,8 @@ Causal convolution with Dirac discretization for phase-valued inputs.
 Models a single R&F neuron per output channel directly integrating incoming
 spikes.  A spike at phase θ arrives at time `t_s = (θ/2 + 0.5)·T` within
 the period.  The neuron at eigenvalue k_c responds with `exp(k_c · dt)` where
-`dt = T·(0.5 - θ/2)` is the time remaining until the next sample point.
+`dt = T·(0.5 - θ/2)` is the time remaining until the next sample point
+(θ = ±1 both mean the slot start, `dt = T`; see [`_spike_dt`](@ref)).
 
 The computation factors into a phase-dependent encoding and a lag-dependent
 causal convolution kernel:
@@ -372,7 +409,7 @@ function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
     # Time remaining from spike to end of same period: dt = T·(0.5 - θ/2).
     # Phase / Float32 promotes to Float32 elementwise (per the Phase
     # type's promotion rules), so no explicit cast is needed.
-    dt = T_f .* (0.5f0 .- phases ./ 2f0)                   # (C_in, L, B) Float32
+    dt = _spike_dt(phases, T_f)                            # (C_in, L, B) Float32
 
     # Grouped diagonal encoding: compute H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
     # Processes G output channels at once to reduce GPU kernel launch overhead

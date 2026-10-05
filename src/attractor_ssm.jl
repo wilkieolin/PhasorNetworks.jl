@@ -251,7 +251,7 @@ function (l::AttractorPhasorSSM)(x::AbstractArray{<:Phase, 3},
     # Per-period Dirac kick for output channel D, given input phases (in_dims, B).
     function _step_kick(phases_t::AbstractMatrix)
         # phases_t :: (in_dims, B) Phase
-        dt_t = T .* (0.5f0 .- Float32.(phases_t) ./ 2f0)        # (in_dims, B) Float32
+        dt_t = _spike_dt(phases_t, T)                            # (in_dims, B) Float32
         # _exp_kdt expects rank-3 inputs: k as (D,1,1), dt as (1,in,B).
         enc  = _exp_kdt(reshape(k, D, 1, 1),
                         reshape(dt_t, 1, in_dims, B))            # (D, in_dims, B)

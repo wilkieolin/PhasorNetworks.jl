@@ -34,6 +34,7 @@ function ssm_tests()
         soft_normalize_to_unit_circle_zero_tests()
         phasor_stft_sparse_input_tests()
         zoh_bias_continuous_current_tests()
+        dirac_slot_edge_tests()
     end
 end
 
@@ -1528,5 +1529,52 @@ function zoh_bias_continuous_current_tests()
             end
             @test maximum(arc) < 1f-4
         end
+    end
+end
+
+# ---- Dirac slot edge (θ = ±1) --------------------------------------------
+#
+# A spike at θ = ±1 sits on the boundary between slots. The spiking encoder
+# (`phase_to_time`) places both at the slot START, so the Dirac path must too
+# (dt = T, weight e^{λT}); just below +1 the spike is at the slot end (dt → 0).
+# Real weights + an exactly-real bias keep the real axis invariant, so inputs
+# on {0, ±1} park units on the edge; the default bias is now 0.01 rad off axis.
+
+function dirac_slot_edge_tests()
+    @testset "Dirac slot edge (θ = ±1)" begin
+        T = 1f0
+        θs = Float32[-1, -0.75, -0.5, 0, 0.3, 0.9999, 1]
+        dt = PhasorNetworks._spike_dt(θs, T)
+        # (a) Same placement as the spiking encoder; ±1 both mean the slot start.
+        @test dt[1] == T && dt[end] == T
+        @test all(dt[2:end-1] .≈ T .- phase_to_time(θs[2:end-1], T))
+        @test dt[end-1] < 1f-3                       # just below +1: slot end
+        # (b) The Dirac encoders give identical responses at θ = +1 and θ = −1.
+        λ = Float32[-0.2]; ω = Float32[period_to_angfreq(T)]; W = ones(Float32, 1, 1)
+        enc(θ) = PhasorNetworks.causal_conv_dirac(reshape(Phase.(Float32[θ, 0.5f0]), 1, 2, 1), W, λ, ω, T)
+        @test enc(1f0) ≈ enc(-1f0)
+        @test abs(enc(1f0)[1]) ≈ exp(λ[1] * T) rtol = 1f-5
+        @test abs(enc(0.9999f0)[1]) ≈ 1f0 rtol = 1f-3
+        @test dirac_encode(reshape(Float32[1], 1, 1, 1), λ, ω, T) ≈ dirac_encode(reshape(Float32[-1], 1, 1, 1), λ, ω, T)
+        # (c) Gradient w.r.t. phase unchanged in the interior: ∂dt/∂θ = −T/2.
+        g = withgradient(θ -> sum(PhasorNetworks._spike_dt(θ, T)), Float32[-0.3, 0.4]).grad[1]
+        @test g ≈ fill(-T / 2, 2)
+        # (d) Default bias is off the real axis; real_bias keeps the old 1 + 0i.
+        rng = Xoshiro(7)
+        @test all(default_bias(rng, (3,)) .== ComplexF32(1, DEFAULT_BIAS_IMAG))
+        @test all(real_bias(rng, (3,)) .== ComplexF32(1, 0))
+        # (e) Real-axis trap: inputs on {0, ±1} with real weights and a negative
+        #     real bias park units on the edge; the default bias does not.
+        layer = PhasorDense(8 => 8; use_bias = true)
+        ps, st = Lux.setup(Xoshiro(2), layer)
+        x = Phase.(rand(Xoshiro(3), Float32[0, 1, -1], 8, 4, 2))
+        ps_real_neg = merge(ps, (bias_real = -ones(Float32, 8), bias_imag = zeros(Float32, 8)))
+        ps_def_neg  = merge(ps, (bias_real = -ones(Float32, 8),))
+        @test near_wrap_fraction(first(layer(x, ps_real_neg, st))) > 0.5f0
+        @test near_wrap_fraction(first(layer(x, ps_def_neg, st))) == 0f0
+        # (f) near_wrap_fraction itself: tolerance, complex input, NaN ignored.
+        @test near_wrap_fraction(Float32[1, -1, 0.99995, 0.5]) ≈ 0.75f0
+        @test near_wrap_fraction(Float32[1, NaN, 0, 0]) ≈ 1f0 / 3f0
+        @test near_wrap_fraction(ComplexF32[-1, 1, 1im]) ≈ 1f0 / 3f0
     end
 end

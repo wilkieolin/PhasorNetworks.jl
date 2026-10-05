@@ -1572,7 +1572,7 @@ end
 # the sheet and `PhasorDense` share one phase-SSM emission. Differs from the
 # `:unit` emit `z/|z|` only by the sub-cycle leak magnitude `exp(λ·dt)`.
 _emit_dirac(z, k, T) =
-    exp.(k .* (Float32(T) .* (0.5f0 .- Float32.(complex_to_angle(z)) ./ 2f0)))
+    exp.(k .* _spike_dt(complex_to_angle(z), T))
 
 """
     _wave_rollout_deq(l, ps, st, z0, drive, L; n_sweeps, emit_mode) -> (H,W,L,B)

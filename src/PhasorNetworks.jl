@@ -163,7 +163,10 @@ nyquist_dt,
 train,
 soft_angle,
 default_bias,
+real_bias,
 zero_bias,
+DEFAULT_BIAS_IMAG,
+near_wrap_fraction,
 
 #hep
 holotanh,

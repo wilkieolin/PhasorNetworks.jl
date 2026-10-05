@@ -150,7 +150,8 @@ Layer that adds learnable complex-valued biases to phase networks.
 - `init_bias`: Function to initialize bias values (default: ones)
 
 # Initialization Options
-- `default_bias`: Initialize with ones in complex plane
+- `default_bias`: `1 + 0.01i` (unit magnitude, ≈0.01 rad off the real axis)
+- `real_bias`: exactly `1 + 0i` (the pre-2026-10 default)
 - `zero_bias`: Initialize with zeros
 - Custom initialization function with signature (rng, dims) -> ComplexF32 array
 
@@ -162,7 +163,37 @@ struct ComplexBias <: LuxCore.AbstractLuxLayer
     init_bias
 end
 
+"""
+    DEFAULT_BIAS_IMAG = 0.01f0
+
+Imaginary part of [`default_bias`](@ref). Real weights and a real bias keep the
+real axis invariant: if every input phase is 0 or ±1 (e.g. a blank image row),
+every potential is exactly real and units park exactly on the Dirac slot edge
+θ = ±1 (see [`_spike_dt`](@ref)), where the side chosen depends on the sign of a
+floating-point zero. A small imaginary part breaks that invariance. It is a
+constant, so initialisation consumes no random numbers and weight inits are
+unchanged.
+"""
+const DEFAULT_BIAS_IMAG = 0.01f0
+
+"""
+    default_bias(rng, dims) -> ComplexF32 array
+
+Default bias initialiser: `1 + DEFAULT_BIAS_IMAG·i` everywhere (≈0.01 rad off
+the real axis; see [`DEFAULT_BIAS_IMAG`](@ref)). Use [`real_bias`](@ref) for the
+previous exactly-real `1 + 0i`.
+"""
 function default_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
+    return fill(ComplexF32(1f0, DEFAULT_BIAS_IMAG), dims)
+end
+
+"""
+    real_bias(rng, dims) -> ComplexF32 array
+
+Exactly-real unit bias `1 + 0i` — the default before 2026-10. Keeps the real axis
+invariant under real weights; see [`DEFAULT_BIAS_IMAG`](@ref).
+"""
+function real_bias(rng::AbstractRNG, dims::Tuple{Vararg{Int}})
     return ones(ComplexF32, dims)
 end
 
@@ -453,7 +484,7 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
         # in the ODE path. See `docs/three_view_mismatch_analysis.md`.
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag       # (C,)
         bphase = angle.(bias_val) ./ Float32(π)                           # (C,) ∈ [-1,1]
-        dt_b = T .* (0.5f0 .- bphase ./ 2f0)                              # (C,)
+        dt_b = _spike_dt(bphase, T)                              # (C,)
         k_c  = ComplexF32.(λ .+ 1im .* ω)                                 # (C,)
         b_eff = abs.(bias_val) .* exp.(k_c .* dt_b)                       # (C,)
         G = bias_kernel_accumulation(λ, ω, T, L)                          # (C, L)
@@ -1146,7 +1177,7 @@ function (a::ResonantSTFT)(x::AbstractArray{<:Phase, 3}, params::LuxParams, stat
         # `docs/three_view_mismatch_analysis.md`.
         bias_val = params.bias_real .+ 1.0f0im .* params.bias_imag
         bphase = angle.(bias_val) ./ Float32(π)
-        dt_b = T .* (0.5f0 .- bphase ./ 2f0)
+        dt_b = _spike_dt(bphase, T)
         k_c  = ComplexF32.(λ .+ 1im .* ω)
         b_eff = abs.(bias_val) .* exp.(k_c .* dt_b)
         G = bias_kernel_accumulation(λ, ω, T, L)
