@@ -1454,6 +1454,13 @@ end
 # extracts only the Wirtinger ∂/∂β; a real cosine probe excites both
 # sidebands so the +ω_p Fourier coefficient picks up the full
 # d/dβ_real = ∂/∂β + ∂/∂β̄, matching FD on real weights.
+#
+# Why a real reference too (cos(ω_p t), not e^{-iω_p t}): each gradient is
+# one real channel of a complex Hebbian (Re H for weights, Im H for
+# bias_imag). Off the adiabatic limit the response lags the probe, and a
+# complex reference followed by Re(·) adds Im(H)·sin(ω_p t) — the other
+# channel's quadrature response — to Re(H)·cos(ω_p t). That leak is first
+# order in ω_p; demodulating each channel against cos(ω_p t) removes it.
 
 # ---- spike-timing readout floor ---------------------------------
 #
@@ -1715,20 +1722,21 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
 
     # 4. Accumulators.
     #
-    # `Ẑ[l] = Σ_t z_l(t)·e^{-iω_p t}` — the demodulated state of every
-    # layer, `(out_l, B)`. This gives the bias gradient for every layer
-    # directly.
+    # `Ẑ[l] = Σ_t z_l(t)·cos(ω_p t)` — the demodulated state of every
+    # layer, `(out_l, B)`; Re and Im are demodulated independently (the
+    # reference is real — see the note at `demod` below). This gives the
+    # bias gradient for every layer directly.
     #
     # For layer 1's weight gradient: in the co-rotating frame, the input `z₀`
-    # is constant, so `Σ_t z₁(t)·z₀' ·e^{-iω_p t} = (Σ_t z₁(t)e^{-iω_p t})·z₀'`
+    # is constant, so `Σ_t z₁(t)·z₀' ·cos(ω_p t) = (Σ_t z₁(t)cos(ω_p t))·z₀'`
     # factors out (optimization). In the lab frame, the input rotates with
     # the carrier, so we must accumulate the outer product per step.
     #
     # `HW[l]` for l ≥ 1 accumulates `Σ_t demod · z_l · z_{l-1}'` (adjoint).
     # For l=1, `z_{l-1}` is the input `z₀` (put on carrier for lab frame).
     #
-    # `c = Σ_t e^{-iω_p t}` carries the DC subtraction out of the loop
-    # too: `Σ_t (h(t) - h_dc)·e^{-iω_p t} = Σ_t h(t)e^{-iω_p t} - c·h_dc`.
+    # `c = Σ_t cos(ω_p t)` carries the DC subtraction out of the loop
+    # too: `Σ_t (h(t) - h_dc)·cos(ω_p t) = Σ_t h(t)cos(ω_p t) - c·h_dc`.
     # It is ≈0 over integer cycles but is kept exact.
     _state_template(s) = s isa Tuple ? s[1] : s
     _state_size(s) = s isa Tuple ? size(s[1]) : size(s)
@@ -1775,7 +1783,19 @@ function ep_gradient(m::LockinEP, chain::Lux.Chain, ps, st, x,
             # But the original uses t * dt for step t (1-based), so for
             # effective step t_eff (0-based) corresponding to original step t = t_eff*se + 1:
             demod_phase = m.ω_p * Float32(t_eff * se + 1) * m.dt
-            demod = ComplexF32(exp(-im * demod_phase))
+            # REAL in-phase reference cos(ω_p t), not e^{-iω_p t}. Every
+            # gradient is read from one real channel of a complex Hebbian
+            # (weight, bias_real, alpha: Re H; bias_imag: Im H). Demodulating
+            # the complex H by e^{-iω_p t} and then taking Re gives
+            # Re(H)·cos + Im(H)·sin: the quadrature (sin) response of the
+            # OTHER channel leaks in. That leak is first order in ω_p and was
+            # the whole of lock-in's noiseless bias (cos 0.985–0.997 on the
+            # T2 proxies, as low as 0.26 on one layer of a 4→8→2 chain at
+            # ω_p = 0.05). With a real reference each channel keeps only its
+            # own in-phase component; the in-phase amplitude, and so the
+            # -2/(T·ε) normalisation, is unchanged. See
+            # arc_experiments/experiments/TH7_probe_theory/FINDINGS.md.
+            demod = ComplexF32(cos(demod_phase))
             c += demod
 
             # Readout time: absolute time for carrier demodulation in lab frame.

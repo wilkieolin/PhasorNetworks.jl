@@ -25,6 +25,7 @@ function ep_tests()
         ep_gradient_vs_fd_tests()
         ep_training_tests()
         ep_lockin_vs_fd_tests()
+        ep_lockin_quadrature_tests()
         ep_lockin_training_tests()
         ep_bias_support_tests()
         ep_codebook_cost_tests()
@@ -938,3 +939,72 @@ function ep_readout_tests()
         @test re(gq) > re(g0)
     end
 end
+
+# ----------------------------------------------------------------
+# 17. LockinEP: real in-phase reference, no quadrature leak
+# ----------------------------------------------------------------
+# Every lock-in gradient is one real channel of a complex Hebbian (Re H
+# for weights and bias_real, Im H for bias_imag). Demodulating the complex
+# H by e^{-iω_p t} and keeping Re mixes in Im(H)·sin(ω_p t), the other
+# channel's quadrature response: a gradient error first order in ω_p, so
+# 1 − cos ∝ ω_p². With the real reference cos(ω_p t) only the second-order
+# in-phase lag remains: gradient error ∝ ω_p², 1 − cos ∝ ω_p⁴.
+# Reference: centred StaticEP at the same dt. Measured before the fix
+# (complex reference) / after, at ω_p = 0.05:
+#   seed 42: cos 0.773 (layer_2 weight 0.258) / 0.9936; seeds 7, 11: 0.993, 0.992 / 1.0000.
+
+function _ep_lockin_bias_chain(seed)
+    rng = Xoshiro(seed)
+    chain = Chain(PhasorDense(4 => 8, normalize_to_unit_circle, use_bias=true),
+                  PhasorDense(8 => 2, normalize_to_unit_circle, use_bias=true))
+    ps, st = Lux.setup(rng, chain)
+    ps = (layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+          layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)))
+    x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+    y = ComplexF32.(exp.(im .* π .* (2f0 .* rand(rng, Float32, 2) .- 1f0)))
+    return chain, ps, st, x, y
+end
+
+_ep_flat(g) = vcat(vec(g.layer_1.weight), g.layer_1.bias_real, g.layer_1.bias_imag,
+                   vec(g.layer_2.weight), g.layer_2.bias_real, g.layer_2.bias_imag)
+_ep_cos(a, b) = dot(vec(a), vec(b)) / (norm(a) * norm(b) + 1e-12)
+
+function ep_lockin_quadrature_tests()
+    @testset "LockinEP real reference: no quadrature leak" begin
+        ref_method = StaticEP(β=1f-3, T_free=2000, T_nudge=2000, dt=0.1f0, centered=true)
+        lockin(ω_p) = LockinEP(ε=0.01f0, ω_p=ω_p, n_cycles=4, T_warmup_cycles=2,
+                               T_free=2000, dt=0.1f0)
+
+        # (a) Generic chains: lock-in ≡ centred static at ω_p = 0.05, every
+        #     parameter group including bias_imag (the Im-H channel).
+        for seed in (7, 11)
+            chain, ps, st, x, y = _ep_lockin_bias_chain(seed)
+            ref, _ = ep_gradient(ref_method, chain, ps, st, x, y)
+            lk, _  = ep_gradient(lockin(0.05f0), chain, ps, st, x, y)
+            cs = _ep_cos(_ep_flat(lk), _ep_flat(ref))
+            @info "LockinEP vs centred static, seed $seed, ω_p=0.05: cos=$(round(cs, digits=6))"
+            @test cs > 0.9999
+            for (l, p) in ((:layer_1, :weight), (:layer_1, :bias_real), (:layer_1, :bias_imag),
+                           (:layer_2, :weight), (:layer_2, :bias_imag))
+                @test _ep_cos(lk[l][p], ref[l][p]) > 0.999
+            end
+            # Normalisation unchanged: magnitudes agree in the adiabatic limit.
+            lk_slow, _ = ep_gradient(lockin(0.01f0), chain, ps, st, x, y)
+            @test norm(_ep_flat(lk_slow) .- _ep_flat(ref)) / norm(_ep_flat(ref)) < 0.01
+        end
+
+        # (b) A chain with a soft mode near ω_p (the case where the complex
+        #     reference failed worst) and the order of the residual.
+        chain, ps, st, x, y = _ep_lockin_bias_chain(42)
+        ref, _ = ep_gradient(ref_method, chain, ps, st, x, y)
+        g05, _ = ep_gradient(lockin(0.05f0), chain, ps, st, x, y)
+        g025, _ = ep_gradient(lockin(0.025f0), chain, ps, st, x, y)
+        d05  = 1 - _ep_cos(_ep_flat(g05),  _ep_flat(ref))
+        d025 = 1 - _ep_cos(_ep_flat(g025), _ep_flat(ref))
+        @info "LockinEP seed 42: 1−cos at ω_p 0.05 / 0.025 = $(round(d05, sigdigits=3)) / $(round(d025, sigdigits=3)) (ratio $(round(d05 / d025, digits=1)); leak would give ≈4, lag alone ≈16)"
+        @test d05 < 0.01                          # complex reference: 0.227
+        @test _ep_cos(g05.layer_2.weight, ref.layer_2.weight) > 0.99   # was 0.258
+        @test d05 / d025 > 8                      # fourth order: no first-order leak left
+    end
+end
+
