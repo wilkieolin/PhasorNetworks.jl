@@ -926,8 +926,7 @@ function reconstruct_from_current(x::CurrentCall, L::Int, spk_args::SpikingArgs)
     u0 = zeros(ComplexF32, size(sample_I))
 
     dzdt(u, p, t) = k .* u .+ x.current.current_fn(t)
-    prob = ODEProblem(dzdt, u0, x.t_span)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+    sol = spiking_solve(dzdt, u0, x.t_span, spk_args)
 
     # Sample at period boundaries
     sample_times = Float32.([l * T for l in 1:L])

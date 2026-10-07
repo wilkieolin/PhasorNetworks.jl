@@ -356,20 +356,54 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
     return new_train
 end
 
-function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the ODE
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
+# ---- Float64 time axis for every spiking-mode solve ------------------------
+#
+# The state stays ComplexF32, but the solver's clock must not: with a Float32
+# tspan each fixed step `t += dt` rounds at eps(t)/2, the clock drifts away from
+# the time actually integrated, and samples taken at t_j = j·T land at the wrong
+# phase (≈1e-3 rad after 12 periods at dt = 0.01, 1.5e-2 after 50; X12 in
+# arc_experiments). `_t64` lifts times to Float64, reading a Float32 as the
+# decimal it was written as (0.01f0 → 0.01). The right-hand side still receives
+# `Float32(t)`: rounding once per evaluation does not accumulate, and existing
+# closures keep their Float32 arithmetic.
+_t64(t::Float32) = Float64(rationalize(t))
+_t64(t::Real) = Float64(t)
+_t64(t::AbstractArray) = _t64.(collect(t))
 
-    return sol
+function _time64_args(args)
+    d = Dict{Symbol,Any}(args)
+    for key in (:dt, :dtmin, :dtmax, :saveat, :tstops, :d_discontinuities)
+        haskey(d, key) && d[key] isa Union{Real, AbstractArray} && (d[key] = _t64(d[key]))
+    end
+    return d
+end
+
+_f32_time_rhs(f) = (u, p, t) -> f(u, p, Float32(t))
+
+"""
+    spiking_solve(dzdt, u0, tspan, spk_args; p = nothing, solver_args = spk_args.solver_args)
+
+Solve a spiking-mode ODE with a ComplexF32 state on a Float64 time axis (see the
+note above `_t64`). `p` is passed both to the problem and to `solve` (as the
+adjoint needs); `solver_args` replaces `spk_args.solver_args` when given.
+"""
+function spiking_solve(dzdt, u0, tspan, spk_args::SpikingArgs; p = nothing,
+                       solver_args = spk_args.solver_args)
+    f    = _f32_time_rhs(dzdt)
+    ts   = (_t64(tspan[1]), _t64(tspan[2]))
+    args = ignore_derivatives(() -> _time64_args(solver_args))
+    if p === nothing
+        return solve(ODEProblem(f, u0, ts), spk_args.solver; args...)
+    end
+    return solve(ODEProblem(f, u0, ts, p), spk_args.solver; p = p, args...)
+end
+
+function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
+    return spiking_solve(dzdt, u0, tspan, spk_args)
 end
 
 function oscillator_bank(u0::AbstractArray, dzdt::Function, params::LuxParams; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the ODE with external parameters
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
-
-    return sol
+    return spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 end
 
 """

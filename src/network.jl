@@ -565,8 +565,7 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return result
     end
 
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+    sol = spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 
     if a.return_type.type == :potential
         return sol, state
@@ -1245,8 +1244,7 @@ function (a::ResonantSTFT)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return result
     end
 
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
+    sol = spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 
     # Sample at the L period boundaries → (n_freqs, L, B), matching the discrete
     # Complex-3D output before the external downsample. Use `stack` (not
@@ -1471,8 +1469,7 @@ function (a::PhasorConv)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return result
     end
 
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+    sol = spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)
@@ -1735,8 +1732,7 @@ function (a::PhasorFixed)(x::CurrentCall, params::LuxParams, state::NamedTuple)
         return result
     end
 
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p=params; spk_args.solver_args...)
+    sol = spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 
     if a.return_type.type == :phase
         u = unrotate_solution(sol.u, sol.t, spk_args=spk_args, offset=x.current.offset)

@@ -49,6 +49,7 @@ function wave_tests()
         test_wave_strict_transmission()
         test_wave_silent_reference()
         test_wave_pulse_coupling()
+        test_wave_time_grid()
         test_wave_ode_convention()
         test_wave_emission_threshold()
         test_soliton_wave_sheet()
@@ -1554,9 +1555,9 @@ end
 # `ode_coupling = :pulse` decides once per cycle (|z(t_n)| > θ) and sends one
 # unit-charge spike at the phase-encoded time, so a single spike's kick at the
 # next sample is g·W·(z/|z|)·e^{λ·dt(φ)} in the code convention — the discrete
-# `:strict` map with Dirac emission. Checked over one or two periods only: the
-# ODE paths accumulate a small Float32 time-grid drift (identical in both
-# couplings; ~1e-4 per period at dt = T/1600) that is not part of this feature.
+# `:strict` map with Dirac emission. Checked over one or two periods; long
+# rollouts are covered by `test_wave_time_grid` (the ODE paths used to drift on
+# a Float32 time axis).
 
 function _pulse_disc_step(z, θ, A, g, Wh, λ, T)
     fire = Float32.(abs.(z) .> θ)
@@ -1639,6 +1640,40 @@ function test_wave_pulse_coupling()
         ls = PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = :pulse, silent = :reference)
         pss, sts = Lux.setup(Xoshiro(1), ls)
         @test_throws ArgumentError wave_simulate(ls, pss, sts; z0 = zz, L = 1, mode = :ode)
+    end
+end
+
+# ---- Time grid: no drift over long ODE rollouts --------------------------
+#
+# Spiking-mode solves run on a Float64 clock with a ComplexF32 state
+# (`spiking_solve`). On a Float32 clock each fixed step `t += dt` rounded, so
+# samples at t_j = j·T drifted in phase: 1.1e-3 rad after 12 periods and 1.5e-2
+# after 50 at the default dt = 0.01 T. Checked on the bare bank and on uncoupled
+# sheets (continuous and pulse), where the exact answer is A^j·z0.
+
+function test_wave_time_grid()
+    @testset "time grid: no phase drift over 50 periods" begin
+        L = 50
+        spk = SpikingArgs()                                  # library default: dt = 0.01f0, fixed step
+        k = neuron_constant(spk)
+        sol = oscillator_bank(ComplexF32[1], (u, p, t) -> k .* u;
+                              tspan = (0f0, Float32(L) * spk.t_period), spk_args = spk)
+        @test eltype(sol.u[end]) == ComplexF32
+        @test abs(angle(sol(L * spk.t_period)[1] / exp(ComplexF64(k) * L))) < 1e-4
+
+        for oc in (:continuous, :pulse)
+            # :strict events are unit phasors while |z| decays ~0.86^j, so g must be
+            # far below |z(50)| ≈ 5e-4 for the sheet to count as uncoupled.
+            l = PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = oc,
+                                init_log_g = log(1f-12), spk_args = spk)
+            ps, st = Lux.setup(Xoshiro(1), l)
+            A, _, _ = PhasorNetworks._build_coupling(l, ps, st, period_to_angfreq(spk.t_period))
+            z0 = ComplexF32.(cis.(2f0π .* rand(Xoshiro(2), Float32, 8, 8)))   # g ≈ 0: events carry no weight
+            z = wave_simulate(l, ps, st; z0 = z0, L = L, mode = :ode)
+            for j in (12, L)
+                @test maximum(abs.(angle.(z[:, :, j, 1] ./ (ComplexF64(only(A))^j .* z0)))) < 1e-4
+            end
+        end
     end
 end
 

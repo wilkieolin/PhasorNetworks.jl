@@ -343,8 +343,7 @@ function (l::AttractorPhasorSSM)(x::CurrentCall,
         return result .+ α_eff_arr .* (target .- u)
     end
 
-    prob = ODEProblem(dzdt, u0, tspan, ps)
-    sol  = solve(prob, spk_args.solver, p = ps; spk_args.solver_args...)
+    sol  = spiking_solve(dzdt, u0, tspan, spk_args; p = ps)
 
     if use_period_sampling
         T = spk_args.t_period
