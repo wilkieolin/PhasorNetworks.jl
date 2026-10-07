@@ -92,6 +92,24 @@ speed) for analysis and demos.
   `ArgumentError`, since there a silent site emits no physical event.
 - `silent_phase::Real = 0` — the reference phase (units of π, code
   convention) used by `silent = :reference`.
+- `ode_coupling::Symbol = :continuous` — how sites couple on the ODE paths
+  (`CurrentCall`, `SpikingCall`, `wave_simulate(mode = :ode)`).
+  `:continuous` (default): the coupling term `g·W ⊛ s(z(t))` acts at every
+  instant, so a `:strict` site's threshold is tested against the ripple of
+  |z(t)| within each cycle (C0.ode: 0.2–1.2 crossings per site per period,
+  which make the sheet sensitive to 1e-6 perturbations). `:pulse`: **one event
+  per cycle**, as the ground rule specifies — at each sample instant t_n = n·T
+  a site fires iff |z(t_n)| > θ, and then emits a single spike at
+  t_n + τ, τ = mod((φ/2 + ½)·T, T) (the `phase_to_time` placement of its code
+  phase φ); neighbours receive it as a unit-charge pulse weighted by g·W,
+  exactly as external input spikes arrive. The ODE is integrated one period at a
+  time between decisions. This is the continuous-time counterpart of the
+  discrete `:strict` map with Dirac emission (each firing neighbour contributes
+  g·W·e^{k·dt(φ)}, cf. `_emit_dirac`). Only valid with `transmit = :strict`.
+  Forward evaluation only: the fire decisions and spike times are treated as
+  constants (no gradient through spike timing). ⚠ A spike within one pulse
+  half-width (2·t_window) after its own decision instant loses the part of its
+  pulse that would precede the decision (phases within 2·t_window/T of ±1).
 - `init_log_theta::Union{Real,Nothing} = nothing` — `log θ`, the **emission
   threshold** (units of `|z|`); the spike is `z/√(|z|²+θ²)`, i.e. the `ε` of
   [`normalize_to_unit_circle`](@ref) with `ε = θ²`. **The default is derived**:
@@ -233,6 +251,7 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     init_log_theta_beta::Float32  # sigmoid width in the fire indicator's STE backward pass
     silent::Symbol             # :absent (sub-threshold sends nothing) | :reference (read as e^{iπ·silent_phase}); :strict only
     silent_phase::Float32      # reference phase for silent = :reference (units of π, code convention)
+    ode_coupling::Symbol       # :continuous (g·W⊛s(z(t)) at every instant) | :pulse (one event per cycle); ODE paths
     spk_args::SpikingArgs
 end
 
@@ -264,6 +283,7 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          init_log_theta_beta::Real = log(0.05),
                          silent::Symbol = :absent,
                          silent_phase::Real = 0,
+                         ode_coupling::Symbol = :continuous,
                          spk_args::SpikingArgs = SpikingArgs())
     coupling in (:dog, :stencil, :aniso, :shift) ||
         throw(ArgumentError("coupling must be :dog, :stencil, :aniso or :shift, got :$coupling"))
@@ -276,6 +296,11 @@ function PhasorWaveSheet(H::Integer, W::Integer;
               "which only exists under transmit=:spike or :strict (got transmit=:$transmit)"))
     silent in (:absent, :reference) ||
         throw(ArgumentError("silent must be :absent or :reference, got :$silent"))
+    ode_coupling in (:continuous, :pulse) ||
+        throw(ArgumentError("ode_coupling must be :continuous or :pulse, got :$ode_coupling"))
+    ode_coupling === :pulse && transmit !== :strict &&
+        throw(ArgumentError("ode_coupling=:pulse emits one phase-only event per cycle, which " *
+              "is defined for transmit=:strict only (got transmit=:$transmit)"))
     silent === :reference && transmit !== :strict &&
         throw(ArgumentError("silent=:reference defines what a sub-threshold site sends, " *
               "which is only a hard 'no event' under transmit=:strict (got transmit=:$transmit)"))
@@ -301,7 +326,7 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                            Float32(init_theta_frac),
                            Float32(init_log_eta_g), Float32(init_log_eta_l),
                            Float32(init_logit_target), Float32(init_log_theta_beta),
-                           silent, Float32(silent_phase),
+                           silent, Float32(silent_phase), ode_coupling,
                            spk_args)
 end
 
@@ -313,6 +338,7 @@ function Base.show(io::IO, l::PhasorWaveSheet)
         print(io, "theta=$(l.init_log_theta === nothing ? "derived" : exp(l.init_log_theta)), ")
     l.homeostasis !== :none && print(io, "homeostasis=:$(l.homeostasis), ")
     l.silent !== :absent && print(io, "silent=:$(l.silent)(phase $(l.silent_phase)), ")
+    l.ode_coupling !== :continuous && print(io, "ode_coupling=:$(l.ode_coupling), ")
     print(io, "t_period=$(l.spk_args.t_period))")
 end
 
@@ -1860,12 +1886,86 @@ function _physical_kernel(W_hat::AbstractMatrix)
     return conj.(W_hat[ih, iw])
 end
 
+# ---- Pulse coupling: one event per cycle on the ODE paths ---------------
+#
+# With `ode_coupling = :pulse` the sheet obeys the ground rule literally: a site
+# decides once per cycle, at the sample instant t_n, whether it fires
+# (|z(t_n)| > θ, read in the code convention), and a firing site emits ONE spike
+# at t_n + τ, τ = mod((φ/2 + ½)·T, T) — the placement `phase_to_time` gives its
+# code phase φ, so θ = ±1 sits at the slot start as everywhere else (X9). The
+# spike reaches neighbours as the same raised-cosine current pulse an external
+# input spike makes, normalised to unit charge and weighted by g·W_phys. Between
+# decisions the ODE is linear and is integrated one period at a time; pulses from
+# the previous period are kept so a spike near the end of a period finishes
+# depositing its charge. A unit-charge pulse at t_s is seen at the next sample as
+# e^{k(t_{n+1} − t_s)} = e^{k·dt(φ)}, so this is the continuous-time counterpart of
+# the discrete `:strict` map with Dirac emission (`_emit_dirac`, thresholded).
+#
+# Forward evaluation only: decisions and spike times are constants to AD.
+# `drive_fn(t)` returns the external current (or `nothing` for an autonomous
+# run) and is scaled by `drive_gain`; `u0` is the PHYSICAL initial state.
+# Returns the L samples in the code convention, each (H,W,B).
+_rc_pulse(dt, hw) = ifelse.(abs.(dt) .<= hw, 0.5f0 .* (1f0 .+ cos.(pi_f32 .* dt ./ hw)), 0f0)
+
+function _pulse_rollout(l::PhasorWaveSheet, ps, st, u0, t0::Float32, L::Int, drive_fn,
+                        drive_gain, spk_args::SpikingArgs)
+    spk_args.spike_kernel === :gaussian ||
+        throw(ArgumentError("ode_coupling=:pulse uses the library raised-cosine spike kernel; " *
+                            "a custom spike_kernel is not supported"))
+    ω = period_to_angfreq(l.spk_args.t_period)
+    T = Float32(l.spk_args.t_period)
+    _, g, W_hat = _build_coupling(l, ps, st, ω)
+    λ = -exp.(ps.log_neg_lambda)
+    H, W, B = size(u0)
+    kr  = reshape(ComplexF32.(λ .+ 1im .* ω), 1, 1, 1)
+    gr  = reshape(g, 1, 1, 1)
+    Whr = reshape(_physical_kernel(W_hat), H, W, 1)
+    θ   = _ode_theta(l, ps)
+    hw  = 2f0 * Float32(spk_args.t_window)         # pulse half-width; ∫ pulse dt = hw
+    inv_hw = 1f0 / hw                                # unit charge per spike
+    u = ComplexF32.(u0)
+    prev_fire = zero(real.(u)); prev_ts = zero(real.(u))
+    samples = Vector{typeof(u)}(undef, L)
+    for n in 0:(L - 1)
+        tn = t0 + Float32(n) * T
+        fire, ts = ignore_derivatives() do
+            zc = _mirror(u)                              # code convention at t_n
+            f  = Float32.(abs.(zc) .> θ)
+            φ  = Float32.(angle.(zc)) ./ pi_f32
+            (f, tn .+ mod.((φ ./ 2f0 .+ 0.5f0) .* T, T))
+        end
+        pf, pts = prev_fire, prev_ts
+        function dzdt(v, p, t)
+            tt = Float32(t)
+            P = (fire .* _rc_pulse(tt .- ts, hw) .+ pf .* _rc_pulse(tt .- pts, hw)) .* inv_hw
+            lat = ifft(Whr .* fft(ComplexF32.(P), (1, 2)), (1, 2))
+            out = kr .* v .+ gr .* lat
+            drive_fn === nothing && return out
+            return out .+ reshape(ComplexF32.(drive_fn(t)), H, W, B) .* drive_gain
+        end
+        args = ignore_derivatives() do
+            merge(spk_args.solver_args,
+                  Dict{Symbol,Any}(:saveat => Float32[tn + T], :save_start => false))
+        end
+        sol = solve(ODEProblem(dzdt, u, (tn, tn + T), ps), spk_args.solver; args...)
+        u = ComplexF32.(sol.u[end])
+        samples[n + 1] = _mirror(u)
+        prev_fire, prev_ts = fire, ts
+    end
+    return samples
+end
+
 # Tier-2 continuous rollout: integrate dz/dt = k·z + g·(FFT-coupling) with the
 # layer's ODE solver (Tsit5 + BacksolveAdjoint by default) and sample at each
 # period. Closes over the coupling built from `ps` — used for pure-forward
 # simulation/validation (the trainable AD path is the CurrentCall dispatch).
 function _wave_rollout_ode(l::PhasorWaveSheet, ps, st, z0, L::Int)
     _check_silent_ode(l)
+    if l.ode_coupling === :pulse
+        H0, W0, B0 = size(z0)
+        smp = _pulse_rollout(l, ps, st, _mirror(ComplexF32.(z0)), 0f0, L, nothing, 1f0, l.spk_args)
+        return cat([reshape(s, H0, W0, 1, B0) for s in smp]...; dims = 3)   # (H,W,L,B)
+    end
     ω = period_to_angfreq(l.spk_args.t_period)
     T = Float32(l.spk_args.t_period)
     _, g, W_hat = _build_coupling(l, ps, st, ω)
@@ -2003,6 +2103,14 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
     # impulse; otherwise the ODE sheet is ~50× under-driven relative to the discrete
     # model it is supposed to reproduce (drive-vs-coupling ratio and |z|/θ both wrong).
     drive_gain = 1f0 / (kernel_integral(spk_args) * spk_args.spk_scale)
+
+    if l.ode_coupling === :pulse
+        Lp = round(Int, (tspan[2] - tspan[1]) / spk_args.t_period)
+        smp = _pulse_rollout(l, ps, st, u0, Float32(tspan[1]), Lp, x.current.current_fn,
+                             drive_gain, spk_args)
+        Zc = cat([reshape(s, H * W, 1, B) for s in smp]...; dims = 2)       # (H*W, L, B) code convention
+        return complex_to_angle(Zc), st
+    end
 
     function dzdt(u, p, t)
         _, g, W_hat = _build_coupling(l, p, st, ω_val)            # rebuilt for AD

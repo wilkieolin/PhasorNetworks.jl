@@ -17,6 +17,7 @@
 #      spatial-frequency content decides how far it survives)
 #   9. Strict transmission (:strict — unit phase above θ, nothing below)
 #  10. Silent = reference phase (:strict, silent = :reference)
+#  11. Pulse coupling on the ODE paths (one event per cycle)
 
 function wave_tests()
     @testset "PhasorWaveSheet" begin
@@ -47,6 +48,7 @@ function wave_tests()
         test_wave_spike_transmission()
         test_wave_strict_transmission()
         test_wave_silent_reference()
+        test_wave_pulse_coupling()
         test_wave_ode_convention()
         test_wave_emission_threshold()
         test_soliton_wave_sheet()
@@ -1544,6 +1546,99 @@ function test_wave_silent_reference()
         @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :spike, silent = :reference)
         @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential, silent = :reference)
         @test_throws ArgumentError wave_simulate(ref0, ps, st; z0 = zb[:, :, 1], L = 2, mode = :ode)
+    end
+end
+
+# ---- Pulse coupling: one event per cycle on the ODE paths ------------------
+#
+# `ode_coupling = :pulse` decides once per cycle (|z(t_n)| > θ) and sends one
+# unit-charge spike at the phase-encoded time, so a single spike's kick at the
+# next sample is g·W·(z/|z|)·e^{λ·dt(φ)} in the code convention — the discrete
+# `:strict` map with Dirac emission. Checked over one or two periods only: the
+# ODE paths accumulate a small Float32 time-grid drift (identical in both
+# couplings; ~1e-4 per period at dt = T/1600) that is not part of this feature.
+
+function _pulse_disc_step(z, θ, A, g, Wh, λ, T)
+    fire = Float32.(abs.(z) .> θ)
+    φ = Float32.(angle.(z)) ./ Float32(π)
+    e = fire .* (z ./ (abs.(z) .+ 1f-30)) .* exp.(λ .* PhasorNetworks._spike_dt(φ, T))
+    return A .* z .+ g .* PhasorNetworks.ifft(Wh .* PhasorNetworks.fft(e))
+end
+
+function test_wave_pulse_coupling()
+    @testset "pulse coupling (one event per cycle, ODE paths)" begin
+        S = 16
+        tw = 0.0025f0
+        spk = SpikingArgs(t_window = tw, solver = Tsit5(),
+                          solver_args = Dict(:adaptive => false, :dt => tw / 4))
+        lp = PhasorWaveSheet(S, S; transmit = :strict, ode_coupling = :pulse, spk_args = spk)
+        lc = PhasorWaveSheet(S, S; transmit = :strict, spk_args = spk)
+        ps, st = Lux.setup(Xoshiro(1), lp)
+        θ0 = exp(only(ps.log_theta))
+        ω = period_to_angfreq(lp.spk_args.t_period); T = Float32(lp.spk_args.t_period)
+        A, g, Wh = PhasorNetworks._build_coupling(lp, ps, st, ω)
+        λ = -exp(only(ps.log_neg_lambda))
+
+        # (a) Validation and display; the default is unchanged.
+        @test lc.ode_coupling === :continuous
+        @test occursin("ode_coupling=:pulse", sprint(show, lp))
+        @test !occursin("ode_coupling", sprint(show, lc))
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = :bogus)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :spike, ode_coupling = :pulse)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :potential, ode_coupling = :pulse)
+
+        # (b) One spike: its kick on every neighbour matches the Dirac-emission map
+        #     in magnitude and phase, at phases away from and near the slot edge.
+        for φ0 in (0f0, 0.5f0, -0.9f0)
+            z0 = zeros(ComplexF32, S, S); z0[8, 8] = 2f0 * θ0 * cispi(φ0)
+            ode = wave_simulate(lp, ps, st; z0 = z0, L = 1, mode = :ode)[:, :, 1, 1]
+            disc = _pulse_disc_step(z0, θ0, only(A), only(g), Wh, λ, T)
+            m = abs.(disc) .> 1f-6 * θ0; m[8, 8] = false
+            r = ode[m] ./ disc[m]
+            @test maximum(abs.(abs.(r) .- 1f0)) < 2f-3
+            @test maximum(abs.(angle.(r))) < 2f-3
+        end
+
+        # (c) Many sites, two periods: same fire decisions, states within 1e-3.
+        rng = Xoshiro(2)
+        z0 = ComplexF32.((0.5f0 .+ 1.5f0 .* rand(rng, Float32, S, S)) .* θ0 .*
+                         cis.(2f0π .* rand(rng, Float32, S, S)))
+        ode = wave_simulate(lp, ps, st; z0 = z0, L = 2, mode = :ode)
+        z = copy(z0)
+        for n in 1:2
+            z = _pulse_disc_step(z, θ0, only(A), only(g), Wh, λ, T)
+            zo = ode[:, :, n, 1]
+            @test (abs.(zo) .> θ0) == (abs.(z) .> θ0)
+            # Median agreement is ~1e-4; the maximum is set by the few spikes whose
+            # pulse straddles a decision instant (phases within 2·t_window/T of the
+            # slot edge — the documented ⚠ of `ode_coupling`).
+            @test median(abs.(zo .- z)) / median(abs.(z)) < 1f-3
+            @test maximum(abs.(zo .- z)) / maximum(abs.(z)) < 5f-3
+        end
+
+        # (d) No coupling: the pulse and continuous ODEs are the same driven,
+        #     uncoupled bank (autonomous and SpikingCall paths).
+        lp0 = PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = :pulse,
+                              init_log_g = log(1f-8), spk_args = spk)
+        lc0 = PhasorWaveSheet(8, 8; transmit = :strict, init_log_g = log(1f-8), spk_args = spk)
+        p0, s0 = Lux.setup(Xoshiro(3), lp0)
+        zz = ComplexF32.(3f0 .* cis.(2f0π .* rand(Xoshiro(4), Float32, 8, 8)))
+        @test maximum(abs.(wave_simulate(lp0, p0, s0; z0 = zz, L = 3, mode = :ode) .-
+                           wave_simulate(lc0, p0, s0; z0 = zz, L = 3, mode = :ode))) < 1f-3
+        Lx = 3; Bx = 2
+        x = Phase.(2f0 .* rand(Xoshiro(5), Float32, 64, Lx, Bx) .- 1f0)
+        call = SpikingCall(ssm_phases_to_train(x; spk_args = spk), spk, (0f0, Float32(Lx) * spk.t_period))
+        yp, _ = lp0(call, p0, s0)
+        yc, _ = lc0(call, p0, s0)
+        @test size(yp) == (64, Lx, Bx)
+        @test all(isfinite, Float32.(yp))
+        dφ = abs.(mod.(Float32.(yp) .- Float32.(yc) .+ 1f0, 2f0) .- 1f0)
+        @test maximum(dφ) < 1f-3
+
+        # (e) The silent-reading option still refuses the ODE paths.
+        ls = PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = :pulse, silent = :reference)
+        pss, sts = Lux.setup(Xoshiro(1), ls)
+        @test_throws ArgumentError wave_simulate(ls, pss, sts; z0 = zz, L = 1, mode = :ode)
     end
 end
 
