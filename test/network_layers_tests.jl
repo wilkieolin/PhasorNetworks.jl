@@ -359,13 +359,15 @@ function residual_block_tests()
         # in the discrete definition, so it is reproduced, not introduced, by
         # the spiking path; hence a looser bound for :rezero plus an outlier
         # count.
-        @testset "ResidualBlock SpikingCall ≡ discrete (gate=$gate)" for gate in (:none, :rezero)
+        @testset "ResidualBlock SpikingCall ≡ discrete (gate=$gate)" for gate in (:none, :rezero, :bundle)
             D, L, B = 8, 8, 3
             rb = ResidualBlock((D, D, D); gate = gate, branch_init_scale = 1f0,
                                init_mode = :hippo)
             ps_rb, st_rb = Lux.setup(Xoshiro(7), rb)
             if gate === :rezero
                 ps_rb = merge(ps_rb, (alpha = Float32[0.45f0],))   # trained-like α
+            elseif gate === :bundle
+                ps_rb = merge(ps_rb, (alpha = Float32[0.5f0],))    # trained-like J (slope ≤ 1 everywhere)
             end
             x3 = Phase.(2f0 .* rand(Xoshiro(8), Float32, D, L, B) .- 1f0)
             sc = SpikingCall(ssm_phases_to_train(x3, spk_args = spk_args), spk_args,
@@ -380,7 +382,7 @@ function residual_block_tests()
             R = abs(mean(cis.(Float32(π) .* Δ)))
             n_outliers = count(abs.(Δ) .> 0.1f0)
             @info "ResidualBlock spiking ≡ discrete" gate R n_outliers
-            @test R > (gate === :none ? 0.999 : 0.98)
+            @test R > (gate === :rezero ? 0.98 : 0.999)
             @test n_outliers <= 1                       # of D·L·B = 192
             @test_throws ArgumentError rb(CurrentCall(sc), ps_rb, st_rb)
         end

@@ -1367,6 +1367,37 @@ function spike_phase_bind(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
 end
 
 """
+    spike_phase_bundle(x::SpikingCall, b::SpikingCall; gain = 1f0) -> SpikingCall
+
+Spike-domain counterpart of the bundle gate `v_bind(φ_x, ∠(1 + J·e^{iπφ_b}))`
+(`ResidualBlock(gate = :bundle)`), computed from spike times. In every cycle
+the branch spike's lead/lag relative to the cycle reference gives its phase
+θ_b; the skip spike `t_x` is delayed by `(T/2π)·atan2(J sin θ_b, 1 + J cos θ_b)`
+— the phase of a resonator that receives the skip spike with weight 1 and
+the branch spike with weight J — and wrapped back into the cycle. Only spike
+times cross between units; the gain J is a local synaptic weight. A silent
+branch contributes no shift (phase 0); a silent skip stays silent. Same ⚠
+timing idealisation as [`spike_phase_bind`](@ref). Inference only.
+"""
+function spike_phase_bundle(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
+    _check_compatible(x, b)
+    T = x.spk_args.t_period
+    L = _n_cycles(x)
+    off = x.train.offset
+    tx = _spike_time_table(x.train, L, T)
+    tb = _spike_time_table(b.train, L, T)
+    start = _cycle_starts(off, L, T)
+    t_ref = start .+ Float32(T) / 2f0
+    twoπ = 2f0 * Float32(π)
+    θb = ifelse.(isnan.(tb), 0f0, twoπ .* (tb .- t_ref) ./ Float32(T))
+    J = Float32(gain)
+    Δ = (Float32(T) / twoπ) .* atan.(J .* sin.(θb), 1f0 .+ J .* cos.(θb))
+    t_out = start .+ mod.(tx .- start .+ Δ, Float32(T))
+    train = _table_to_train(t_out, x.train.shape, off, x.train)
+    return SpikingCall(train, x.spk_args, x.t_span)
+end
+
+"""
     spike_phase_recenter(x::SpikingCall) -> SpikingCall
 
 Spiking counterpart of [`PhaseRecenter`](@ref): per cycle and per batch
@@ -1489,6 +1520,9 @@ const _RESIDUAL_CURRENT_MSG =
 function (rb::ResidualBlock)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
     ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
     b = _as_spike_call(ff_out, x)
+    if rb.gate === :bundle
+        return spike_phase_bundle(x, b; gain = _gate_value(ps.alpha)), (ff = st_ff,)
+    end
     g = rb.gate === :rezero ? _gate_value(ps.alpha) : 1f0
     return spike_phase_bind(x, b; gain = g), (ff = st_ff,)
 end

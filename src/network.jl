@@ -1967,14 +1967,24 @@ mechanisms that enforce identity-at-init:
   adaptive depth allocation). Best for very deep stacks (≳30 layers). It benefits
   from a higher learning rate on `α` (e.g. ~5×) and adequate training epochs to
   warm up; with too small a budget it can underperform the plain down-scaled init.
+- **Bundle gate (`gate = :bundle`).** Adds a learnable scalar `J` per block
+  (parameter `alpha`, initialized to `alpha0`): `y = v_bind(x, ∠(1 + J·e^{iπ·ff(x)}))`,
+  i.e. the output is the *superposition* of the skip (weight 1) and the bound
+  branch (weight J), `normalize(x + J·v_bind(x, ff(x)))` in the complex domain.
+  To first order in J it is the ReZero gate (`∠(1 + J e^{iθ}) ≈ J sin θ`), it is
+  exactly identity at init for any J when `ff(x) ≈ 0`, and it is the gate to use
+  with **equilibrium propagation**: its block energy is multilinear in the
+  states, so the EP gradient is exact (see `src/ep.jl`, ResidualBlock section).
+  Its spiking counterpart is [`spike_phase_bundle`](@ref).
 
 Bias is on by default (the dominant conditioner for phase layers) — keep it on for
 residual use.
 
 # Fields
 - `ff`: feed-forward `Chain` of `PhasorDense` layers
-- `gate`: `:none` (plain bind) or `:rezero` (learnable α gate)
-- `alpha0`: ReZero gate initialization (used when `gate === :rezero`)
+- `gate`: `:none` (plain bind), `:rezero` (learnable α gate) or `:bundle` (learnable
+  superposition gate J, stored in the `alpha` parameter)
+- `alpha0`: gate initialization (used when `gate` is `:rezero` or `:bundle`)
 - `out_dims`: Output dimension of the block
 
 See also: [`v_bind`](@ref) for the phase binding operation.
@@ -1994,7 +2004,8 @@ function ResidualBlock(dimensions::Tuple{Vararg{Int}},
                        init_weight = nothing,
                        kwargs...)
     @assert length(dimensions) >= 2 "Must have at least 1 layer"
-    gate in (:none, :rezero) || throw(ArgumentError("gate must be :none or :rezero, got :$gate"))
+    gate in (:none, :rezero, :bundle) ||
+        throw(ArgumentError("gate must be :none, :rezero or :bundle, got :$gate"))
     # Start the branch ≈ identity by down-scaling its weight init, unless the
     # caller supplies their own init_weight.
     iw = init_weight === nothing ?
@@ -2009,15 +2020,27 @@ end
 
 function Lux.initialparameters(rng::AbstractRNG, rb::ResidualBlock)
     ps = (ff = Lux.initialparameters(rng, rb.ff),)
-    return rb.gate === :rezero ? merge(ps, (alpha = Float32[rb.alpha0],)) : ps
+    return rb.gate in (:rezero, :bundle) ? merge(ps, (alpha = Float32[rb.alpha0],)) : ps
 end
+
+# Phase (units of π) of the superposition `1 + J·e^{iπφ}`: the bundle gate's
+# branch contribution. Broadcasts over any Phase array; `alpha` is the (1,)
+# gate parameter so it stays on-device.
+_bundle_gate_phase(φ, alpha) = complex_to_angle(1f0 .+ alpha .* angle_to_complex(φ))
 Lux.initialstates(rng::AbstractRNG, rb::ResidualBlock) = (ff = Lux.initialstates(rng, rb.ff),)
 
 function (rb::ResidualBlock)(x, ps, st)
     # branch path
     ff_out, st_ff = rb.ff(x, ps.ff, st.ff)
-    # phase-domain skip; ReZero gate scales the branch (α=0 ⇒ exact identity)
-    y = rb.gate === :rezero ? v_bind(x, ps.alpha .* ff_out) : v_bind(x, ff_out)
+    # phase-domain skip; ReZero gate scales the branch phase (α=0 ⇒ exact
+    # identity); the bundle gate superposes skip and bound branch (J=0 ⇒ identity)
+    y = if rb.gate === :rezero
+        v_bind(x, ps.alpha .* ff_out)
+    elseif rb.gate === :bundle
+        v_bind(x, _bundle_gate_phase(ff_out, ps.alpha))
+    else
+        v_bind(x, ff_out)
+    end
     return y, (ff = st_ff,)
 end
 

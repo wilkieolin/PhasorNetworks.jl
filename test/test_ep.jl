@@ -37,6 +37,8 @@ function ep_tests()
         ep_batched_cost_tests()
         ep_batch_equivalence_tests()
         ep_mlp_proxy_fd_tests()
+        ep_lab_clock_tests()
+        ep_residual_tests()
     end
 end
 
@@ -755,6 +757,43 @@ function ep_gpu_parity_tests(dev)
         @test !(s_d[1] isa Array)
         @test size(s_d[1]) == (16, B)
 
+        # Residual chain (settled-branch block): the branch state, the gate
+        # Hebbian and the three-body forces all run on-device.
+        rchain = Chain(
+            PhasorDense(32 => 16, normalize_to_unit_circle, use_bias=true),
+            ResidualBlock((16, 16), normalize_to_unit_circle; gate=:bundle, alpha0=0.1f0,
+                          branch_init_scale=0.1f0, use_bias=true),
+            ResidualBlock((16, 16), normalize_to_unit_circle; gate=:bundle, alpha0=0.1f0,
+                          branch_init_scale=0.1f0, use_bias=true),
+            PhasorDense(16 => 8, normalize_to_unit_circle, use_bias=true))
+        rps, rst = Lux.setup(Xoshiro(5), rchain)
+        rps_d, rst_d = rps |> dev, rst |> dev
+        for (name, m) in (("StaticEP", StaticEP(β=0.1f0, T_free=200, T_nudge=100, dt=0.5f0, centered=true)),
+                          ("LockinEP", LockinEP(ε=0.03f0, ω_p=0.1f0, n_cycles=2,
+                                                T_warmup_cycles=1, T_free=150, dt=0.5f0)))
+            g_cpu, s_cpu = ep_gradient(m, rchain, rps,   rst,   x,   CodebookCost(codes, y))
+            g_gpu, s_gpu = ep_gradient(m, rchain, rps_d, rst_d, x_d, cost_d)
+            @test s_gpu[2] isa Tuple && !(s_gpu[2][2] isa Array)
+            worst = 0.0
+            for key in (:layer_2, :layer_3)
+                # the branch bias is one complex parameter: its real part's
+                # gradient is 10²–10³× smaller than the imaginary part's (it
+                # moves the branch drive radially), so compare the complex vector
+                bl = g_cpu[key].ff.layer_1; bg = g_gpu[key].ff.layer_1
+                for (a, b) in ((vec(Array(bl.weight)), vec(Array(bg.weight))),
+                               (vec(Array(bl.bias_real)) .+ im .* vec(Array(bl.bias_imag)),
+                                vec(Array(bg.bias_real)) .+ im .* vec(Array(bg.bias_imag))))
+                    re = norm(a - b) / norm(a); worst = max(worst, re)
+                    @test re < EP_GPU_TOL
+                end
+                a = Array(g_cpu[key].alpha); b = Array(g_gpu[key].alpha)
+                @test !(g_gpu[key].alpha isa Array)
+                re = abs(a[1] - b[1]) / abs(a[1]); worst = max(worst, re)
+                @test re < EP_GPU_TOL
+            end
+            @info "EP GPU parity, residual chain ($name): worst rel-err=$(round(worst, sigdigits=3))"
+        end
+
         # Inference path.
         logits_cpu = ep_predict(chain, ps,   st,   x,   codes;   T=100, dt=0.5f0)
         logits_gpu = ep_predict(chain, ps_d, st_d, x_d, codes_d; T=100, dt=0.5f0)
@@ -1008,3 +1047,207 @@ function ep_lockin_quadrature_tests()
     end
 end
 
+
+
+# ----------------------------------------------------------------
+# 16. Lab-frame clock
+# ----------------------------------------------------------------
+# `phasor_settle(carrier = ω)` advances a clock every step and builds the
+# input/bias carrier from it. A Float32 clock rounds `t += dt` by eps(t)/2
+# per step while the states are rotated by the exact `cis(ω·dt)`, so the
+# drive's carrier drifts away from the states — the X12 time-grid drift
+# in the EP lab frame: 2.1 rad after 20 000 steps at dt = 0.1 (measured on
+# main d20d967). With the Float64 clock the lab-frame equilibrium equals
+# the co-rotating one times the carrier to Float32 roundoff.
+function ep_lab_clock_tests()
+    @testset "Lab-frame clock is Float64 (no carrier drift)" begin
+        rng = Xoshiro(42)
+        chain = Chain(
+            PhasorDense(4 => 8, normalize_to_unit_circle, use_bias=true),
+            PhasorDense(8 => 2, normalize_to_unit_circle, use_bias=true))
+        ps, st = Lux.setup(rng, chain)
+        ps = (layer_1 = merge(ps.layer_1, (weight = 0.4f0 .* ps.layer_1.weight,)),
+              layer_2 = merge(ps.layer_2, (weight = 0.4f0 .* ps.layer_2.weight,)))
+        x = Phase.(2f0 .* rand(rng, Float32, 4) .- 1f0)
+        ω = Float32(2π)
+        for (T, dt) in ((20_000, 0.1f0), (20_000, 0.03f0))
+            s_co  = phasor_settle(chain, ps, st, x, PhasorNetworks.NullCost(), 0f0; T=T, dt=dt)
+            s_lab = phasor_settle(chain, ps, st, x, PhasorNetworks.NullCost(), 0f0; T=T, dt=dt, carrier=ω)
+            # exact carrier phase at the end: the clock advances by the Float32
+            # dt read as a Float64, the same quantity the per-step rotation uses
+            ph = ComplexF32(cis(mod(Float64(ω) * (T * Float64(dt)), 2π)))
+            err = maximum(maximum(abs.(angle.(s_lab[l] ./ (s_co[l] .* ph)))) for l in 1:2)
+            @test err < 1e-5
+        end
+    end
+end
+
+# ----------------------------------------------------------------
+# 17. Residual blocks at depth
+# ----------------------------------------------------------------
+# The settled-branch block (`gate = :bundle`) has a multilinear energy, so EP
+# is as exact as on a PhasorDense chain; see the ResidualBlock section of
+# src/ep.jl. Checked against `fd_gradient_phasor` at 2, 4 and 8 blocks for
+# one-sided and centred StaticEP and for LockinEP. The settle relaxes more
+# slowly with depth, so T grows with the block count (measured in
+# arc_experiments/experiments/T1_deep_ep). The FD oracle is Float32 and
+# under-resolves the branch `bias_real` leaves (they move the branch drive
+# radially, barely changing its phase), so per-leaf cosines are asserted on
+# the weights, `bias_imag` and the gate, and the whole-vector cosine on all.
+function _ep_residual_chain(rng; n_in=4, D=8, n_out=2, L=2, gate=:bundle)
+    layers = Any[PhasorDense(n_in => D, normalize_to_unit_circle; use_bias=true)]
+    for _ in 1:L
+        push!(layers, ResidualBlock((D, D), normalize_to_unit_circle; gate=gate, alpha0=0.1f0,
+                                    branch_init_scale=0.1f0, use_bias=true))
+    end
+    push!(layers, PhasorDense(D => n_out, normalize_to_unit_circle; use_bias=true))
+    chain = Chain(layers...)
+    ps, st = Lux.setup(rng, chain)
+    return chain, ps, st
+end
+
+_ep_flat(x::NamedTuple) = isempty(x) ? Float32[] : reduce(vcat, [_ep_flat(v) for v in values(x)])
+_ep_flat(x::AbstractArray) = Float32.(vec(Array(x)))
+_ep_flat(x) = Float32[]
+_ep_cos(a, b) = dot(a, b) / (norm(a) * norm(b))
+
+# per-leaf comparison of two gradient trees on a residual chain
+function _ep_residual_leaves(g, h)
+    out = Tuple{Symbol,Symbol,Float32}[]
+    for key in keys(g)
+        if haskey(g[key], :ff)
+            for pn in (:weight, :bias_real, :bias_imag)
+                haskey(g[key].ff.layer_1, pn) || continue
+                push!(out, (key, pn, _ep_cos(_ep_flat(g[key].ff.layer_1[pn]), _ep_flat(h[key].ff.layer_1[pn]))))
+            end
+            haskey(g[key], :alpha) && push!(out, (key, :alpha, _ep_cos(_ep_flat(g[key].alpha), _ep_flat(h[key].alpha))))
+        else
+            for pn in (:weight, :bias_real, :bias_imag)
+                haskey(g[key], pn) || continue
+                push!(out, (key, pn, _ep_cos(_ep_flat(g[key][pn]), _ep_flat(h[key][pn]))))
+            end
+        end
+    end
+    return out
+end
+
+_ep_flat_cplx(s) = s isa Tuple ? vcat(vec(Array(s[1])), vec(Array(s[2]))) : vec(Array(s))
+
+# EP-trained leaves of a residual-chain gradient tree, concatenated in one fixed order.
+function _ep_residual_leafvec(g)
+    v = Float32[]
+    for key in keys(g)
+        if haskey(g[key], :ff)
+            for pn in (:weight, :bias_real, :bias_imag)
+                haskey(g[key].ff.layer_1, pn) && append!(v, _ep_flat(g[key].ff.layer_1[pn]))
+            end
+            haskey(g[key], :alpha) && append!(v, _ep_flat(g[key].alpha))
+        else
+            for pn in (:weight, :bias_real, :bias_imag)
+                haskey(g[key], pn) && append!(v, _ep_flat(g[key][pn]))
+            end
+        end
+    end
+    return v
+end
+
+function ep_residual_tests()
+    @testset "ResidualBlock EP (settled branch) ≈ FD at depth $L" for (L, T) in ((2, 400), (4, 800), (8, 6000))
+        rng = Xoshiro(7)
+        chain, ps, st = _ep_residual_chain(rng; L=L)
+        B = 3
+        x = ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 4, B)))
+        codes = ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 2, 3)))
+        cost = CodebookCost(codes, rand(rng, 1:3, B))
+        dt = 0.5f0
+
+        # the block state is a (z_out, z_branch) tuple, both of block width
+        s = phasor_settle(chain, ps, st, x, cost, 0f0; T=T, dt=dt)
+        @test s[2] isa Tuple && size(s[2][1]) == (8, B) && size(s[2][2]) == (8, B)
+
+        fd = fd_gradient_phasor(chain, ps, st, x, cost; ε=1f-3, T=T, dt=dt)
+        β = 0.01f0
+        g1, _ = ep_gradient(StaticEP(β=β, T_free=T, T_nudge=T÷2, dt=dt, centered=false), chain, ps, st, x, cost)
+        gc, _ = ep_gradient(StaticEP(β=β, T_free=T, T_nudge=T÷2, dt=dt, centered=true),  chain, ps, st, x, cost)
+        # lock-in: probe slow against the depth-L relaxation (period 2π/ω_p);
+        # depth 8 relaxes over ~10³ time units, so its probe period is 6283.
+        ω_p = L >= 8 ? 0.001f0 : 0.005f0
+        gl, _ = ep_gradient(LockinEP(ε=0.05f0, ω_p=ω_p, n_cycles=2, T_warmup_cycles=1, T_free=5T, dt=0.1f0),
+                            chain, ps, st, x, cost)
+        # leaf tolerance 0.95: at 8 blocks the Float32 FD oracle itself is only
+        # good to ≈0.96 on the smallest leaves (vs a Float64 FD oracle the
+        # centred estimate is within 0.5% on every leaf — T1 FINDINGS)
+        for (name, g, tol_leaf, tol_all) in (("one-sided", g1, 0.9, 0.9), ("centred", gc, 0.95, 0.95), ("lock-in", gl, 0.9, 0.9))
+            # whole-vector cosine over the EP-trained leaves in one canonical order
+            # (the FD and EP trees order their zero dynamics slots differently)
+            a = _ep_residual_leafvec(fd); b = _ep_residual_leafvec(g)
+            @test _ep_cos(a, b) > tol_all
+            worst = 1f0
+            for (key, pn, c) in _ep_residual_leaves(fd, g)
+                pn === :bias_real && continue       # Float32 FD under-resolves these
+                worst = min(worst, c)
+                @test c > tol_leaf
+            end
+            @info "ResidualBlock EP vs FD ($name, $L blocks)" all=round(_ep_cos(a, b), digits=4) worst_leaf=round(worst, digits=4)
+        end
+    end
+
+    @testset "ResidualBlock gates: :none is the J = 1 bind, :rezero still runs" begin
+        rng = Xoshiro(3)
+        chain, ps, st = _ep_residual_chain(rng; L=2, gate=:none)
+        x = ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 4, 2)))
+        cost = CodebookCost(ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 2, 3))), [1, 2])
+        @test !haskey(ps.layer_2, :alpha)
+        g, s = ep_gradient(StaticEP(β=0.01f0, T_free=300, T_nudge=150, dt=0.5f0, centered=true), chain, ps, st, x, cost)
+        @test haskey(g.layer_2, :ff) && !haskey(g.layer_2, :alpha)
+        @test all(isfinite, _ep_flat(g))
+        chain_r, ps_r, st_r = _ep_residual_chain(rng; L=2, gate=:rezero)
+        g_r, _ = ep_gradient(StaticEP(β=0.01f0, T_free=300, T_nudge=150, dt=0.5f0, centered=true), chain_r, ps_r, st_r, x, cost)
+        @test haskey(g_r.layer_2, :alpha) && all(isfinite, _ep_flat(g_r))
+        # The even/odd sweep and the feedforward warm start are alternative
+        # solvers of the SAME dynamics: their end state is a fixed point of
+        # the Jacobi step, and EP at that fixed point matches FD taken with
+        # the same solver settings. (The free energy of a deep chain has
+        # several minima, so different solvers may legitimately settle into
+        # different basins — the T1 FINDINGS measure this — which is why the
+        # test compares each solver with its own FD rather than solvers with
+        # each other.)
+        chain2, ps2, st2 = _ep_residual_chain(rng; L=2)
+        for (sw, dt2, im) in ((:evenodd, 0.5f0, :zeros), (:evenodd, 1f0, :feedforward), (:jacobi, 0.5f0, :feedforward))
+            s_a = phasor_settle(chain2, ps2, st2, x, cost, 0f0; T=600, dt=dt2, sweep=sw, init_mode=im)
+            s_b = phasor_settle(chain2, ps2, st2, x, cost, 0f0; T=1, dt=0.5f0, init=s_a)   # one Jacobi step
+            for l in eachindex(s_a)
+                @test maximum(abs.(_ep_flat_cplx(s_b[l]) .- _ep_flat_cplx(s_a[l]))) < 1e-4
+            end
+            fd2 = fd_gradient_phasor(chain2, ps2, st2, x, cost; ε=1f-3, T=600, dt=dt2, sweep=sw, init_mode=im)
+            g2, _ = ep_gradient(StaticEP(β=0.01f0, T_free=600, T_nudge=300, dt=dt2, centered=true, sweep=sw, init_mode=im), chain2, ps2, st2, x, cost)
+            @test _ep_cos(_ep_residual_leafvec(fd2), _ep_residual_leafvec(g2)) > 0.99
+        end
+        @test_throws ErrorException phasor_settle(chain2, ps2, st2, x, cost, 0f0; T=5, dt=0.5f0, sweep=:gauss)
+        @test_throws ErrorException phasor_settle(chain2, ps2, st2, x, cost, 0f0; T=5, dt=0.5f0, init_mode=:ones)
+        # a multi-layer branch is refused with a clear message
+        bad = Chain(PhasorDense(4 => 8, normalize_to_unit_circle),
+                    ResidualBlock((8, 8, 8), normalize_to_unit_circle; gate=:bundle),
+                    PhasorDense(8 => 2, normalize_to_unit_circle))
+        ps_b, st_b = Lux.setup(rng, bad)
+        @test_throws ArgumentError phasor_settle(bad, ps_b, st_b, x, cost, 0f0; T=5, dt=0.5f0)
+    end
+
+    @testset "ResidualBlock lab frame ≡ co-rotating frame" begin
+        rng = Xoshiro(11)
+        chain, ps, st = _ep_residual_chain(rng; L=2)
+        x = ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 4, 2)))
+        cost = CodebookCost(ComplexF32.(normalize_to_unit_circle(randn(rng, ComplexF32, 2, 3))), [3, 1])
+        T, dt, ω = 400, 0.5f0, 1.7f0
+        s_co  = phasor_settle(chain, ps, st, x, cost, 0.05f0; T=T, dt=dt)
+        s_lab = phasor_settle(chain, ps, st, x, cost, 0.05f0; T=T, dt=dt, carrier=ω)
+        ph = ComplexF32(cis(mod(Float64(ω) * (T * Float64(dt)), 2π)))
+        for l in eachindex(s_co)
+            a = s_co[l] isa Tuple ? s_co[l] : (s_co[l],)
+            b = s_lab[l] isa Tuple ? s_lab[l] : (s_lab[l],)
+            for (u, v) in zip(a, b)
+                @test maximum(abs.(v .- u .* ph)) < 1e-4
+            end
+        end
+    end
+end

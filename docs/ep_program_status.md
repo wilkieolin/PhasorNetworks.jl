@@ -547,7 +547,20 @@ cosine against a drifting snapshot reads as noise, indistinguishable from
 | LockinEP depth 5 operating zone | Non-empty (cos_min ≥ 0.9) |
 | Depth 5 test acc (LockinEP, FMNIST) | > 70% |
 
-**Status:** IN PROGRESS — implementation started.
+**Status (2026-10-08, branch `ep-residual-depth`, arc_experiments T1):** the Phase-2 implementation
+above (`gate = :rezero`, branch recomputed feedforward each step) is **not an energy gradient**:
+against `fd_gradient_phasor` the branch-weight cosine is ≈0.5 for one block and the whole-network
+cosine 0.1–0.3 at 2–8 blocks, independent of settle length and β. It is kept for API compatibility
+and documented as ⚠ in `src/ep.jl`. The replacement is the settled-branch block `gate = :bundle`
+(`y = v_bind(x, ∠(1 + J·e^{iπ ff(x)}))`, energy −Re⟨z_b, Wz_in+b⟩ − Re⟨z_out, z_in⟩ − J·Re⟨z_out, z_in⊙z_b⟩,
+the branch a settle state, gate Hebbian Re⟨z_out, z_in⊙z_b⟩/B, spiking dispatch `spike_phase_bundle`):
+centred StaticEP matches a Float64 FD oracle within 0.5% at 1–8 blocks (toy chains) and lock-in
+within 0.7% with a slow enough probe. Two solver options were added because the hard-projection
+settle of these chains relaxes by discrete flips over 10³–10⁴ steps: `sweep = :evenodd`
+(red–black Gauss–Seidel, stable at dt = 1) and `init_mode = :feedforward` — together 3–5× fewer
+steps at width 64–256. ⚠ The free energy of a deep chain has several minima; different solvers
+settle into different fixed points (15–84% of entries differ), so a training/evaluation protocol
+must fix one solver setting. Depth sweep, timing and spiking gap: `arc_experiments/experiments/T1_deep_ep/FINDINGS.md`.
 
 ### Tier 4 — loose ends (each a few hours; each removes a stated caveat)
 
