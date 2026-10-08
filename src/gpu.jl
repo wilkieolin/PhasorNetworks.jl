@@ -292,9 +292,7 @@ function f32_tspan(tspan::Tuple{<:Real, <:Real})
 end
 
 function oscillator_bank(u0::AbstractGPUArray, dzdt::Function; tspan::Tuple{<:Float32, <:Float32}, spk_args::SpikingArgs)
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    return sol
+    return spiking_solve(dzdt, u0, tspan, spk_args)
 end
 
 """

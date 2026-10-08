@@ -1947,7 +1947,7 @@ function _pulse_rollout(l::PhasorWaveSheet, ps, st, u0, t0::Float32, L::Int, dri
             merge(spk_args.solver_args,
                   Dict{Symbol,Any}(:saveat => Float32[tn + T], :save_start => false))
         end
-        sol = solve(ODEProblem(dzdt, u, (tn, tn + T), ps), spk_args.solver; args...)
+        sol = spiking_solve(dzdt, u, (tn, tn + T), spk_args; p = ps, solver_args = args)
         u = ComplexF32.(sol.u[end])
         samples[n + 1] = _mirror(u)
         prev_fire, prev_ts = fire, ts
@@ -2131,8 +2131,7 @@ function (l::PhasorWaveSheet)(x::CurrentCall, ps::LuxParams, st::NamedTuple)
               Dict{Symbol,Any}(:saveat => Float32.(collect(T:T:(L * T))),
                                :save_start => false))
     end
-    prob = ODEProblem(dzdt, u0, tspan, ps)
-    sol  = solve(prob, spk_args.solver, p = ps; save_args...)
+    sol  = spiking_solve(dzdt, u0, tspan, spk_args; p = ps, solver_args = save_args)
 
     Z = cat([reshape(ComplexF32.(u), H * W, 1, B) for u in sol.u]...; dims = 2)  # (H*W, L, B) physical
     return complex_to_angle(_mirror(Z)), st                                         # code convention
