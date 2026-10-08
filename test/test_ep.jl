@@ -709,6 +709,10 @@ end
 # order than CPU BLAS, and the 1/β division in the EP estimate amplifies
 # that difference.
 const EP_GPU_TOL = 5e-3
+# Residual chains: the settle is a glassy relaxation (arc_experiments T1), so
+# the different reduction order on the GPU is amplified through the nudged
+# settles — free states agree to 2e-6 but gradients only to ≈1e-2.
+const EP_GPU_TOL_RESIDUAL = 2e-2
 
 function ep_gpu_parity_tests(dev)
     @testset "EP GPU parity with CPU" begin
@@ -784,12 +788,12 @@ function ep_gpu_parity_tests(dev)
                                (vec(Array(bl.bias_real)) .+ im .* vec(Array(bl.bias_imag)),
                                 vec(Array(bg.bias_real)) .+ im .* vec(Array(bg.bias_imag))))
                     re = norm(a - b) / norm(a); worst = max(worst, re)
-                    @test re < EP_GPU_TOL
+                    @test re < EP_GPU_TOL_RESIDUAL
                 end
                 a = Array(g_cpu[key].alpha); b = Array(g_gpu[key].alpha)
                 @test !(g_gpu[key].alpha isa Array)
                 re = abs(a[1] - b[1]) / abs(a[1]); worst = max(worst, re)
-                @test re < EP_GPU_TOL
+                @test re < EP_GPU_TOL_RESIDUAL
             end
             @info "EP GPU parity, residual chain ($name): worst rel-err=$(round(worst, sigdigits=3))"
         end
