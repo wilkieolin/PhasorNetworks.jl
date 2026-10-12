@@ -110,6 +110,23 @@ speed) for analysis and demos.
   constants (no gradient through spike timing). ⚠ A spike within one pulse
   half-width (2·t_window) after its own decision instant loses the part of its
   pulse that would precede the decision (phases within 2·t_window/T of ±1).
+- `pulse_emit_n::Real = Inf` — emission sharpness on the `:pulse` path. Every
+  site emits one spike per cycle carrying charge `m(r) = rⁿ/(rⁿ + θⁿ)`,
+  `r = |z(t_n)|`, instead of the hard `r > θ` indicator. `Inf` (default) is the
+  hard threshold, bit-identical to the rule above; finite `n` makes the
+  emission a saturating (Hill) function of amplitude, so amplitude crosses the
+  synapse as a bounded charge ⚠ (ground rule 1; EM1 tests this).
+- `pulse_levels::Integer = 0` — phase alphabet Z_m on the `:pulse` path (m
+  even): the emitted code phase is rounded to the nearest of the `m` levels
+  `(k + ½)·2π/m` (spike times on a T/m grid, offset by half a slot, relative to
+  the global clock t = 0). The half-level offset keeps every level off the slot
+  edge φ = ±1, where a spike would sit on the decision instant and lose half its
+  pulse (the ⚠ above). `0` = off.
+- `pulse_lock::Real = 0` — m-fold locking torque on the `:pulse` path: between
+  decisions each site's phase relative to the global carrier, ψ = arg(z·e^{−iωt}),
+  obeys an extra `dψ/dt = K·sin(m·ψ)` (amplitude untouched), stable at the same
+  half-offset levels, so it pulls each site toward the Z_m alphabet. Needs
+  `pulse_levels = m`. `0` = off.
 - `init_log_theta::Union{Real,Nothing} = nothing` — `log θ`, the **emission
   threshold** (units of `|z|`); the spike is `z/√(|z|²+θ²)`, i.e. the `ε` of
   [`normalize_to_unit_circle`](@ref) with `ε = θ²`. **The default is derived**:
@@ -252,6 +269,9 @@ struct PhasorWaveSheet <: Lux.AbstractLuxLayer
     silent::Symbol             # :absent (sub-threshold sends nothing) | :reference (read as e^{iπ·silent_phase}); :strict only
     silent_phase::Float32      # reference phase for silent = :reference (units of π, code convention)
     ode_coupling::Symbol       # :continuous (g·W⊛s(z(t)) at every instant) | :pulse (one event per cycle); ODE paths
+    pulse_emit_n::Float32      # :pulse emission sharpness: charge m(r) = rⁿ/(rⁿ+θⁿ); Inf = hard threshold (default)
+    pulse_levels::Int          # :pulse phase alphabet Z_m: snap the emitted phase to m levels per cycle; 0 = off
+    pulse_lock::Float32        # :pulse m-fold locking torque K (rad per unit time) toward the Z_m levels; 0 = off
     spk_args::SpikingArgs
 end
 
@@ -284,6 +304,9 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                          silent::Symbol = :absent,
                          silent_phase::Real = 0,
                          ode_coupling::Symbol = :continuous,
+                         pulse_emit_n::Real = Inf,
+                         pulse_levels::Integer = 0,
+                         pulse_lock::Real = 0,
                          spk_args::SpikingArgs = SpikingArgs())
     coupling in (:dog, :stencil, :aniso, :shift) ||
         throw(ArgumentError("coupling must be :dog, :stencil, :aniso or :shift, got :$coupling"))
@@ -301,6 +324,20 @@ function PhasorWaveSheet(H::Integer, W::Integer;
     ode_coupling === :pulse && transmit !== :strict &&
         throw(ArgumentError("ode_coupling=:pulse emits one phase-only event per cycle, which " *
               "is defined for transmit=:strict only (got transmit=:$transmit)"))
+    pulse_emit_n > 0 ||
+        throw(ArgumentError("pulse_emit_n must be > 0 (Inf = hard threshold), got $pulse_emit_n"))
+    pulse_levels >= 0 ||
+        throw(ArgumentError("pulse_levels must be ≥ 0 (0 = no phase alphabet), got $pulse_levels"))
+    pulse_lock >= 0 ||
+        throw(ArgumentError("pulse_lock must be ≥ 0, got $pulse_lock"))
+    pulse_lock > 0 && pulse_levels < 1 &&
+        throw(ArgumentError("pulse_lock > 0 locks toward the Z_m levels, so it needs pulse_levels ≥ 1"))
+    pulse_levels > 0 && isodd(pulse_levels) &&
+        throw(ArgumentError("pulse_levels must be even: the code convention is −conj of the physical " *
+              "phase, and the two Z_m grids coincide only for even m (got $pulse_levels)"))
+    (!isinf(pulse_emit_n) || pulse_levels > 0 || pulse_lock > 0) && ode_coupling !== :pulse &&
+        throw(ArgumentError("pulse_emit_n, pulse_levels and pulse_lock act on the ode_coupling=:pulse " *
+              "path only (got ode_coupling=:$ode_coupling)"))
     silent === :reference && transmit !== :strict &&
         throw(ArgumentError("silent=:reference defines what a sub-threshold site sends, " *
               "which is only a hard 'no event' under transmit=:strict (got transmit=:$transmit)"))
@@ -327,6 +364,7 @@ function PhasorWaveSheet(H::Integer, W::Integer;
                            Float32(init_log_eta_g), Float32(init_log_eta_l),
                            Float32(init_logit_target), Float32(init_log_theta_beta),
                            silent, Float32(silent_phase), ode_coupling,
+                           Float32(pulse_emit_n), Int(pulse_levels), Float32(pulse_lock),
                            spk_args)
 end
 
@@ -339,6 +377,9 @@ function Base.show(io::IO, l::PhasorWaveSheet)
     l.homeostasis !== :none && print(io, "homeostasis=:$(l.homeostasis), ")
     l.silent !== :absent && print(io, "silent=:$(l.silent)(phase $(l.silent_phase)), ")
     l.ode_coupling !== :continuous && print(io, "ode_coupling=:$(l.ode_coupling), ")
+    isinf(l.pulse_emit_n) || print(io, "pulse_emit_n=$(l.pulse_emit_n), ")
+    l.pulse_levels > 0 && print(io, "pulse_levels=$(l.pulse_levels), ")
+    l.pulse_lock > 0 && print(io, "pulse_lock=$(l.pulse_lock), ")
     print(io, "t_period=$(l.spk_args.t_period))")
 end
 
@@ -1921,6 +1962,7 @@ function _pulse_rollout(l::PhasorWaveSheet, ps, st, u0, t0::Float32, L::Int, dri
     gr  = reshape(g, 1, 1, 1)
     Whr = reshape(_physical_kernel(W_hat), H, W, 1)
     θ   = _ode_theta(l, ps)
+    nE  = l.pulse_emit_n; mZ = l.pulse_levels; Kl = l.pulse_lock
     hw  = 2f0 * Float32(spk_args.t_window)         # pulse half-width; ∫ pulse dt = hw
     inv_hw = 1f0 / hw                                # unit charge per spike
     u = ComplexF32.(u0)
@@ -1930,8 +1972,10 @@ function _pulse_rollout(l::PhasorWaveSheet, ps, st, u0, t0::Float32, L::Int, dri
         tn = t0 + Float32(n) * T
         fire, ts = ignore_derivatives() do
             zc = _mirror(u)                              # code convention at t_n
-            f  = Float32.(abs.(zc) .> θ)
+            f  = isinf(nE) ? Float32.(abs.(zc) .> θ) :
+                 1f0 ./ (1f0 .+ (θ ./ Float32.(abs.(zc))) .^ nE)   # charge m(r) = rⁿ/(rⁿ+θⁿ); r = 0 → 0
             φ  = Float32.(angle.(zc)) ./ pi_f32
+            mZ > 0 && (φ = (floor.(φ .* (mZ / 2f0)) .+ 0.5f0) .* (2f0 / mZ))   # Z_m alphabet, half-offset (units of π)
             (f, tn .+ mod.((φ ./ 2f0 .+ 0.5f0) .* T, T))
         end
         pf, pts = prev_fire, prev_ts
@@ -1940,6 +1984,10 @@ function _pulse_rollout(l::PhasorWaveSheet, ps, st, u0, t0::Float32, L::Int, dri
             P = (fire .* _rc_pulse(tt .- ts, hw) .+ pf .* _rc_pulse(tt .- pts, hw)) .* inv_hw
             lat = ifft(Whr .* fft(ComplexF32.(P), (1, 2)), (1, 2))
             out = kr .* v .+ gr .* lat
+            if Kl > 0                                    # dψ/dt += K sin(mψ): stable at ψ = (k+½)·2π/m
+                ψ = angle.(v .* cis(-Float32(mod(ω * Float64(t), 2π))))   # ψ = arg(v·e^{−iωt}), global clock t = 0
+                out = out .+ Kl .* sin.(mZ .* ψ) .* (1im .* v)
+            end
             drive_fn === nothing && return out
             return out .+ reshape(ComplexF32.(drive_fn(t)), H, W, B) .* drive_gain
         end

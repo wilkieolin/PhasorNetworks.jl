@@ -49,6 +49,7 @@ function wave_tests()
         test_wave_strict_transmission()
         test_wave_silent_reference()
         test_wave_pulse_coupling()
+        test_wave_pulse_emission()
         test_wave_time_grid()
         test_wave_ode_convention()
         test_wave_emission_threshold()
@@ -1640,6 +1641,103 @@ function test_wave_pulse_coupling()
         ls = PhasorWaveSheet(8, 8; transmit = :strict, ode_coupling = :pulse, silent = :reference)
         pss, sts = Lux.setup(Xoshiro(1), ls)
         @test_throws ArgumentError wave_simulate(ls, pss, sts; z0 = zz, L = 1, mode = :ode)
+    end
+end
+
+# ---- Pulse emission options: sharpness n, phase alphabet Z_m, m-fold lock ----
+#
+# `pulse_emit_n = Inf, pulse_levels = 0, pulse_lock = 0` is the hard rule above,
+# bit for bit. Finite n: each site emits charge m(r) = rⁿ/(rⁿ+θⁿ) once per cycle.
+# `pulse_levels = m`: the emitted phase is rounded to m levels. `pulse_lock = K`:
+# dψ/dt += −K sin(mψ) between decisions, ψ the phase against the global carrier.
+
+function _pulse_disc_step_q(z, q, φ, A, g, Wh, λ, T)
+    e = q .* cispi.(φ) .* exp.(λ .* PhasorNetworks._spike_dt(φ, T))
+    return A .* z .+ g .* PhasorNetworks.ifft(Wh .* PhasorNetworks.fft(e))
+end
+
+function test_wave_pulse_emission()
+    @testset "pulse emission options (n, Z_m, lock)" begin
+        S = 16
+        tw = 0.0025f0
+        spk = SpikingArgs(t_window = tw, solver = Tsit5(),
+                          solver_args = Dict(:adaptive => false, :dt => tw / 4))
+        mk(; kw...) = PhasorWaveSheet(S, S; transmit = :strict, ode_coupling = :pulse, spk_args = spk, kw...)
+        lp = mk()
+        ps, st = Lux.setup(Xoshiro(1), lp)
+        θ0 = exp(only(ps.log_theta))
+        ω = period_to_angfreq(lp.spk_args.t_period); T = Float32(lp.spk_args.t_period)
+        A, g, Wh = PhasorNetworks._build_coupling(lp, ps, st, ω)
+        λ = -exp(only(ps.log_neg_lambda))
+
+        # (a) Defaults, validation and display.
+        @test isinf(lp.pulse_emit_n) && lp.pulse_levels == 0 && lp.pulse_lock == 0
+        @test !occursin("pulse_emit_n", sprint(show, lp))
+        @test occursin("pulse_emit_n=2.0", sprint(show, mk(pulse_emit_n = 2)))
+        @test occursin("pulse_levels=16", sprint(show, mk(pulse_levels = 16)))
+        @test_throws ArgumentError mk(pulse_emit_n = 0)
+        @test_throws ArgumentError mk(pulse_levels = -1)
+        @test_throws ArgumentError mk(pulse_levels = 15)
+        @test_throws ArgumentError mk(pulse_lock = 1)
+        @test_throws ArgumentError mk(pulse_lock = -1, pulse_levels = 16)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :strict, pulse_emit_n = 2)
+        @test_throws ArgumentError PhasorWaveSheet(8, 8; transmit = :strict, pulse_levels = 16)
+
+        # (b) Parity: n = Inf passed explicitly is bit-identical to the default rule,
+        #     on the autonomous and the SpikingCall paths.
+        rng = Xoshiro(2)
+        z0 = ComplexF32.((0.5f0 .+ 1.5f0 .* rand(rng, Float32, S, S)) .* θ0 .*
+                         cis.(2f0π .* rand(rng, Float32, S, S)))
+        li = mk(pulse_emit_n = Inf, pulse_levels = 0, pulse_lock = 0)
+        @test wave_simulate(li, ps, st; z0 = z0, L = 3, mode = :ode) ==
+              wave_simulate(lp, ps, st; z0 = z0, L = 3, mode = :ode)
+        x = Phase.(2f0 .* rand(Xoshiro(5), Float32, S * S, 3, 2) .- 1f0)
+        call = SpikingCall(ssm_phases_to_train(x; spk_args = spk), spk, (0f0, 3f0 * spk.t_period))
+        @test Float32.(first(li(call, ps, st))) == Float32.(first(lp(call, ps, st)))
+
+        # (c) Soft emission: one site's kick scales by m(r) = rⁿ/(rⁿ+θⁿ), phase unchanged;
+        #     a large n at r = 2θ is the hard rule.
+        for (n, rr) in ((2, 1f0), (1, 0.5f0), (8, 1.3f0), (64, 2f0))
+            φ0 = 0.5f0
+            z1 = zeros(ComplexF32, S, S); z1[8, 8] = rr * θ0 * cispi(φ0)
+            q = zeros(Float32, S, S); q[8, 8] = 1f0 / (1f0 + (1f0 / rr)^n)
+            ode = wave_simulate(mk(pulse_emit_n = n), ps, st; z0 = z1, L = 1, mode = :ode)[:, :, 1, 1]
+            disc = _pulse_disc_step_q(z1, q, fill(φ0, S, S), only(A), only(g), Wh, λ, T)
+            m = abs.(disc) .> 1f-6 * θ0; m[8, 8] = false
+            r = ode[m] ./ disc[m]
+            @test maximum(abs.(abs.(r) .- 1f0)) < 2f-3
+            @test maximum(abs.(angle.(r))) < 2f-3
+        end
+        # sub-threshold sites now emit (a small charge) instead of nothing
+        zs = zeros(ComplexF32, S, S); zs[8, 8] = 0.5f0 * θ0
+        @test maximum(abs.(wave_simulate(mk(pulse_emit_n = 2), ps, st; z0 = zs, L = 1, mode = :ode)[:, :, 1, 1] .-
+                           wave_simulate(lp, ps, st; z0 = zs, L = 1, mode = :ode)[:, :, 1, 1])) > 1f-3 * θ0
+
+        # (d) Z_m alphabet (levels (k+½)·2/m, units of π): the kick is the Dirac kick
+        #     of the rounded phase; no level sits on the slot edge ±1.
+        for (φ0, φq) in ((0.3f0, 0.3125f0), (-0.55f0, -0.5625f0), (0.97f0, 0.9375f0), (-0.999f0, -0.9375f0))
+            z1 = zeros(ComplexF32, S, S); z1[8, 8] = 2f0 * θ0 * cispi(φ0)
+            q = zeros(Float32, S, S); q[8, 8] = 1f0
+            ode = wave_simulate(mk(pulse_levels = 16), ps, st; z0 = z1, L = 1, mode = :ode)[:, :, 1, 1]
+            disc = _pulse_disc_step_q(z1, q, fill(φq, S, S), only(A), only(g), Wh, λ, T)
+            m = abs.(disc) .> 1f-6 * θ0; m[8, 8] = false
+            r = ode[m] ./ disc[m]
+            @test maximum(abs.(abs.(r) .- 1f0)) < 5f-3
+            @test maximum(abs.(angle.(r))) < 5f-3
+        end
+
+        # (e) m-fold lock on an uncoupled site: the phase relaxes to the nearest Z_m
+        #     level, amplitude is untouched; K = 0 leaves it where it was.
+        lq(K) = PhasorWaveSheet(4, 4; transmit = :strict, ode_coupling = :pulse, init_log_g = log(1f-8),
+                                pulse_levels = 8, pulse_lock = K, spk_args = spk)
+        p4, s4 = Lux.setup(Xoshiro(3), lq(2f0))
+        zz = fill(ComplexF32(3f0 * cispi(0.3f0)), 4, 4)                 # 0.3 is 0.075 from level 0.375
+        dist(z) = maximum(abs.(mod.(Float32.(angle.(z)) ./ Float32(π), 0.25f0) .- 0.125f0))
+        y0 = wave_simulate(lq(0f0), p4, s4; z0 = zz, L = 4, mode = :ode)[:, :, end, 1]
+        yK = wave_simulate(lq(2f0), p4, s4; z0 = zz, L = 4, mode = :ode)[:, :, end, 1]
+        @test dist(y0) > 0.06f0
+        @test dist(yK) < 0.1f0 * dist(y0)
+        @test maximum(abs.(abs.(yK) .- abs.(y0))) < 1f-3 * maximum(abs.(y0))
     end
 end
 
