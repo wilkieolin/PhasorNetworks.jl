@@ -102,27 +102,14 @@ include("spiking_operations_tests.jl")
 @testset "PhasorNetworks.jl" begin
     # Backend abstraction tests — self-contained @testset, just include it.
     include("test_backend.jl")
-    domain_tests()
-    vsa_tests()
-    network_tests()
-    metrics_tests()
-    network_layers_tests()
-    phase_type_tests()
-    ssm_tests()
-    local_attention_tests()
-    transformer_block_tests()
-    multimode_tests()
-    attractor_ssm_tests()
-    wave_tests()
-    excitable_tests()
-    hep_tests()
-    ep_tests()
-    spiking_operations_tests()
 
     # Backend-agnostic GPU test gate. `GPU_DEV` is the device selected in
     # the preamble from PHASOR_BACKEND (CUDA on NVIDIA, oneAPI on Intel).
     # The test bodies route everything through `GPU_DEV` and
     # `AbstractGPUArray` dispatch, so the same suite runs on either.
+    # Runs before the CPU suite so a device-level failure (driver abort,
+    # missing vendor-library hook) surfaces in minutes, not after the
+    # ten-minute CPU run — relevant on Aurora's one-hour debug queue.
     if GPU_AVAILABLE
         @info "GPU backend :$(PHASOR_BACKEND) → $(typeof(GPU_DEV)). Running GPU tests..."
         @testset "GPU Specific Tests" begin
@@ -140,4 +127,21 @@ include("spiking_operations_tests.jl")
     else
         @info "No GPU backend selected (PHASOR_BACKEND=$(PHASOR_BACKEND)). Skipping GPU tests; use `julia test/gpu.jl` to run them."
     end
+
+    domain_tests()
+    vsa_tests()
+    network_tests()
+    metrics_tests()
+    network_layers_tests()
+    phase_type_tests()
+    ssm_tests()
+    local_attention_tests()
+    transformer_block_tests()
+    multimode_tests()
+    attractor_ssm_tests()
+    wave_tests()
+    excitable_tests()
+    hep_tests()
+    ep_tests()
+    spiking_operations_tests()
 end

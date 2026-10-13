@@ -28,7 +28,18 @@ never has to resolve both stacks.
 
 - `julia test/gpu.jl [cuda|oneapi|auto]` runs the full test suite on a GPU
   backend (auto-detects the platform). `Pkg.test()` runs the CPU suite.
+  The GPU section runs first, so device-level failures surface early.
 - `scripts/gpu_backend.jl` provides `load_gpu_backend()` for scripts.
+
+### Aurora (oneAPI) note
+
+Aurora's site oneAPI module puts its own SYCL adapters on
+`LD_LIBRARY_PATH`, where they shadow the ones bundled with oneAPI.jl and
+abort the process on the first oneMKL call (a matmul on a `oneArray`).
+`scripts/aurora_test.sh` strips those entries before launching Julia;
+`test/gpu.jl oneapi` and `load_gpu_backend()` refuse to start while they
+are present (`PHASOR_ALLOW_SITE_ONEAPI=1` overrides). KernelAbstractions
+kernels are unaffected either way — only the oneMKL paths are.
 
 ## Helpers
 

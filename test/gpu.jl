@@ -17,7 +17,7 @@
 using Pkg
 
 const REPO = normpath(joinpath(@__DIR__, ".."))
-include(joinpath(REPO, "scripts", "gpu_backend.jl"))   # detect_gpu_backend, resolve_gpu_backend
+include(joinpath(REPO, "scripts", "gpu_backend.jl"))   # resolve_gpu_backend, check_oneapi_environment
 
 backend = resolve_gpu_backend(isempty(ARGS) ? :auto : Symbol(lowercase(ARGS[1])))
 
@@ -36,6 +36,11 @@ else
         # unified memory: exceeding ~110 GB pages to disk and locks the box.
         haskey(ENV, "JULIA_CUDA_HARD_MEMORY_LIMIT") ||
             (ENV["JULIA_CUDA_HARD_MEMORY_LIMIT"] = "16GiB")
+    elseif backend == :oneapi
+        # Aurora: the site oneAPI module's LD_LIBRARY_PATH entries abort the
+        # first oneMKL call (SIGABRT, not catchable). Refuse to start rather
+        # than die mid-suite; scripts/aurora_test.sh strips them.
+        check_oneapi_environment()
     end
 
     @info "Running the test suite on backend :$backend" env

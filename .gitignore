@@ -30,3 +30,6 @@ demos/wave_out/
 *.bbl
 *.blg
 /docs/*.pdf
+# PBS stdout/stderr of the Aurora job scripts
+*.sh.e[0-9]*
+*.sh.o[0-9]*

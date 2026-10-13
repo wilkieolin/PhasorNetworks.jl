@@ -228,7 +228,7 @@ All public API functions must be listed in the `export` block in `src/PhasorNetw
 
 ## Testing
 
-Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. `Pkg.test()` is the CPU suite. GPU tests run when `PHASOR_BACKEND` selects a functional backend — use `julia test/gpu.jl [cuda|oneapi]`, which activates `envs/<backend>` and sets it; test bodies use the `GPU_DEV` global (never `gpu_device()` or a vendor name) and live in `test/test_gpu.jl`. Use appropriate tolerances for floating-point phase comparisons.
+Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. `Pkg.test()` is the CPU suite. GPU tests run when `PHASOR_BACKEND` selects a functional backend — use `julia test/gpu.jl [cuda|oneapi]`, which activates `envs/<backend>` and sets it; test bodies use the `GPU_DEV` global (never `gpu_device()` or a vendor name) and live in `test/test_gpu.jl`. The GPU section runs before the CPU suite so device failures surface early. On Aurora, launch through `scripts/aurora_test.sh`: it strips the site oneAPI module's `LD_LIBRARY_PATH` entries, which otherwise shadow oneAPI.jl's bundled SYCL adapters and SIGABRT the first oneMKL call (`test/gpu.jl oneapi` refuses to start while they are present). Use appropriate tolerances for floating-point phase comparisons.
 
 ## Code Style
 

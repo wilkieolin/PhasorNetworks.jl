@@ -62,6 +62,49 @@ function resolve_gpu_backend(backend::Symbol = :auto)
 end
 
 """
+    site_oneapi_library_dirs() -> Vector{String}
+
+`LD_LIBRARY_PATH` entries that belong to an Aurora site oneAPI module
+(`/opt/aurora/<release>/oneapi/...`). They shadow the SYCL adapters
+(`libur_adapter_level_zero`, `libumf`) bundled with oneAPI.jl's support
+library — `LD_LIBRARY_PATH` wins over that library's RUNPATH — and a
+version mismatch aborts the process (SIGABRT, "level_zero backend failed
+with error: 45 (UR_RESULT_ERROR_INVALID_ARGUMENT)") inside
+`sycl::platform::get_platforms` on the first oneMKL call. Empty on any
+other machine.
+"""
+function site_oneapi_library_dirs()
+    entries = split(get(ENV, "LD_LIBRARY_PATH", ""), ':'; keepempty=false)
+    return String[e for e in entries if occursin(r"^/opt/aurora/[^/]+/oneapi/", e)]
+end
+
+"""
+    check_oneapi_environment()
+
+Fail fast when `site_oneapi_library_dirs()` is non-empty: the dynamic loader
+reads `LD_LIBRARY_PATH` at process start, so this cannot be repaired from
+inside Julia — the shell that launches Julia has to drop those entries
+(`scripts/aurora_test.sh` does). Set `PHASOR_ALLOW_SITE_ONEAPI=1` to run
+anyway.
+"""
+function check_oneapi_environment()
+    dirs = site_oneapi_library_dirs()
+    isempty(dirs) && return nothing
+    get(ENV, "PHASOR_ALLOW_SITE_ONEAPI", "0") == "1" && return nothing
+    error("""
+        LD_LIBRARY_PATH contains Aurora's site oneAPI module directories:
+            $(join(dirs, "\n    "))
+        They shadow the SYCL runtime bundled with oneAPI.jl and abort the first
+        oneMKL call (matmul on a oneArray). Launch Julia with those entries
+        removed, e.g.
+
+            export LD_LIBRARY_PATH="\$(echo "\${LD_LIBRARY_PATH:-}" | tr ':' '\\n' | grep -v '^/opt/aurora/[^/]*/oneapi/' | paste -sd:)"
+
+        (scripts/aurora_test.sh does this), or set PHASOR_ALLOW_SITE_ONEAPI=1
+        to proceed regardless.""")
+end
+
+"""
     load_gpu_backend(; backend=:auto, cuda_memory_limit="16GiB") -> (backend, device)
 
 Load the vendor package for `backend` into `Main` and return
@@ -76,6 +119,7 @@ function load_gpu_backend(; backend::Symbol = :auto, cuda_memory_limit::Abstract
             (ENV["JULIA_CUDA_HARD_MEMORY_LIMIT"] = cuda_memory_limit)
         Core.eval(Main, :(using LuxCUDA))
     elseif backend == :oneapi
+        check_oneapi_environment()
         Core.eval(Main, :(using oneAPI))
     end
     ENV["PHASOR_BACKEND"] = String(backend)
