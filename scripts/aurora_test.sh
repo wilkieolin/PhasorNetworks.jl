@@ -13,4 +13,8 @@ module load libraries/julia/1.12
 
 cd $CODE_PATH
 
-julia --project . -e "using Pkg; Pkg.instantiate(); Pkg.test();"
+# Full suite on the Intel GPUs. test/gpu.jl activates envs/oneapi (the only
+# environment that resolves oneAPI), instantiates it, and runs the suite with
+# PHASOR_BACKEND=oneapi. Instantiate once on a login node first so the
+# compute node (no network) finds everything cached.
+julia test/gpu.jl oneapi

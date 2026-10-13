@@ -458,7 +458,7 @@ Automatically handles GPU arrays by moving to CPU for argmin operation.
 """
 function predict_quadrature(phases::AbstractArray; dim::Int=1)
     if on_gpu(phases)
-        phases = phases |> cdev
+        phases = phases |> cpu_device()
     end
 
     answer_shape = reduce_shape(size(phases), dim)
@@ -482,7 +482,7 @@ Automatically handles GPU arrays by moving to CPU for argmax operation.
 """
 function predict_similarity(sims::AbstractArray; dim::Int=1)
     if on_gpu(sims)
-        sims = sims |> cdev
+        sims = sims |> cpu_device()
     end
 
     answer_shape = reduce_shape(size(sims), dim)
@@ -557,8 +557,8 @@ See also: [`predict`](@ref) for the underlying prediction mechanism
 """
 function evaluate_accuracy(values::AbstractArray, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
     if on_gpu(values, truth)
-        values = values |> cdev
-        truth = truth |> cdev
+        values = values |> cpu_device()
+        truth = truth |> cpu_device()
     end
 
     predictions = predict(values, encoding, reduce_dim=reduce_dim)
@@ -614,8 +614,8 @@ function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, 
         ŷ, _ = model(x, ps, st)
         @assert typeof(ŷ) != SpikingCall "Must call spiking models with SpikingArgs provided"
 
-        ls += sum(stack(cdev(loss_fn(ŷ, y)))) #sum across batches
-        model_correct, n_answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
+        ls += sum(stack(cpu_device()(loss_fn(ŷ, y)))) #sum across batches
+        model_correct, n_answers = cpu_device().(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct += model_correct[1]
         num += n_answers
     end
@@ -646,7 +646,7 @@ Tuple of (losses, accuracies) where:
 Useful for assessing the reliability of spiking network performance.
 """
 function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
-    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cdev
+    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cpu_device()
 
     dev = select_device(args.backend)
 
@@ -660,7 +660,7 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
         ŷ, _ = model(x, ps, st)
         loss_vals = sum.(zero_nans.(loss_fn(ŷ, y)))
         append!(ls, [loss_vals,])
-        model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
+        model_correct, answers = cpu_device().(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         append!(correct, model_correct)
         num += answers
     end

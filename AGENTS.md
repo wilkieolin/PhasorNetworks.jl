@@ -146,7 +146,7 @@ PhasorNetworks.jl/
 │   ├── test_ep.jl              # EP tests
 │   ├── metrics_tests.jl        # Metrics tests
 │   ├── test_backend.jl         # Backend abstraction tests
-│   ├── test_cuda.jl            # CUDA-specific tests
+│   ├── test_gpu.jl             # GPU tests (any backend; uses GPU_DEV)
 │   └── spiking_operations_tests.jl  # Spiking operations tests (active)
 ├── scripts/                    # Training and experiment scripts
 │   ├── train_fashionmnist.jl       # FashionMNIST training script (CLI)
@@ -233,7 +233,7 @@ Pkg.test()
 
 The test suite covers: domain conversions, VSA operations (binding, bundling, similarity, orthogonality), network forward/backward passes, individual layer behaviour (PhasorDense, PhasorConv, ComplexBias, Codebook, MinPool, ResidualBlock, etc.), metrics, and optionally CUDA-specific tests.
 
-**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `test_phase_type`, `test_ssm`, `test_local_attention`, `test_local_attention_extras`, `test_transformer_block`, `test_multimode`, `test_attractor_ssm`, `test_wave`, `test_excitable`, `test_hep`, `test_ep`, `spiking_operations_tests`, `test_backend`). GPU tests (`test_cuda.jl`) run conditionally when `CUDA.functional()` is true.
+**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `test_phase_type`, `test_ssm`, `test_local_attention`, `test_local_attention_extras`, `test_transformer_block`, `test_multimode`, `test_attractor_ssm`, `test_wave`, `test_excitable`, `test_hep`, `test_ep`, `spiking_operations_tests`, `test_backend`). GPU tests (`test_gpu.jl`) run when `PHASOR_BACKEND` selects a functional backend: `julia test/gpu.jl [cuda|oneapi]` activates `envs/<backend>` and sets it; `Pkg.test()` is the CPU suite.
 
 ### Documentation
 

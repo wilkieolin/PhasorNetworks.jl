@@ -144,7 +144,7 @@ function potential_to_phase(potential::AbstractGPUArray, ts::AbstractVector; spk
     @assert size(potential)[end] == length(ts) "Time dimensions must match"
     dims = collect(1:ndims(potential))
 
-    current_zeros = gdev(phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args))
+    current_zeros = to_device_of(potential, phase_to_potential.(0.0f0, ts, offset=offset, spk_args=spk_args))
 
     potential = permutedims(potential, reverse(dims))
     arc = angle.(current_zeros) .- angle.(potential)
@@ -167,7 +167,7 @@ function phase_to_train(phases::AbstractGPUArray; spk_args::SpikingArgs, repeats
 
     if repeats > 1
         n_t = times |> length
-        offsets = gdev(repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t))
+        offsets = to_device_of(times, repeat(collect(0:repeats-1) .* spk_args.t_period, inner=n_t))
         times = repeat(times, repeats) .+ offsets
         indices = repeat(indices, repeats)
     end
@@ -181,7 +181,7 @@ end
 # ================================================================
 
 """
-    ssm_phases_to_train(phases::CuArray{<:Phase, 3}; spk_args) -> SpikeTrainGPU
+    ssm_phases_to_train(phases::AbstractGPUArray{<:Phase, 3}; spk_args) -> SpikeTrainGPU
 
 GPU dispatch. Mirrors the CPU `ssm_phases_to_train` in `src/ssm.jl:719`:
 each `(c, l, b)` element produces one spike at time
@@ -190,7 +190,7 @@ shape `(C, B)`.
 
 Implementation note: the CPU body iterates with explicit `for l in 1:L`
 loops and scalar `all_times[idx] = ...` writes, which are forbidden on
-CuArrays. The GPU rewrite fuses everything into:
+GPU arrays. The GPU rewrite fuses everything into:
   1) `phase_to_time` broadcast over the (C, L, B) tensor,
   2) an `l`-indexed offset added via broadcast against a `(1, L, 1)` GPU
      constant,
@@ -198,28 +198,25 @@ CuArrays. The GPU rewrite fuses everything into:
      matches the CPU version (outer loop `l`, inner column-major over
      `(c, b)`).
 The CartesianIndex pattern stays on CPU (cheap, `C·B·L` integers) — the
-existing `phase_to_train(::CuArray, ...)` follows the same convention.
-
-# TODO(ka-migration)
-Migrate to `AbstractGPUArray` dispatch + `KernelAbstractions.zeros(get_backend(phases), …)`
-for `cu(reshape(...))` to make this work on OneAPI / AMD / Metal.
+existing `phase_to_train(::AbstractGPUArray, ...)` follows the same convention.
+Backend-agnostic: the only device constant is lifted with `to_device_of`.
 """
-function ssm_phases_to_train(phases::CuArray{<:Phase, 3}; spk_args::SpikingArgs)
+function ssm_phases_to_train(phases::AbstractGPUArray{<:Phase, 3}; spk_args::SpikingArgs)
     C, L, B = size(phases)
     shape   = (C, B)
     period  = spk_args.t_period
 
-    # Per-element time within one period (CuArray, (C, L, B)).
+    # Per-element time within one period (GPU array, (C, L, B)).
     times_within = phase_to_time(phases, spk_args=spk_args, offset=0.0f0)
 
     # `l`-dependent offset, broadcast across (C, B).
-    l_offsets = cu(reshape(Float32.((0:L-1) .* period), 1, L, 1))
+    l_offsets = to_device_of(phases, reshape(Float32.((0:L-1) .* period), 1, L, 1))
     times_3d  = times_within .+ l_offsets
 
     # Column-major flatten matching the CPU iteration order: l outermost,
     # then (c, b) inner.
     times_perm = permutedims(times_3d, (1, 3, 2))   # (C, B, L)
-    all_times  = vec(times_perm)                     # CuArray, length C·B·L
+    all_times  = vec(times_perm)                     # GPU array, length C·B·L
 
     # Spike indices share the same (c, b) pattern across all `l`.
     base_indices = vec(CartesianIndices((C, B)))     # CPU, length C·B

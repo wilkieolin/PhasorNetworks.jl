@@ -409,14 +409,14 @@ function phasor_lca_spiking_tests()
 end
 
 # ----------------------------------------------------------------------
-# GPU dispatch (gated on CUDA.functional() in runtests.jl)
+# GPU dispatch (gated on GPU_AVAILABLE in runtests.jl)
 # ----------------------------------------------------------------------
 
 function local_attention_gpu_tests()
     @testset "Local Attention GPU" begin
         @info "Running local attention GPU tests..."
         rng = Xoshiro(42)
-        device = gpu_device()
+        device = GPU_DEV
         C_in, d_model, n_heads, n_anchors = 8, 16, 4, 10
         L, B = 6, 2
 

@@ -101,6 +101,9 @@ reconstruct_from_current,
 
 #backend
 select_device,
+on_gpu,
+to_device_of,
+reclaim_device!,
 
 #network
 attend,

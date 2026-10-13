@@ -1,4 +1,9 @@
-using CUDA, LuxCUDA
+# GPU vendor packages (CUDA, oneAPI) are weak dependencies: they are never
+# imported here. Backend-specific code lives in ext/PhasorNetworks*Ext.jl and
+# is activated by `using CUDA` / `using oneAPI` in the calling environment.
+import MLDataDevices
+using MLDataDevices: get_device, gpu_device, cpu_device,
+                     AbstractDevice, AbstractGPUDevice, CPUDevice
 using KernelAbstractions
 using GPUArraysCore: AbstractGPUArray
 using Atomix

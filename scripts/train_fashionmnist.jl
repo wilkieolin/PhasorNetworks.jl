@@ -3,7 +3,13 @@ scripts/train_fashionmnist.jl
 
 Run from repository root like:
 
-julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --use_cuda true
+julia --project=envs/cuda   scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend auto
+julia --project=envs/oneapi scripts/train_fashionmnist.jl --backend auto      # Aurora
+julia --project=.           scripts/train_fashionmnist.jl --backend cpu
+
+`--backend auto` loads whichever GPU vendor package the active environment
+provides (LuxCUDA in envs/cuda, oneAPI in envs/oneapi) via
+scripts/gpu_backend.jl; the package itself names no vendor.
 
 This script:
  1. Activates the project environment
@@ -33,21 +39,29 @@ end
 
 repo_root = find_repo_root(@__DIR__)
 cd(repo_root)  # change working directory to repository base
-Pkg.activate(repo_root)
+# Respect an explicit environment (`--project=envs/cuda` / `JULIA_PROJECT`);
+# only fall back to the repository project when none was given. The
+# repository project has no GPU vendor package, so that fallback is CPU-only.
+if Base.JLOptions().project == C_NULL && !haskey(ENV, "JULIA_PROJECT")
+    Pkg.activate(repo_root)
+end
 
 # bring project code into scope
 # Load PhasorNetworks as the registered package (NOT via `include` +
 # `using .PhasorNetworks`). Package extensions are keyed to the
 # registered package UUID; include-loaded modules don't trigger them.
-# Today this script doesn't need any extensions, but it's the consistent
-# pattern with scripts/train_fashionmnist_aurora.jl and avoids the same
-# trap the moment anyone wires PhasorNetworks to a CUDA weakdep ext.
+# The CUDA / oneAPI backends are weakdep extensions of PhasorNetworks, so
+# this matters: `load_gpu_backend` below relies on them firing.
 using PhasorNetworks
+using MLDataDevices: cpu_device
 
 # dependencies used in notebook
-using Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays, CUDA
+using Lux, MLUtils, OneHotArrays, Statistics, Random, Zygote, Optimisers, ComponentArrays
 using ArgParse, JLD2, Dates
 using Random: Xoshiro
+
+# Platform-resolved GPU backend: detect_gpu_backend / load_gpu_backend.
+include(joinpath(@__DIR__, "gpu_backend.jl"))
 
 # parse CLI args with ArgParse
 function build_parser()
@@ -72,10 +86,9 @@ function build_parser()
         "--optimizer"
             help = "Optimizer name (rmsprop, adam, sgd)"
             default = "rmsprop"
-        "--use_cuda"
-            help = "Use CUDA if available"
-            arg_type = Bool
-            default = true
+        "--backend"
+            help = "Compute backend: auto (detect platform), cpu, cuda, oneapi"
+            default = "auto"
         "--out"
             help = "Output directory to save run artifacts"
             default = "runs"
@@ -89,28 +102,21 @@ epochs = parsed["epochs"]
 seed = parsed["seed"]
 batchsize = parsed["batchsize"]
 optimizer_name = lowercase(parsed["optimizer"])
-use_cuda = parsed["use_cuda"]
 outdir = parsed["out"]
 
+# devices: load the vendor package for the selected backend (activating
+# the PhasorNetworks extension) and get the device to move data with.
+backend, dev = load_gpu_backend(backend = Symbol(lowercase(parsed["backend"])))
+use_gpu = backend != :cpu
+cdev = cpu_device()
 
 args = Args(batchsize = batchsize,
             epochs = epochs,
             lr = lr,
             rng = Xoshiro(seed),
-            use_cuda = use_cuda)
+            backend = backend)
 
-println("Settings: lr=$(lr), epochs=$(epochs), batchsize=$(batchsize), optimizer=$(optimizer_name), use_cuda=$(use_cuda), out=$(outdir)")
-
-
-# devices
-cdev = cpu_device()
-gdev = gpu_device()
-
-if use_cuda
-    dev = gdev
-else 
-    dev = cdev
-end
+println("Settings: lr=$(lr), epochs=$(epochs), batchsize=$(batchsize), optimizer=$(optimizer_name), backend=$(backend) ($(typeof(dev))), out=$(outdir)")
 
 function get_optimizer(name::String, lr::Float64)
     name = lowercase(name)
@@ -198,9 +204,9 @@ p_model = Chain(FlattenLayer(),
 
 psp, stp = Lux.setup(args.rng, p_model)
 
-if use_cuda && CUDA.functional()
-    psp = psp |> gdev
-    stp = stp |> gdev
+if use_gpu
+    psp = psp |> dev
+    stp = stp |> dev
 end
 
 function phasor_loss_function(x, y, model, ps, st, dev=dev)
@@ -242,8 +248,8 @@ println("\nDone.")
 # --- Save run artifacts (loss histories, trained params, args) using JLD2
 
 function cpuify(x)
-    # move CUDA arrays to CPU; recursively handle arrays, tuples, dicts, named tuples
-    if typeof(x) <: CUDA.CuArray
+    # move GPU arrays (any backend) to CPU; recursively handle arrays, tuples, dicts, named tuples
+    if on_gpu(x)
         return Array(x)
     elseif isa(x, AbstractArray)
         return map(cpuify, x)
@@ -274,7 +280,7 @@ end
 
 # gather info
 info = Dict(
-    :args => Dict(:lr=>lr, :epochs=>epochs, :batchsize=>batchsize, :optimizer=>optimizer_name, :use_cuda=>use_cuda, :seed=>seed),
+    :args => Dict(:lr=>lr, :epochs=>epochs, :batchsize=>batchsize, :optimizer=>optimizer_name, :backend=>backend, :seed=>seed),
     :conventional => Dict(:losses => cpuify(losses), :params => cpuify(pst), :state => cpuify(stt), :test_accuracy => acc),
     :phasor => Dict(:losses => cpuify(losses_f), :params => cpuify(ps_train_f), :state => cpuify(st_train_f), :test_accuracy => acc_p)
 )

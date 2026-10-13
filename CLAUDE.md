@@ -8,13 +8,18 @@ PhasorNetworks.jl is a Julia package for phasor neural networks combining oscill
 
 The architecture is built on a unified State Space Model (SSM): each layer of neurons is defined by a single equation `dz/dt = k*z + W*I(t)` where `k = lambda + i*omega` is a per-channel complex eigenvalue. This equation can be evaluated in multiple equivalent modes: discrete (phase matrices, causal convolution, FFT), or continuous ODE (spiking/current input). The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) links the modes.
 
-Built on Lux.jl (functional neural network framework), with Zygote.jl for AD, DifferentialEquations.jl for ODE solving, and CUDA.jl for GPU acceleration with hand-written kernels.
+Built on Lux.jl (functional neural network framework), with Zygote.jl for AD, DifferentialEquations.jl for ODE solving, and KernelAbstractions.jl for hand-written GPU kernels that run on CUDA (NVIDIA) or oneAPI (Intel, Aurora) — the vendor package is a weak dependency resolved per platform.
 
 ## Common Commands
 
 ```bash
-# Run full test suite
+# Run full test suite (CPU; no GPU vendor package is resolved)
 julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Run the full suite on the GPU: picks envs/cuda or envs/oneapi for this
+# platform (PHASOR_BACKEND=cuda|oneapi overrides; or pass it as the argument)
+julia test/gpu.jl
+julia test/gpu.jl oneapi      # e.g. in scripts/aurora_test.sh
 
 # Run from REPL
 julia --project=.
@@ -28,7 +33,7 @@ include("test/runtests.jl")  # loads globals, then call e.g. network_tests()
 julia --project=docs docs/make.jl
 
 # Training script
-julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend :cuda
+julia --project=envs/cuda scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend auto
 
 # Experiment/figure scripts that need CSV, DataFrames, CairoMakie, etc.
 julia --project=scripts scripts/make_all_figures.jl
@@ -37,8 +42,15 @@ julia --project=scripts scripts/make_all_figures.jl
 Plotting and data-frame packages live in the separate `scripts/` environment
 (`scripts/Project.toml`, which develops PhasorNetworks from `..`), not in the
 core package, so library users don't install them. Scripts that need them
-activate `scripts/` themselves. Change any `Project.toml`/`Manifest.toml` only
-through the Pkg API (`Pkg.add`/`Pkg.rm`/`Pkg.compat`), never by editing it.
+activate `scripts/` themselves. GPU vendor packages live only in the
+per-backend environments `envs/cuda` (LuxCUDA) and `envs/oneapi` (oneAPI),
+each of which develops PhasorNetworks from `../..`; run GPU work with
+`--project=envs/<backend>` and load the backend with
+`scripts/gpu_backend.jl`'s `load_gpu_backend()`. Change any
+`Project.toml`/`Manifest.toml` only through the Pkg API
+(`Pkg.add`/`Pkg.rm`/`Pkg.compat`), never by editing it. (The two entries Pkg
+has no API for — `[extensions]` and `[compat]` of a weakdep — are the single
+exception.)
 
 There is no linter or formatter configured. Julia 1.11+ is required.
 
@@ -143,13 +155,13 @@ the load-dependency order.
 
 | File | Role |
 |------|------|
-| `imports.jl` | Centralized `using`/`import` of all external dependencies (CUDA, Lux, DifferentialEquations, FFTW, ChainRulesCore, …); loaded first |
-| `constants.jl` | Module-level constants: `N_THREADS`, `pi_f32`, unit phasors (`z_0`, `z_90cw`, `z_90ccw`), and legacy `cdev`/`gdev` device handles (prefer `select_device`) |
+| `imports.jl` | Centralized `using`/`import` of all external dependencies (Lux, MLDataDevices, KernelAbstractions, DifferentialEquations, FFTW, ChainRulesCore, …); loaded first. Never imports a GPU vendor package |
+| `constants.jl` | Module-level constants: `N_THREADS`, `pi_f32`, unit phasors (`z_0`, `z_90cw`, `z_90ccw`). (The legacy `cdev`/`gdev` globals are gone.) |
 | `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
-| `backend.jl` | Backend-agnostic GPU helpers: `on_gpu` (any-backend detection via `AbstractGPUArray`), `select_device(backend)` for `:cuda`/`:cpu`/`:oneapi` |
+| `backend.jl` | Backend-agnostic GPU helpers: `on_gpu` (any-backend detection via `AbstractGPUArray` / `SpikeTrainGPU`), `select_device(backend)` for `:auto`/`:cpu`/`:cuda`/`:oneapi`, `to_device_of` (device follows data), `gpu_zeros`, `reclaim_device!` hook. `:cuda`/`:oneapi` methods are added by `ext/PhasorNetworksCUDAExt.jl` / `ext/PhasorNetworksOneAPIExt.jl` |
 | `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
 | `activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`, …) passed as the `activation` argument to layers; pure domain conversions stay in `domains.jl` |
-| `gpu.jl` | CUDA/KernelAbstractions kernels mirroring CPU paths for spike processing, scatter-add, similarity |
+| `gpu.jl` | KernelAbstractions kernels (any backend) mirroring CPU paths for spike processing, scatter-add, similarity |
 | `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
 | `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
@@ -199,14 +211,15 @@ Uses `BacksolveAdjoint` with `ZygoteVJP` for sensitivity analysis through Differ
 
 ### GPU Backend Abstraction
 
-GPU code uses KernelAbstractions.jl for vendor-neutral kernels and GPUArraysCore's `AbstractGPUArray` for dispatch. CUDA is the default backend; oneAPI is supported via a package extension.
+GPU code uses KernelAbstractions.jl for vendor-neutral kernels and GPUArraysCore's `AbstractGPUArray` for dispatch. The package has **no** GPU vendor dependency: CUDA and oneAPI are `[weakdeps]`, each with a package extension (`ext/PhasorNetworksCUDAExt.jl`, `ext/PhasorNetworksOneAPIExt.jl`) that registers `select_device(:cuda)` / `select_device(:oneapi)`. The backend resolves per platform from whichever vendor package the *environment* loads: `envs/cuda` (LuxCUDA) on NVIDIA machines, `envs/oneapi` on Aurora. Never `using CUDA`/`oneAPI` or name `CuArray`/`oneArray` inside `src/`.
 
 - GPU kernels in `gpu.jl` use `@kernel`/`@index` (KernelAbstractions), not `@cuda`/`blockIdx`/`threadIdx`
 - Atomic operations use `Atomix.@atomic`, not `CUDA.@atomic`
 - Dispatch on `AbstractGPUArray` instead of `CuArray` for backend-agnostic GPU paths
 - Use `gpu_zeros(ref_array, T, dims...)` or `KernelAbstractions.zeros(get_backend(ref), T, dims)` instead of `CUDA.zeros`
-- Use `select_device(backend)` instead of checking `CUDA.functional()` directly
-- `Args` has `backend::Symbol` (`:cuda`, `:cpu`, `:oneapi`). `use_cuda` kwarg and property still work for backward compat.
+- Use `select_device(backend)` instead of checking `CUDA.functional()` directly; `reclaim_device!(dev)` instead of `CUDA.reclaim()`
+- Device follows the data: lift host constants onto GPU data with `to_device_of(ref, x)` or `MLDataDevices.get_device(ref)(x)`; `SpikeTrainGPU(...; device=)` takes an explicit device when building from host data
+- `Args` has `backend::Symbol` (`:auto` default, `:cpu`, `:cuda`, `:oneapi`). `use_cuda` kwarg and property still work for backward compat.
 - `on_gpu(args...)` checks `AbstractGPUArray`, not `CuArray`
 
 ### Exports
@@ -215,7 +228,7 @@ All public API functions must be listed in the `export` block in `src/PhasorNetw
 
 ## Testing
 
-Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. CUDA tests run conditionally when `CUDA.functional()` is true. Use appropriate tolerances for floating-point phase comparisons.
+Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. `Pkg.test()` is the CPU suite. GPU tests run when `PHASOR_BACKEND` selects a functional backend — use `julia test/gpu.jl [cuda|oneapi]`, which activates `envs/<backend>` and sets it; test bodies use the `GPU_DEV` global (never `gpu_device()` or a vendor name) and live in `test/test_gpu.jl`. Use appropriate tolerances for floating-point phase comparisons.
 
 ## Code Style
 

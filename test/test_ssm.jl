@@ -482,7 +482,7 @@ function ssm_gpu_tests()
     @testset "SSM GPU Tests" begin
         @info "Running SSM GPU tests..."
         rng = Xoshiro(42)
-        device = gpu_device()
+        device = GPU_DEV
 
         @testset "PhasorResonant forward on GPU" begin
             in_dim, out_dim = 8, 16
@@ -502,7 +502,7 @@ function ssm_gpu_tests()
         end
 
         @testset "psk_encode on GPU" begin
-            images = gpu_device()(rand(Float32, 28, 28, 4))  # backend-agnostic
+            images = GPU_DEV(rand(Float32, 28, 28, 4))  # backend-agnostic
             x = psk_encode(images)
             @test size(x) == (28, 28, 4)
             @test all(abs.(abs.(Array(x)) .- 1f0) .< 1f-5)

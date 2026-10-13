@@ -491,9 +491,10 @@ Convert a GPU-based spike train to phases. The output remains on the GPU.
 - GPU array of phases in range [-1, 1]
 """
 function train_to_phase(train::SpikeTrainGPU; spk_args::SpikingArgs)
+    dev = get_device(train.times)
     train = SpikeTrain(train)
     #preserve device on output
-    phases = train_to_phase(train, spk_args=spk_args, offset=train.offset) |> gdev
+    phases = train_to_phase(train, spk_args=spk_args, offset=train.offset) |> dev
     return phases
 end
 
@@ -594,7 +595,7 @@ function phase_to_current(phases::AbstractArray; spk_args::SpikingArgs, rotate::
 
         ignore_derivatives() do
             if zeta > 0.0f0
-                noise = zeta .* randn(rng, Float32, size(impulses))
+                noise = zeta .* to_device_of(impulses, randn(rng, Float32, size(impulses)))
                 impulses .+= ComplexF32.(noise .+ 0.0im)
             end
 
@@ -1389,8 +1390,9 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
 
     if on_gpu(tms)
         gpu = true
-        spiking = spiking |> cdev
-        tms = tms |> cdev
+        dev = get_device(tms)
+        spiking = spiking |> cpu_device()
+        tms = tms |> cpu_device()
     else
         gpu = false
     end
@@ -1406,7 +1408,7 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
     train = SpikeTrain(inds, tms, size(u)[1:end-1], offset)
 
     if gpu
-        train = SpikeTrainGPU(train)
+        train = SpikeTrainGPU(train; device=dev)
     end
 
     return train

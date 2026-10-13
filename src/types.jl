@@ -12,7 +12,7 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 - `gc_interval::Int`: GC every N batches. 0 = every batch (default for ODE workloads). Set higher (e.g. 50) for SSM convolution workloads. (default: 0)
 - `batchsize::Int`: Number of samples per batch during training (default: 128)
 - `epochs::Int`: Number of training epochs (default: 10)
-- `backend::Symbol`: GPU backend to use (`:cuda`, `:cpu`, `:oneapi`). Default `:cuda`.
+- `backend::Symbol`: compute backend (`:auto`, `:cpu`, `:cuda`, `:oneapi`). Default `:auto` — the first loaded and functional GPU backend, else CPU. See [`select_device`](@ref).
 - `rng::Xoshiro`: Random number generator for reproducibility (default: Xoshiro(42))
 """
 mutable struct Args
@@ -38,7 +38,7 @@ function Args(; lr::Float64 = 0.0003,
                gc_interval::Int = 0,
                batchsize::Int = 128,
                epochs::Int = 10,
-               backend::Symbol = :cuda,
+               backend::Symbol = :auto,
                use_cuda::Union{Bool, Nothing} = nothing,
                rng::Xoshiro = Xoshiro(42))
     if use_cuda !== nothing
@@ -129,28 +129,31 @@ struct SpikeTrainGPU{N}
     linear_shape::Int
     offset::Float32
 
+    # `device` defaults to the device `times` (or `indices`) already lives
+    # on, else the auto-selected GPU (`gpu_device()`). Pass it explicitly
+    # when building from host data that must land on a specific device.
     function SpikeTrainGPU(indices::AbstractArray,
                             times::AbstractArray,
                             shape::Tuple,
-                            offset::Real)
+                            offset::Real;
+                            device::AbstractDevice = _spike_train_device(indices, times))
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
-        gpu_times_f32 = gdev(times_f32)
-        indices = cdev(indices)
-        linear_indices = gdev(LinearIndices(shape)[indices])
-        return new{length(shape)}(gdev(indices),
-                linear_indices,
-                gpu_times_f32,
+        host_indices = Array(indices)
+        linear_indices = LinearIndices(shape)[host_indices]
+        return new{length(shape)}(device(host_indices),
+                device(linear_indices),
+                device(times_f32),
                 shape,
                 reduce(*, shape),
                 Float32(offset))
     end
 end
 
-function SpikeTrainGPU(st::SpikeTrain)
+function SpikeTrainGPU(st::SpikeTrain; kwargs...)
     return SpikeTrainGPU(st.indices,
                         st.times,
                         st.shape,
-                        st.offset)
+                        st.offset; kwargs...)
 end
 
 function SpikeTrain(stg::SpikeTrainGPU)

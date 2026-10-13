@@ -1,29 +1,29 @@
 # PhasorNetworks.jl - GPU-capable Docker image
 #
-# CUDA.jl 5.x bundles its own CUDA toolkit via JLL artifacts, so no CUDA
-# base image is required. GPU access is provided at runtime via:
+# CUDA.jl bundles its own CUDA toolkit via JLL artifacts, so no CUDA
+# base image is required. CUDA is a weak dependency of the package; it is
+# resolved only in envs/cuda. GPU access is provided at runtime via:
 #   docker run --gpus all <image>
 # (requires NVIDIA Container Toolkit on the host)
 
-FROM julia:1.11
+FROM julia:1.12
 
 WORKDIR /app
 
 # Copy dependency manifests first for layer caching
 COPY Project.toml Manifest.toml ./
+COPY envs/cuda/Project.toml envs/cuda/Manifest.toml ./envs/cuda/
 
-# Instantiate dependencies (downloads all packages + CUDA artifacts)
-# This layer is cached as long as the manifests don't change
-RUN julia --project=. -e 'using Pkg; Pkg.instantiate()'
-
-# Copy source and test files
+# Copy source, extensions, tests and the backend helper
 COPY src/ ./src/
+COPY ext/ ./ext/
 COPY test/ ./test/
+COPY scripts/gpu_backend.jl ./scripts/
 
-# Precompile the package and its dependencies
-# CUDA.jl can precompile without a GPU present; GPU-specific code is JIT-compiled at runtime
-RUN julia --project=. -e 'using Pkg; Pkg.precompile()'
+# Instantiate + precompile the CUDA environment (downloads packages and
+# CUDA artifacts). CUDA.jl precompiles without a GPU present; GPU kernels
+# are JIT-compiled at runtime.
+RUN julia --project=envs/cuda -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
-# Run the full test suite by default
-# Tests auto-detect CUDA via CUDA.functional() and run GPU tests if a device is available
-CMD ["julia", "--project=.", "-e", "using Pkg; Pkg.test()"]
+# Run the full test suite on the CUDA backend by default
+CMD ["julia", "test/gpu.jl", "cuda"]
