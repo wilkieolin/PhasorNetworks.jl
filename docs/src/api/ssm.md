@@ -18,6 +18,14 @@ dirac_encode
 hippo_legs_diagonal
 ```
 
+`_spike_dt` is internal, but several public docstrings point at it for the
+slot-edge convention (θ = ±1 both mean the start of the slot), so it is
+documented here.
+
+```@docs
+PhasorNetworks._spike_dt
+```
+
 ## Layers
 
 ```@docs

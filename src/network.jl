@@ -111,8 +111,7 @@ function (f::Lux.FlattenLayer)(x::SpikeTrainGPU, params::LuxParams, state::Named
     end
     
     # SpikeTrainGPU constructor takes AbstractArray for indices (here, CPU Array of CartesianIndex),
-    # and will convert it to CuArray and compute new linear_indices for the new_shape.
-    # x.times is already a CuArray.
+    # moves it to the device `x.times` lives on, and computes new linear_indices for new_shape.
     flattened_train = SpikeTrainGPU(new_cart_indices_cpu, x.times, new_shape, x.offset)
     return flattened_train, state
 end
@@ -130,10 +129,12 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
     train = x.train
     n_s = length(train.indices)
 
-    keep_inds = rand(rng, Float32, (n_s)) .>= p
+    keep_inds = to_device_of(train.times, rand(rng, Float32, (n_s)) .>= p)
     new_inds = train.indices[keep_inds]
     new_tms = train.times[keep_inds]
-    new_train = SpikeTrain(new_inds, new_tms, train.shape, train.offset)
+    new_train = on_gpu(train) ?
+        SpikeTrainGPU(new_inds, new_tms, train.shape, train.offset) :
+        SpikeTrain(new_inds, new_tms, train.shape, train.offset)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
 
     return new_call, (), rng
@@ -2429,7 +2430,7 @@ function train(model, ps, st, train_loader, loss, args;
            # large sol.u arrays (one per saveat point) accumulate on the host and GPU.
            if step_count % gc_every == 0
                GC.gc(false)
-               args.backend == :cuda && CUDA.functional() && CUDA.reclaim()
+               reclaim_device!(device)
            end
        end
        stopped_early && break
@@ -2500,6 +2501,7 @@ function (pool::Union{MaxPool, MinPool})(call::SpikingCall, params::LuxParams, s
     if on_gpu(call.train)
         #move to CPU if necessary
         gpu = true
+        dev = get_device(call.train.times)
         train = SpikeTrain(call.train)
     else
         gpu = false
@@ -2525,7 +2527,7 @@ function (pool::Union{MaxPool, MinPool})(call::SpikingCall, params::LuxParams, s
     new_train = vcat_trains(trains...)
 
     if gpu
-        new_train = SpikeTrainGPU(new_train)
+        new_train = SpikeTrainGPU(new_train; device=dev)
     end
     new_call = SpikingCall(new_train, call.spk_args, call.t_span)
     return new_call, state

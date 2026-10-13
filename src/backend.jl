@@ -5,7 +5,37 @@ Check if any of the provided arguments are GPU arrays (any backend).
 Uses `AbstractGPUArray` from GPUArraysCore for backend-agnostic detection.
 """
 function on_gpu(args...)
-    return any(x -> x isa AbstractGPUArray, args)
+    return any(x -> x isa AbstractGPUArray || x isa SpikeTrainGPU, args)
+end
+
+"""
+    to_device_of(ref, x)
+
+Move `x` onto the device that `ref` lives on (`MLDataDevices.get_device`).
+For a host `ref` this is the identity. Use it to lift host-built constants
+(offsets, noise, index tables) onto GPU data without naming a backend.
+"""
+to_device_of(ref, x) = get_device(ref)(x)
+
+"""
+    reclaim_device!(device)
+
+Release cached device memory back to the driver, if the backend supports
+it. The generic method is a no-op; `PhasorNetworksCUDAExt` adds
+`CUDA.reclaim()` for `CUDADevice`.
+"""
+reclaim_device!(::Any) = nothing
+
+# Device for a new SpikeTrainGPU: follow the data when either array is
+# already on a GPU, otherwise the auto-selected GPU device.
+function _spike_train_device(indices, times)
+    dev = times isa AbstractGPUArray ? get_device(times) :
+          indices isa AbstractGPUArray ? get_device(indices) :
+          gpu_device()
+    dev isa AbstractGPUDevice ||
+        error("SpikeTrainGPU requires a functional GPU device; none is loaded. " *
+              "Load a backend (`using LuxCUDA` / `using oneAPI`) or pass `device=`.")
+    return dev
 end
 
 """
@@ -14,8 +44,11 @@ end
 Return a Lux device function for the given backend symbol.
 
 # Supported backends
-- `:cuda` — CUDA GPU (requires CUDA.jl, default)
-- `:cpu` — CPU fallback
+- `:auto` — first loaded and functional GPU backend (via
+  `MLDataDevices.gpu_device()`), else CPU. Default for `Args`.
+- `:cpu` — CPU
+- `:cuda` — NVIDIA GPU (provided by `PhasorNetworksCUDAExt`; requires
+  `using CUDA`, plus cuDNN for conv layers — `using LuxCUDA` loads both)
 - `:oneapi` — Intel GPU (provided by `PhasorNetworksOneAPIExt`; requires
   `using oneAPI`)
 
@@ -26,29 +59,28 @@ A device function compatible with Lux's `gpu_device()` / `cpu_device()`.
 Dispatches through `Val(backend)` so package extensions can register
 new backends by adding methods on `Val{:<name>}` rather than
 overwriting the `::Symbol` entry point (which Julia's strict
-precompile checks forbid). The package ships the `:cuda` and `:cpu`
-methods; `PhasorNetworksOneAPIExt` adds `:oneapi`.
+precompile checks forbid). The package ships the `:auto` and `:cpu`
+methods; `PhasorNetworksCUDAExt` adds `:cuda` and
+`PhasorNetworksOneAPIExt` adds `:oneapi`.
 """
 select_device(backend::Symbol) = select_device(Val(backend))
 
-function select_device(::Val{:cuda})
-    if CUDA.functional()
-        return gpu_device()
-    else
-        @warn "CUDA requested but not functional, falling back to CPU"
-        return cpu_device()
-    end
-end
+select_device(::Val{:auto}) = gpu_device()
 
 select_device(::Val{:cpu}) = cpu_device()
 
-# Fallback for unknown / unloaded backends. `:oneapi` lands here unless
-# `PhasorNetworksOneAPIExt` has been activated by `using oneAPI`.
+# Trigger packages for the vendor backends, for the error message below.
+const _BACKEND_TRIGGERS = (cuda = "CUDA (plus cuDNN for conv layers: `using LuxCUDA`)",
+                           oneapi = "oneAPI")
+
+# Fallback for unknown / unloaded backends. `:cuda` / `:oneapi` land here
+# unless the matching extension has been activated by loading its package.
 function select_device(::Val{B}) where {B}
-    if B === :oneapi
-        error("oneAPI backend requires `using oneAPI` — load the package to activate the extension")
+    if haskey(_BACKEND_TRIGGERS, B)
+        error("Backend :$B requested but its extension is not active — " *
+              "`using $(_BACKEND_TRIGGERS[B])` first")
     end
-    error("Unknown backend: :$B. Supported: :cuda, :cpu, :oneapi")
+    error("Unknown backend: :$B. Supported: :auto, :cpu, :cuda, :oneapi")
 end
 
 """

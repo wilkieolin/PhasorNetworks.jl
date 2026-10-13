@@ -1,13 +1,14 @@
-# This file is intended to be included and run from runtests.jl
-# Ensure that runtests.jl has already loaded PhasorNetworks and other common dependencies.
+# This file is intended to be included and run from runtests.jl, which
+# defines `GPU_DEV` (the selected device) and `GPU_AVAILABLE`. It is
+# backend-agnostic: nothing here names CUDA or oneAPI.
 
-using CUDA
 using Adapt
+using MLDataDevices: get_device, AbstractGPUDevice
 using KernelAbstractions
 using DifferentialEquations: Tsit5
 
-function cuda_core_tests()
-    spk_args_cuda = SpikingArgs(solver = Tsit5(),
+function gpu_core_tests()
+    spk_args_gpu = SpikingArgs(solver = Tsit5(),
                 solver_args = Dict(:adaptive => false,
                                 :dt => 0.01),
                                 threshold = 0.001)
@@ -42,20 +43,51 @@ function cuda_core_tests()
         return b2_sol, b2_phase_error
     end
 
-    if !CUDA.functional()
-        # This else block might not be strictly necessary if runtests.jl already skips calling cuda_core_tests,
-        # but kept for robustness if test_cuda.jl were somehow run directly in a non-CUDA env.
-        @info "CUDA not functional. Skipping GPU-specific operations within cuda_core_tests."
+    if !GPU_AVAILABLE
+        @info "No functional GPU device. Skipping gpu_core_tests."
         return
+    end
+
+    @testset "SpikeTrainGPU device placement" begin
+        inds = [CartesianIndex(1, 1), CartesianIndex(2, 1), CartesianIndex(1, 2)]
+        tr = SpikeTrain(inds, Float32[0.1, 0.2, 0.3], (2, 2), 0.0f0)
+
+        # Default device: the auto-selected GPU.
+        tr_gpu = SpikeTrainGPU(tr)
+        @test on_gpu(tr_gpu)
+        @test get_device(tr_gpu.times) isa AbstractGPUDevice
+        @test get_device(tr_gpu.indices) isa AbstractGPUDevice
+        @test get_device(tr_gpu.linear_indices) isa AbstractGPUDevice
+        @test Array(tr_gpu.linear_indices) == [1, 2, 3]
+
+        # Explicit device, and round trip back to the host.
+        tr_gpu2 = SpikeTrainGPU(tr; device=GPU_DEV)
+        tr_back = SpikeTrain(tr_gpu2)
+        @test tr_back.indices == tr.indices
+        @test tr_back.times == tr.times
+        @test tr_back.shape == tr.shape
+        @test tr_back.offset == tr.offset
+
+        # Building from GPU-resident times follows the data's device.
+        tr_gpu3 = SpikeTrainGPU(inds, tr_gpu.times, (2, 2), 0.0f0)
+        @test get_device(tr_gpu3.times) isa AbstractGPUDevice
+
+        # delay_train keeps a GPU train on the GPU, and train_to_phase
+        # returns its result on the train's device.
+        tr_delayed = delay_train(tr_gpu, 0.5f0, 0.0f0)
+        @test tr_delayed isa SpikeTrainGPU
+        @test Array(tr_delayed.times) ≈ tr.times .+ 0.5f0
+        ph = train_to_phase(tr_gpu, spk_args=SpikingArgs())
+        @test get_device(ph) isa AbstractGPUDevice
     end
 
     # Phasor-EP device parity (defined in test_ep.jl, which runtests.jl
     # includes before reaching here).
-    ep_gpu_parity_tests(gpu_device())
+    ep_gpu_parity_tests(GPU_DEV)
 
-    @testset "CUDA Core Functionality Tests" begin
-        sol_cpu, err_cpu = bundling_test(spk_args_cuda, "cpu")
-        sol_gpu, err_gpu = bundling_test(spk_args_cuda, "gpu")
+    @testset "GPU Core Functionality Tests" begin
+        sol_cpu, err_cpu = bundling_test(spk_args_gpu, "cpu")
+        sol_gpu, err_gpu = bundling_test(spk_args_gpu, "gpu")
 
         # CPU and GPU bundle the same spike train through the same ODE; their
         # phase outputs should agree. But phases live on a circle of period 2
@@ -83,13 +115,13 @@ end
 # We invoke each kernel directly (forcing GPU codegen) and check its output
 # against the scalar host helper.
 function gpu_kernel_compile_tests()
-    if !(CUDA.functional() || ONEAPI_AVAILABLE)
+    if !GPU_AVAILABLE
         @info "No functional GPU; skipping gpu_kernel_compile_tests."
         return
     end
 
     @testset "GPU raised-cosine kernel compilation" begin
-        dev = gpu_device()
+        dev = GPU_DEV
         t = 0.5f0
         t_sigma = 0.1f0
         t_period = 1.0f0
@@ -118,5 +150,27 @@ function gpu_kernel_compile_tests()
         KernelAbstractions.synchronize(backend)
         ref_g = PhasorNetworks.gaussian_kernel_gpu.(times_cpu, t, t_sigma)
         @test maximum(abs.(Array(out_g) .- ref_g)) < 1e-5
+    end
+
+    # Issue #59: CPU and GPU `spike_current` must agree when a train carries
+    # coincident spikes on one input, and both must apply `spk_scale`.
+    @testset "spike_current CPU/GPU parity with duplicate indices" begin
+        for scale in (1.0f0, 2.5f0)
+            spk_args = SpikingArgs(spk_scale = scale)
+            inds = [CartesianIndex(1, 1), CartesianIndex(1, 1), CartesianIndex(2, 1),
+                    CartesianIndex(3, 2), CartesianIndex(3, 2), CartesianIndex(3, 2)]
+            times = Float32[1.0, 1.005, 1.0, 0.5, 0.503, 0.51]
+            tr = SpikeTrain(inds, times, (3, 2), 0.0f0)
+            tr_gpu = SpikeTrainGPU(tr)
+            for t in (1.0f0, 0.5f0, 0.0f0)
+                c_cpu = PhasorNetworks.spike_current(tr, t, spk_args)
+                c_gpu = Array(PhasorNetworks.spike_current(tr_gpu, t, spk_args))
+                @test size(c_gpu) == size(c_cpu)
+                @test maximum(abs.(c_gpu .- c_cpu)) < 1e-5
+            end
+            # Duplicates really are summed, not overwritten.
+            @test PhasorNetworks.spike_current(tr, 1.0f0, spk_args)[1, 1] ≈ scale * (1.0f0 +
+                PhasorNetworks.raised_cosine_kernel(Float32[1.005], 1.0f0, spk_args.t_window)[1])
+        end
     end
 end
