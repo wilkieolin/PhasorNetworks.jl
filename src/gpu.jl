@@ -241,7 +241,7 @@ end
 
 function spike_current(train::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     scale = spk_args.spk_scale
-    current = parallel_current(train, t, spk_args)
+    current = scale .* parallel_current(train, t, spk_args)
     current = reshape(current, train.shape)
 
     return current

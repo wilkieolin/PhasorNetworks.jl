@@ -269,8 +269,14 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
             current_kernel = times -> raised_cosine_kernel(times, t, spk_args.t_window)
         end
         impulses = current_kernel(active_tms)
-        
-        current[active_inds] .+= (scale .*impulses)
+
+        # Accumulate explicitly: `current[active_inds] .+= ...` does not sum
+        # repeated indices (each duplicate is written from the same
+        # pre-update value), so coincident spikes on one input would be
+        # dropped. The loop matches the GPU path's atomic scatter-add.
+        for (j, i) in enumerate(active_inds)
+            current[i] += scale * impulses[j]
+        end
     end
 
     return current
@@ -291,7 +297,7 @@ function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
 
     #add currents into the synapses
     current_kernel = x -> raised_cosine_kernel(x, t, spk_args.t_window)
-    impulses = current_kernel(train.times)
+    impulses = scale .* current_kernel(train.times)
     current = parallel_scatter_add(train.linear_indices, impulses, train.linear_shape)
     current = reshape(current, train.shape)
 

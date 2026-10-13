@@ -31,6 +31,37 @@ function spiking_operations_tests()
         is_active_tests()
         match_offsets_tests()
         check_offsets_tests()
+        spike_current_tests()
+    end
+end
+
+# Regression for issue #59: `spike_current(::SpikeTrain)` must sum
+# coincident spikes on the same input (the GPU path's scatter-add does), and
+# must apply `spk_scale` on every path.
+function spike_current_tests()
+    @testset "Spike Current Tests" begin
+        spk_args = SpikingArgs()
+        inds = [CartesianIndex(1, 1), CartesianIndex(1, 1), CartesianIndex(2, 1)]
+        tr = SpikeTrain(inds, Float32[1.0, 1.0, 1.0], (2, 1), 0.0f0)
+
+        # Two unit spikes on input 1 sampled at their peak sum to 2.
+        current = PhasorNetworks.spike_current(tr, 1.0f0, spk_args)
+        @test size(current) == (2, 1)
+        @test current ≈ Float32[2.0; 1.0;;]
+
+        # Partially overlapping duplicates: sum of the individual kernels.
+        tr2 = SpikeTrain(inds, Float32[1.0, 1.005, 1.0], (2, 1), 0.0f0)
+        k = PhasorNetworks.raised_cosine_kernel(Float32[1.0, 1.005], 1.0f0, spk_args.t_window)
+        current2 = PhasorNetworks.spike_current(tr2, 1.0f0, spk_args)
+        @test current2[1, 1] ≈ sum(k)
+        @test current2[2, 1] ≈ 1.0f0
+
+        # Spikes outside the active window contribute nothing.
+        @test all(PhasorNetworks.spike_current(tr, 0.0f0, spk_args) .== 0.0f0)
+
+        # spk_scale is applied.
+        spk_scaled = SpikingArgs(spk_scale = 3.0f0)
+        @test PhasorNetworks.spike_current(tr, 1.0f0, spk_scaled) ≈ Float32[6.0; 3.0;;]
     end
 end
 

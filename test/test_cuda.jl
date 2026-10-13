@@ -119,4 +119,26 @@ function gpu_kernel_compile_tests()
         ref_g = PhasorNetworks.gaussian_kernel_gpu.(times_cpu, t, t_sigma)
         @test maximum(abs.(Array(out_g) .- ref_g)) < 1e-5
     end
+
+    # Issue #59: CPU and GPU `spike_current` must agree when a train carries
+    # coincident spikes on one input, and both must apply `spk_scale`.
+    @testset "spike_current CPU/GPU parity with duplicate indices" begin
+        for scale in (1.0f0, 2.5f0)
+            spk_args = SpikingArgs(spk_scale = scale)
+            inds = [CartesianIndex(1, 1), CartesianIndex(1, 1), CartesianIndex(2, 1),
+                    CartesianIndex(3, 2), CartesianIndex(3, 2), CartesianIndex(3, 2)]
+            times = Float32[1.0, 1.005, 1.0, 0.5, 0.503, 0.51]
+            tr = SpikeTrain(inds, times, (3, 2), 0.0f0)
+            tr_gpu = SpikeTrainGPU(tr)
+            for t in (1.0f0, 0.5f0, 0.0f0)
+                c_cpu = PhasorNetworks.spike_current(tr, t, spk_args)
+                c_gpu = Array(PhasorNetworks.spike_current(tr_gpu, t, spk_args))
+                @test size(c_gpu) == size(c_cpu)
+                @test maximum(abs.(c_gpu .- c_cpu)) < 1e-5
+            end
+            # Duplicates really are summed, not overwritten.
+            @test PhasorNetworks.spike_current(tr, 1.0f0, spk_args)[1, 1] ≈ scale * (1.0f0 +
+                PhasorNetworks.raised_cosine_kernel(Float32[1.005], 1.0f0, spk_args.t_window)[1])
+        end
+    end
 end
