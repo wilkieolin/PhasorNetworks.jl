@@ -1,25 +1,31 @@
 using Lux, OneHotArrays, Statistics, PhasorNetworks, Test
-using DifferentialEquations, SciMLSensitivity, CUDA, LuxCUDA, ChainRulesCore
+using DifferentialEquations, SciMLSensitivity, ChainRulesCore
+using MLDataDevices: AbstractGPUDevice
 
-# Optional: load oneAPI if it's available in the active project's load path.
-# oneAPI is a [weakdeps] entry — not pulled in by default. To run the GPU
-# test section against an Intel device, add it to your project:
+# Backend selection.
 #
-#     Pkg.activate("."); Pkg.add("oneAPI")
-#     # then: julia --project=. -e 'using Pkg; Pkg.test("PhasorNetworks")'
+# `Pkg.test()` runs the CPU suite: no GPU vendor package is a test
+# dependency, so nothing below loads one. GPU suites are launched with
 #
-# The try/catch handles:
-#   - oneAPI not installed → ImportError caught, ONEAPI_AVAILABLE = false
-#   - oneAPI installed but no Intel hardware (e.g. aarch64) → __init__
-#     raises, caught, ONEAPI_AVAILABLE = false
-# Cannot handle SIGABRT from Aurora's L0 driver during zeInit — that
-# kills the process. If you hit that, debug `using oneAPI` outside the
-# test suite first.
-const ONEAPI_AVAILABLE = try
-    @eval using oneAPI
-    oneAPI.functional()
-catch
-    false
+#     julia test/gpu.jl [cuda|oneapi|auto]      # auto = detect platform
+#
+# which activates the matching environment under envs/ (the only place a
+# vendor package is resolved), sets PHASOR_BACKEND, and includes this
+# file. Loading the vendor package here activates the package extension
+# (PhasorNetworksCUDAExt / PhasorNetworksOneAPIExt) that registers the
+# `select_device(:cuda)` / `select_device(:oneapi)` methods.
+const PHASOR_BACKEND = Symbol(lowercase(get(ENV, "PHASOR_BACKEND", "cpu")))
+PHASOR_BACKEND in (:cpu, :cuda, :oneapi) ||
+    error("PHASOR_BACKEND must be one of cpu, cuda, oneapi; got $(PHASOR_BACKEND)")
+PHASOR_BACKEND == :cuda   && @eval using LuxCUDA   # CUDA + cuDNN
+PHASOR_BACKEND == :oneapi && @eval using oneAPI
+# On the CPU suite `select_device(:auto)` (exercised by test_backend.jl)
+# would print MLDataDevices' "no functional GPU" advice; that is expected.
+PHASOR_BACKEND == :cpu && get!(ENV, "MLDATADEVICES_SILENCE_WARN_NO_GPU", "1")
+const GPU_DEV = PHASOR_BACKEND == :cpu ? cpu_device() : select_device(PHASOR_BACKEND)
+const GPU_AVAILABLE = GPU_DEV isa AbstractGPUDevice
+if PHASOR_BACKEND != :cpu && !GPU_AVAILABLE
+    @warn "PHASOR_BACKEND=$(PHASOR_BACKEND) requested but no functional device was found; GPU tests will be skipped."
 end
 using Random: Xoshiro, AbstractRNG
 using Base: @kwdef
@@ -96,6 +102,32 @@ include("spiking_operations_tests.jl")
 @testset "PhasorNetworks.jl" begin
     # Backend abstraction tests — self-contained @testset, just include it.
     include("test_backend.jl")
+
+    # Backend-agnostic GPU test gate. `GPU_DEV` is the device selected in
+    # the preamble from PHASOR_BACKEND (CUDA on NVIDIA, oneAPI on Intel).
+    # The test bodies route everything through `GPU_DEV` and
+    # `AbstractGPUArray` dispatch, so the same suite runs on either.
+    # Runs before the CPU suite so a device-level failure (driver abort,
+    # missing vendor-library hook) surfaces in minutes, not after the
+    # ten-minute CPU run — relevant on Aurora's one-hour debug queue.
+    if GPU_AVAILABLE
+        @info "GPU backend :$(PHASOR_BACKEND) → $(typeof(GPU_DEV)). Running GPU tests..."
+        @testset "GPU Specific Tests" begin
+            try
+                include("test_gpu.jl")
+                gpu_core_tests()
+                gpu_kernel_compile_tests()
+                ssm_gpu_tests()
+                local_attention_gpu_tests()
+            catch e
+                @error "Error during GPU tests:" exception=(e, catch_backtrace())
+                @test false # Explicitly fail GPU test section on error
+            end
+        end
+    else
+        @info "No GPU backend selected (PHASOR_BACKEND=$(PHASOR_BACKEND)). Skipping GPU tests; use `julia test/gpu.jl` to run them."
+    end
+
     domain_tests()
     vsa_tests()
     network_tests()
@@ -112,27 +144,4 @@ include("spiking_operations_tests.jl")
     hep_tests()
     ep_tests()
     spiking_operations_tests()
-
-    # Backend-agnostic GPU test gate. `gpu_device()` auto-selects whichever
-    # backend has functional hardware (CUDA on NVIDIA, oneAPI on Intel via
-    # the loaded extension). The test bodies route through `gpu_device()`
-    # and `AbstractGPUArray` dispatch, so the same suite runs on either.
-    if CUDA.functional() || ONEAPI_AVAILABLE
-        dev = gpu_device()
-        @info "GPU detected: $(typeof(dev)). Running GPU tests..."
-        @testset "GPU Specific Tests" begin
-            try
-                include("test_cuda.jl")
-                cuda_core_tests() # Call the main test function from test_cuda.jl
-                gpu_kernel_compile_tests()
-                ssm_gpu_tests()
-                local_attention_gpu_tests()
-            catch e
-                @error "Error during GPU tests:" exception=(e, catch_backtrace())
-                @test false # Explicitly fail GPU test section on error
-            end
-        end
-    else
-        @info "No functional GPU detected (neither CUDA nor oneAPI). Skipping GPU tests."
-    end
 end

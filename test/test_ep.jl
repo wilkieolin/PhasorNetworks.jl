@@ -700,7 +700,7 @@ end
 
 
 # ----------------------------------------------------------------
-# 15. GPU parity (CUDA only — called from test_cuda.jl)
+# 15. GPU parity (any backend — called from test_gpu.jl with GPU_DEV)
 # ----------------------------------------------------------------
 #
 # `src/ep.jl` allocates through `gpu_zeros`/`similar` rather than bare
