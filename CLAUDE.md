@@ -166,6 +166,7 @@ the load-dependency order.
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
 | `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
 | `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `fpe.jl` | `FPEEncoder` (fractional-power / residue-code encoder: real x → phases `ω_j x`, modes `:uniform`/`:residue`/`:hex`, layouts `:bound`/`:blocks`), `Resonator` (factorises a bound address into its codebook entries; `:abs`/`:linear`/`:codeword` projections), `fpe_codebook(s)`, `fpe_table`, `crt_decode`. Numbers and the spiking-path status in `docs/fpe_resonator.md` |
 | `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch. (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
 | `attractor_ssm.jl` | `AttractorPhasorSSM`: selective SSM adding a Hopfield-style attractor pull toward learned phasor codes (`attractor_pull`); reduces to the linear SSM when pull strength α=0 |
 | `wave.jl` | `PhasorWaveSheet` dynamics |
