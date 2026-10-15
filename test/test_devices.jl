@@ -134,6 +134,38 @@ function test_device_array_semantics()
     @test s == snap                                      # no mutation
 end
 
+# time_scaled is an exact symmetry: the scaled cell under a scaled drive, stepped
+# at a scaled dt, reproduces the original trajectory sample for sample.
+function test_device_time_scaling()
+    c = _DEV_CELL; sc = 3.0
+    cs = time_scaled(c, sc)
+    @test resonance_frequency(cs) ≈ resonance_frequency(c) / sc rtol = 1e-5
+    @test quality_factor(cs) ≈ quality_factor(c) rtol = 1e-5
+    ω0 = 2π * resonance_frequency(c) * 1e-3
+    f(t) = 2f0 * sin(ω0 * t)
+    a = cell_simulate(c, f, 1.0, 3000)
+    b = cell_simulate(cs, t -> f(t / sc), sc, 3000)
+    @test maximum(abs.(a.i .- b.i)) < 1e-3 * maximum(abs.(a.i))
+    @test b.spike_time ≈ sc .* a.spike_time rtol = 1e-4
+end
+
+# A stepper built from a matrix of cells steps each site exactly as that cell's
+# own scalar stepper would.
+function test_device_heterogeneous_stepper()
+    c1, c2 = _DEV_CELL, time_scaled(_DEV_CELL, 2.5)
+    cells = [isodd(y + x) ? c1 : c2 for y in 1:3, x in 1:4]
+    stp = RFStepper(cells, 1.0)
+    @test stp.p11 isa Matrix{Float32} && size(stp.p11) == (3, 4)
+    s = merge(cell_state(c1, 3, 4), (; i = fill(15f0, 3, 4), v = fill(30f0, 3, 4)))
+    sh, fh, _ = cell_step(stp, s, 4f0)
+    for (st1, cc) in ((RFStepper(c1, 1.0), c1), (RFStepper(c2, 1.0), c2))
+        sx, fx, _ = cell_step(st1, s, 4f0)
+        m = cells .== Ref(cc)
+        @test sh.i[m] == sx.i[m] && sh.v[m] == sx.v[m] && fh[m] == fx[m]
+    end
+    @test stepper_to(RFStepper(c1, 1.0), identity) isa RFStepper{Float32}
+end
+
 function device_tests()
     @testset "Device cells (RFTransponder)" begin
         @info "Running device cell tests..."
@@ -144,5 +176,7 @@ function device_tests()
         test_device_spike_time_resolution()
         test_device_output_pulse()
         test_device_array_semantics()
+        test_device_time_scaling()
+        test_device_heterogeneous_stepper()
     end
 end

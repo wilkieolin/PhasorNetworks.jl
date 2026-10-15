@@ -116,8 +116,8 @@ link-array convention). Units are the device system: ps, µA.
 - `boundary = :open` — lines that would leave the sheet do not exist. `:periodic`
   wraps to a torus (fronts then meet their own wrapped copies).
 """
-struct DeviceSheet{C<:AbstractDeviceCell}
-    cell::C
+struct DeviceSheet{C}
+    cell::C                       # one cell, or an (H,W) matrix of cells
     H::Int
     W::Int
     dt::Float32
@@ -143,11 +143,14 @@ function uniform_delays(H::Integer, W::Integer, offs; ps_per_site::Real = 10, d0
     return D
 end
 
-function DeviceSheet(cell::AbstractDeviceCell, H::Integer, W::Integer;
+function DeviceSheet(cell::Union{AbstractDeviceCell, AbstractMatrix{<:AbstractDeviceCell}},
+                     H::Integer, W::Integer;
                      dt::Real = 1.0, radius::Real = 3, ps_per_site::Real = 10.0,
                      d0::Real = 0.0, gain::Real = 0.3, D = nothing, G = nothing,
                      boundary::Symbol = :open)
     boundary in (:open, :periodic) || throw(ArgumentError("boundary must be :open or :periodic"))
+    cell isa AbstractMatrix && size(cell) != (H, W) &&
+        throw(DimensionMismatch("cell matrix must be ($H, $W), got $(size(cell))"))
     offs = stencil_offsets(radius)
     K = length(offs)
     K > 0 || throw(ArgumentError("radius $radius gives an empty stencil"))
@@ -170,7 +173,8 @@ n_links(s::DeviceSheet) = size(s.offsets, 2)
 function Base.show(io::IO, s::DeviceSheet)
     print(io, "DeviceSheet($(s.H)×$(s.W), K=$(n_links(s)), dt=$(s.dt) ps, D∈[",
           round(minimum(s.D); digits = 1), ", ", round(maximum(s.D); digits = 1), "] ps, ",
-          s.periodic ? "periodic" : "open", "; ", s.cell, ")")
+          s.periodic ? "periodic" : "open", "; ",
+          s.cell isa AbstractMatrix ? "$(length(unique(s.cell))) cell types" : s.cell, ")")
 end
 
 # ---- Coupling gather -----------------------------------------------------
@@ -327,11 +331,12 @@ function sheet_simulate(sheet::DeviceSheet, nsteps::Integer; drive = nothing, s0
                         device = cpu_device())
     H, W, dt, NB = sheet.H, sheet.W, sheet.dt, sheet.NB
     cell = sheet.cell
-    stp = cell_stepper(cell, dt)
-    s = device(s0 === nothing ? cell_state(cell, H, W) : s0)
+    stp = stepper_to(cell_stepper(cell, dt), device)
+    c1 = cell isa AbstractMatrix ? first(cell) : cell
+    s = device(s0 === nothing ? cell_state(c1, H, W) : s0)
     links = device((; G = sheet.G, qi = sheet.qi, qf = sheet.qf, offs = sheet.offsets))
     buf = device(zeros(Float32, H, W, NB))
-    buf[:, :, 1] .= cell_output(cell, s)               # sample m = 0 (slot mod(0,NB)+1)
+    buf[:, :, 1] .= cell_output(c1, s)               # sample m = 0 (slot mod(0,NB)+1)
     Iin = device(zeros(Float32, H, W))
     t_first = device(fill(Inf32, H, W))
     nsp = device(zeros(Float32, H, W))
@@ -346,7 +351,7 @@ function sheet_simulate(sheet::DeviceSheet, nsteps::Integer; drive = nothing, s0
         sheet_input!(Iin, sheet, buf, n, links)
         I = drive === nothing ? Iin : Iin .+ device(drive(tn + dt / 2))
         s, fire, tf = cell_step(stp, s, I)
-        buf[:, :, mod(n + 1, NB) + 1] .= cell_output(cell, s)
+        buf[:, :, mod(n + 1, NB) + 1] .= cell_output(c1, s)
         t_first .= ifelse.(fire .& isinf.(t_first), tn .+ tf, t_first)
         nsp .+= fire
         rate[n+1] = sum(fire) / Float32(H * W)
@@ -355,7 +360,7 @@ function sheet_simulate(sheet::DeviceSheet, nsteps::Integer; drive = nothing, s0
             if (n + 1) % frame_every == 0
                 k = (n + 1) ÷ frame_every
                 Ff[:, :, k] .= Array(win); win .= 0f0
-                keep_amplitude && (Af[:, :, k] .= Array(abs.(cell_phasor(cell, s)) ./ cell.I_th))
+                keep_amplitude && (Af[:, :, k] .= Array(abs.(cell_phasor(stp, s)) ./ stp.I_th))
                 ft[k] = (n + 1) * dt
             end
         end

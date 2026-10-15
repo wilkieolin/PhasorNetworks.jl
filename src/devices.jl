@@ -198,31 +198,67 @@ cell_phasor(c::RFTransponder, s) = complex.(s.i, .-s.v ./ sqrt(c.L / c.C))
 
 """
     RFStepper(cell, dt)
+    RFStepper(cells::AbstractMatrix{RFTransponder}, dt)
 
 Precomputed per-step constants for [`cell_step`](@ref): the exact tank
-propagator and the output-filter decay. Build once per (cell, dt).
+propagator, the threshold, refractory and output-filter constants. Build once
+per (cell, dt).
+
+Given a matrix of cells — a heterogeneous sheet — every constant becomes an
+`(H, W)` array instead of a scalar. `cell_step` is broadcast-only, so it runs
+unchanged on either; the propagator is computed once per distinct cell.
 """
-struct RFStepper
-    cell::RFTransponder
+struct RFStepper{T}
     dt::Float32
-    Φ::Matrix{Float32}
-    Γ::Vector{Float32}
-    e_out::Float32          # e^{−dt/τ_out}
-    kick::Float32           # alpha-pulse amplitude: I_out·e
+    p11::T; p12::T; p21::T; p22::T     # tank propagator Φ
+    g1::T; g2::T                       # input gain Γ
+    I_th::T
+    t_ref::T
+    tau::T                             # output pulse τ
+    e_out::T                           # e^{−dt/τ}
+    kick::T                            # alpha-pulse amplitude I_out·e
+    z0::T                              # √(L/C), for cell_phasor
 end
 
 """
     cell_stepper(cell, dt)
 
 Per-step constants for `cell_step` — the hook a sheet uses to stay agnostic of
-the cell type. For an `RFTransponder` this is an [`RFStepper`](@ref).
+the cell type. For `RFTransponder`s (one, or a matrix of them) this is an
+[`RFStepper`](@ref).
 """
 cell_stepper(c::RFTransponder, dt::Real) = RFStepper(c, dt)
+cell_stepper(c::AbstractMatrix{RFTransponder}, dt::Real) = RFStepper(c, dt)
+
+function _rf_constants(c::RFTransponder, dt::Real)
+    Φ, Γ = _tank_propagator(c, dt)
+    return (Φ[1, 1], Φ[1, 2], Φ[2, 1], Φ[2, 2], Γ[1], Γ[2], c.I_th, c.t_ref, c.tau_out,
+            Float32(exp(-dt / c.tau_out)), Float32(c.I_out * ℯ), Float32(sqrt(c.L / c.C)))
+end
 
 function RFStepper(c::RFTransponder, dt::Real)
     dt > 0 || throw(ArgumentError("dt must be > 0"))
-    Φ, Γ = _tank_propagator(c, dt)
-    return RFStepper(c, Float32(dt), Φ, Γ, Float32(exp(-dt / c.tau_out)), Float32(c.I_out * ℯ))
+    return RFStepper{Float32}(Float32(dt), _rf_constants(c, dt)...)
+end
+
+function RFStepper(cells::AbstractMatrix{RFTransponder}, dt::Real)
+    dt > 0 || throw(ArgumentError("dt must be > 0"))
+    cache = Dict{RFTransponder, NTuple{12, Float32}}()
+    k = [get!(() -> _rf_constants(c, dt), cache, c) for c in cells]
+    field(j) = Float32[t[j] for t in k]
+    return RFStepper{Matrix{Float32}}(Float32(dt), (field(j) for j in 1:12)...)
+end
+
+"""
+    stepper_to(stp::RFStepper, device) -> RFStepper
+
+Move a heterogeneous stepper's arrays onto `device` (scalars are left alone).
+"""
+function stepper_to(stp::RFStepper, device)
+    f = [getfield(stp, n) for n in fieldnames(RFStepper)][2:end]
+    stp.p11 isa Number && return stp
+    moved = map(device, f)
+    return RFStepper{typeof(moved[1])}(stp.dt, moved...)
 end
 
 """
@@ -244,37 +280,73 @@ Order of operations, and why:
    aligned to the crossing time.
 
 Pure: returns a new state, never mutates `s`. Broadcast-only, so it runs
-unchanged on GPU arrays.
+unchanged on GPU arrays and on heterogeneous (per-site constant) steppers.
 """
 function cell_step(stp::RFStepper, s, I)
-    c, dt, Φ, Γ = stp.cell, stp.dt, stp.Φ, stp.Γ
+    dt = stp.dt
     live = s.ref .<= 0f0
-    v1 = Φ[1, 1] .* s.v .+ Φ[1, 2] .* s.i .+ Γ[1] .* I
-    i1 = Φ[2, 1] .* s.v .+ Φ[2, 2] .* s.i .+ Γ[2] .* I
+    v1 = stp.p11 .* s.v .+ stp.p12 .* s.i .+ stp.g1 .* I
+    i1 = stp.p21 .* s.v .+ stp.p22 .* s.i .+ stp.g2 .* I
     v1 = ifelse.(live, v1, 0f0)
     i1 = ifelse.(live, i1, 0f0)
 
     a0, a1 = abs.(s.i), abs.(i1)
-    fire = live .& (a1 .>= c.I_th)
+    fire = live .& (a1 .>= stp.I_th)
     # fraction of the step at which |i| crossed I_th (a0 < I_th ≤ a1 on a fire)
-    frac = clamp.((c.I_th .- a0) ./ max.(a1 .- a0, 1f-12), 0f0, 1f0)
+    frac = clamp.((stp.I_th .- a0) ./ max.(a1 .- a0, 1f-12), 0f0, 1f0)
     t_fire = ifelse.(fire, frac .* dt, 0f0)
     t_since = dt .- t_fire                                   # time since the crossing
 
     v2   = ifelse.(fire, 0f0, v1)
     i2   = ifelse.(fire, 0f0, i1)
-    ref2 = ifelse.(fire, c.t_ref .- t_since, max.(s.ref .- dt, 0f0))
+    ref2 = ifelse.(fire, stp.t_ref .- t_since, max.(s.ref .- dt, 0f0))
 
     # Output alpha filter: o1' = −o1/τ, o2' = (o1 − o2)/τ, exact over the step,
     # plus an impulse at the crossing propagated forward by `t_since`.
-    τ  = c.tau_out
-    o2 = stp.e_out .* (s.o2 .+ (dt / τ) .* s.o1)
+    τ  = stp.tau
+    o2 = stp.e_out .* (s.o2 .+ (dt ./ τ) .* s.o1)
     o1 = stp.e_out .* s.o1
     ek = exp.(.-t_since ./ τ)
     o1 = o1 .+ ifelse.(fire, stp.kick .* ek, 0f0)
     o2 = o2 .+ ifelse.(fire, stp.kick .* (t_since ./ τ) .* ek, 0f0)
 
     return (; v = v2, i = i2, ref = ref2, o1, o2), fire, t_fire
+end
+
+"""
+    cell_phasor(stp::RFStepper, s)
+
+[`cell_phasor`](@ref) using the stepper's (possibly per-site) `√(L/C)`.
+"""
+cell_phasor(stp::RFStepper, s) = complex.(s.i, .-s.v ./ stp.z0)
+
+"""
+    time_scaled(cell::RFTransponder, s) -> RFTransponder
+
+The same cell running `s` times slower: `f₀/s`, `L·s` and `C·s` (so `Z₀`, `Q`
+and every current are unchanged), output pulse `τ·s`, refractory `t_ref·s`.
+
+This is an EXACT symmetry of the cell, and of a sheet whose line delays are
+also scaled by `s`: every state trajectory maps onto the original under
+`t → s·t`, so the scaled medium has the same nucleus, the same round fronts and
+front speed `u/s`. It is how to slow a resonant medium down.
+
+Lengthening the lines alone fails in two ways (measured on a 10 GHz
+checkerboard sublattice, demos/device_studies/e5b_nucleation.jl). Nucleation:
+inputs arrive spread by ≈ 2·ps_per_site across a radius-3 stencil, and pulses
+half a carrier period apart do not add (the two-pulse coincidence window of
+e8_cell_tuning.jl), so small seeds die — at 50 ps/pitch every seed up to
+radius 20 failed or misbehaved. Recovery: once a large source does ignite it
+(a line source at 70 ps/pitch propagates at 0.0090 sites/ps against a
+plane-front prediction of 0.0086), the slow front's refractory zone u·t_ref is
+only 3–6 sites, comparable to the stencil's reach, and excitation re-enters:
+sites fired 64–80 times and the sheet never returned to rest. Time scaling
+fixes both because it scales t_ref with the delays, keeping the input spread
+per carrier period and u·t_ref per stencil radius fixed.
+"""
+function time_scaled(c::RFTransponder, s::Real)
+    s > 0 || throw(ArgumentError("s must be > 0"))
+    return RFTransponder(c.L * s, c.C * s, c.R, c.I_th, c.t_ref * s, c.I_out, c.tau_out * s)
 end
 
 """

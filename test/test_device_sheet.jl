@@ -148,6 +148,31 @@ function test_sheet_particle_drive_and_frames()
     @test maximum(ll.per_site_mm) > minimum(ll.per_site_mm)  # edge sites have fewer lines
 end
 
+# A sheet of time-scaled cells with time-scaled delays is the same medium run s
+# times slower — and a checkerboard of the two, coupled only within each colour,
+# carries both media independently on one pixel plane.
+function test_sheet_time_scaled_media()
+    N = 64; sc = 2.0; cen = (N ÷ 2, N ÷ 2)
+    fast = sheet_simulate(DeviceSheet(_SH_CELL, N, N), 1400; drive = seed_drive(N, N; radius = 2))
+    slow = sheet_simulate(DeviceSheet(time_scaled(_SH_CELL, sc), N, N; ps_per_site = 10sc), 2800;
+                          drive = seed_drive(N, N; radius = 2, amp = 80))
+    uf = arrival_speed(fast.t_first; center = cen, rmin = 8, rmax = 26)[1]
+    us = arrival_speed(slow.t_first; center = cen, rmin = 8, rmax = 26)[1]
+    @test uf / us ≈ sc rtol = 0.02
+    offs = stencil_offsets(3); K = length(offs)
+    col(y, x) = iseven(y + x)
+    cells = [col(y, x) ? time_scaled(_SH_CELL, sc) : _SH_CELL for y in 1:N, x in 1:N]
+    D = Float32[(col(y, x) ? 10sc : 10) * sqrt(offs[k][1]^2 + offs[k][2]^2) for y in 1:N, x in 1:N, k in 1:K]
+    G = Float32[iseven(offs[k][1] + offs[k][2]) ? 0.45 : 0 for y in 1:N, x in 1:N, k in 1:K]
+    tr = sheet_simulate(DeviceSheet(cells, N, N; D, G), 3000; drive = seed_drive(N, N; radius = 2, amp = 80))
+    m = [col(y, x) for y in 1:N, x in 1:N]
+    ua = arrival_speed(ifelse.(m, tr.t_first, Inf32); center = cen, rmin = 8, rmax = 26)[1]
+    ub = arrival_speed(ifelse.(.!m, tr.t_first, Inf32); center = cen, rmin = 8, rmax = 26)[1]
+    @test ub / ua ≈ sc rtol = 0.03
+    @test maximum(tr.n_spikes) == 1
+    @test_throws DimensionMismatch DeviceSheet(cells[1:2, :], N, N)
+end
+
 function device_sheet_tests()
     @testset "DeviceSheet" begin
         @info "Running DeviceSheet tests..."
@@ -158,5 +183,6 @@ function device_sheet_tests()
         test_sheet_annihilation()
         test_sheet_delay_sets_speed()
         test_sheet_particle_drive_and_frames()
+        test_sheet_time_scaled_media()
     end
 end
