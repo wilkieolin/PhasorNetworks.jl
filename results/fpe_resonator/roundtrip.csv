@@ -1,0 +1,5 @@
+quantity,max_arc_error
+unbind(bind(a,b),b) vs a,3.7450704e-7
+bind(enc(x),enc(y)) vs enc(x+y),7.0407325e-5
+spike-time round trip,0.0
+spike_phase_bind vs v_bind,0.0
