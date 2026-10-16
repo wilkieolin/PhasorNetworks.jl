@@ -100,6 +100,8 @@ MakeSpikingSSM,
 ssm_phases_to_train,
 ssm_train_to_phases,
 ssm_train_to_charged,
+emission_amplitudes,
+set_emission_theta,
 sample_phases_at_periods,
 reconstruct_from_current,
 

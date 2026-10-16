@@ -498,6 +498,13 @@ end
 
 function _forward_3d_dirac(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, Charged},
                            params::LuxParams, state::NamedTuple)
+    return _dense_dirac_out(a, _dense_dirac_Z(a, x, params), params), state
+end
+
+# Complex state field Z (C_out, L, B) of the Dirac path, in the static frame —
+# the quantity whose amplitude r = |Z| Hill emission turns into charge.
+function _dense_dirac_Z(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, Charged},
+                        params::LuxParams)
     λ = -exp.(params.log_neg_lambda)
     # ω·T = 2π by construction since both come from a.spk_args.t_period
     # via period_to_angfreq — this invariant is what makes the `−conj(.)`
@@ -546,8 +553,12 @@ function _forward_3d_dirac(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, C
     # so applying it before vs after the activation gives the same final
     # phase; we apply it before, mirroring `unrotate_solution` which
     # derotates the raw potential.
-    Z = -conj.(Z)
+    return -conj.(Z)
+end
 
+# Emit the Dirac state field: phase (after the activation) or, with Hill
+# emission, Charged(phase, q(|Z|)).
+function _dense_dirac_out(a::PhasorDense, Z::AbstractArray{<:Complex, 3}, params::LuxParams)
     # Skip normalization when the activation is normalize_to_unit_circle:
     # the function divides through a positive real (whether |z| or
     # √(|z|² + ε)), so complex_to_angle ∘ normalize_to_unit_circle
@@ -557,9 +568,9 @@ function _forward_3d_dirac(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, C
                                                      complex_to_angle(a.activation(Z))
     if _emits(a)
         # Hill emission: the wire carries q(|Z|) with the phase of Z.
-        return _hill_emit(Z, params.log_theta, a.emit_n, a.learn_theta; phase = φ), state
+        return _hill_emit(Z, params.log_theta, a.emit_n, a.learn_theta; phase = φ)
     end
-    return φ, state
+    return φ
 end
 
 # ---- SpikingCall dispatch ----
