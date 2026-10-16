@@ -99,6 +99,7 @@ spike_phase_recenter,
 MakeSpikingSSM,
 ssm_phases_to_train,
 ssm_train_to_phases,
+ssm_train_to_charged,
 sample_phases_at_periods,
 reconstruct_from_current,
 

@@ -1295,7 +1295,7 @@ This function provides a way to discretize a continuous dynamical solution into
 a sequence of spikes, which is useful for analyzing the system's behavior in
 terms of discrete events.
 """
-function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
+function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing, charge_fn=nothing)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
 
@@ -1315,14 +1315,14 @@ function solution_to_train(sol::Union{ODESolution,Function}, tspan::Tuple{<:Real
         u = selectdim(u, ndims(u), (w+1):size(u, ndims(u)))
     end
 
-    train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset, bias=bias)
+    train = solution_to_train(u, cycles, spk_args=spk_args, offset=offset, bias=bias, charge_fn=charge_fn)
     return _apply_warmup_shift(train, spk_args)
 end
 
 """
 This implementation takes a full solution (represented by a vector of arrays) and finds the spikes from it.
 """
-function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
+function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector{<:Real}, tspan::Tuple{<:Real, <:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing, charge_fn=nothing)
     #determine the ending time of each cycle
     cycles = generate_cycles(tspan, spk_args, offset)
     inds = [argmin(abs.(t .- t_c)) for t_c in cycles]
@@ -1339,7 +1339,7 @@ function solution_to_train(u::AbstractVector{<:AbstractArray}, t::AbstractVector
         u = selectdim(u, ndims(u), (w+1):size(u, ndims(u)))
     end
 
-    train = solution_to_train(u, ts, spk_args=spk_args, offset=offset, bias=bias)
+    train = solution_to_train(u, ts, spk_args=spk_args, offset=offset, bias=bias, charge_fn=charge_fn)
     return _apply_warmup_shift(train, spk_args)
 end
 
@@ -1360,8 +1360,14 @@ end
 """
 This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
 to spikes.
+
+`charge_fn` (default `nothing` = unit-charge spikes): a function mapping the
+cycle-sample amplitudes `abs.(u)` (same shape as `u`) to per-sample charges;
+each emitted spike then carries the charge of its sample (Hill emission —
+`PhasorDense(...; emit_n)` passes `r -> hill_charge(r ./ g, log θ, n)`). The
+spiking threshold is unchanged.
 """
-function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing)
+function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:Real}; spk_args::SpikingArgs, offset::Real, bias::Union{Nothing, AbstractArray{<:Complex}}=nothing, charge_fn=nothing)
     # Apply complex bias shift if provided (shifts origin in complex plane)
     if bias !== nothing
         u = u .+ bias
@@ -1387,12 +1393,14 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
     # start of the period each cycle sample closes: times[l] - T
     period_starts = reshape(Float32.(times) .- T, ntuple(_ -> 1, ndims(u) - 1)..., :)
     tms = within .+ period_starts
+    qs = charge_fn === nothing ? nothing : charge_fn(abs.(u))
 
     if on_gpu(tms)
         gpu = true
         dev = get_device(tms)
         spiking = spiking |> cpu_device()
         tms = tms |> cpu_device()
+        qs = qs === nothing ? nothing : qs |> cpu_device()
     else
         gpu = false
     end
@@ -1401,11 +1409,12 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
     cut_index = i -> CartesianIndex(Tuple(i)[1:end-1])
     inds = findall(spiking)
     tms = tms[inds]
+    qs = qs === nothing ? nothing : Float32.(qs[inds])
     inds = cut_index.(inds)
     # Canonical phase_to_time placement already carries the full spike phase, so
     # the train offset is just the caller's frame offset (no extra spiking_offset;
     # the old +T/4 compensated potential_to_time's π/2 reference, now removed).
-    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset)
+    train = SpikeTrain(inds, tms, size(u)[1:end-1], offset, qs)
 
     if gpu
         train = SpikeTrainGPU(train; device=dev)

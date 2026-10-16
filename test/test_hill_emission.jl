@@ -5,7 +5,28 @@ function hill_emission_tests()
     @testset "Hill emission" begin
         hill_spike_charge_tests()
         hill_charged_dirac_tests()
+        hill_dense_tests()
     end
+end
+
+const HILL_SPK = SpikingArgs(t_window = 0.01f0, threshold = 1f-3, solver = Tsit5(),
+                             solver_args = Dict(:adaptive => false, :dt => 0.005,
+                                                :sensealg => BacksolveAdjoint(; autojacvec = ZygoteVJP()),
+                                                :save_start => true))
+
+_hill_call(x::AbstractArray{<:Phase, 3}; charges = nothing, sa = HILL_SPK) =
+    SpikingCall(PhasorNetworks.ssm_phases_to_train(x; spk_args = sa, charges = charges), sa,
+                (0f0, Float32(size(x, 2)) * sa.t_period))
+_hill_call(x::Charged; sa = HILL_SPK) = _hill_call(x.phase; charges = x.q, sa = sa)
+
+# Discrete (Charged) vs spiking (decoded SpikingCall) agreement:
+# circular phase agreement R, mean and 95th-percentile |Δq|.
+function _hill_agreement(yd::Charged, ys::SpikingCall)
+    dec = ssm_train_to_charged(ys)
+    @test size(dec) == size(yd)
+    R = abs(mean(cis.(Float32(π) .* (Float32.(dec.phase) .- Float32.(yd.phase)))))
+    dq = vec(abs.(dec.q .- yd.q))
+    return (; R, dq_mean = mean(dq), dq_p95 = quantile(dq, 0.95), dq_max = maximum(dq), dec)
 end
 
 # ---- Step 1: SpikeTrain charges, spike_current, propagation ---------------
@@ -130,5 +151,79 @@ function hill_charged_dirac_tests()
         # gradient of the phase through a Charged emission is finite at z = 0
         gp = Zygote.gradient(z -> sum(Float32.(PhasorNetworks._hill_emit(z, [0f0], 1, true).phase)), Zc3)[1]
         @test all(isfinite, real.(gp)) && all(isfinite, imag.(gp))
+    end
+end
+
+# ---- Step 3: PhasorDense emission, both paths -----------------------------
+
+function hill_dense_tests()
+    @testset "PhasorDense emission" begin
+        Din, D, L, B = 6, 5, 10, 4
+        rng = Xoshiro(1)
+        x = Phase.(2f0 .* rand(rng, Float32, Din, L, B) .- 1f0)
+        qin = 0.2f0 .+ 0.8f0 .* rand(rng, Float32, Din, L, B)
+
+        # off ⇒ identical layer, params and outputs (discrete and spiking)
+        off = PhasorDense(Din => D; init_mode = :hippo, spk_args = HILL_SPK)
+        offx = PhasorDense(Din => D; init_mode = :hippo, spk_args = HILL_SPK, emit_n = Inf)
+        ps0, st0 = Lux.setup(Xoshiro(2), off)
+        @test keys(ps0) == keys(first(Lux.setup(Xoshiro(2), offx)))
+        @test !haskey(ps0, :log_theta)
+        y0 = first(off(x, ps0, st0))
+        @test y0 isa AbstractArray{<:Phase, 3}
+        @test Float32.(first(offx(x, ps0, st0))) == Float32.(y0)
+        s0 = first(off(_hill_call(x), ps0, st0))
+        @test s0.train.charges === nothing
+        @test first(offx(_hill_call(x), ps0, st0)).train.times == s0.train.times
+        # an emission-off layer still honours charged input (amplitude q)
+        yc = first(off(Charged(x, qin), ps0, st0))
+        @test yc isa AbstractArray{<:Phase, 3}
+        @test Float32.(first(off(Charged(x, ones(Float32, size(x))), ps0, st0))) == Float32.(y0)
+
+        @testset "n = 1, init=$mode bias=$bias input=$inp" for (mode, bias) in
+                ((:default, true), (:hippo, true), (:hippo, false)), inp in (:unit, :charged)
+            lay = PhasorDense(Din => D; init_mode = mode, use_bias = bias, emit_n = 1,
+                              init_log_theta = 0f0, spk_args = HILL_SPK)
+            ps, st = Lux.setup(Xoshiro(2), lay)
+            @test ps.log_theta == [0f0]
+            xin = inp === :unit ? x : Charged(x, qin)
+            yd, _ = lay(xin, ps, st)
+            @test yd isa Charged
+            # emission keeps the phase of the emission-off layer
+            lay_off = PhasorDense(Din => D; init_mode = mode, use_bias = bias, spk_args = HILL_SPK)
+            ps_off = Base.structdiff(ps, NamedTuple{(:log_theta,)})
+            @test Float32.(yd.phase) == Float32.(first(lay_off(xin, ps_off, st)))
+            # θ = 1 ⇒ q = r/(r+1): read back r and set θ at its median for the parity check
+            r_disc = yd.q ./ (1f0 .- yd.q)
+            ps = merge(ps, (log_theta = Float32[log(median(r_disc))],))
+            yd, _ = lay(xin, ps, st)
+            ys, _ = lay(_hill_call(xin), ps, st)
+            @test ys isa SpikingCall && ys.train.charges !== nothing
+            a = _hill_agreement(yd, ys)
+            # Dirac→ODE gain: r_spk/r_disc (θ-independent) ≈ 1 ⇔ |u| ≈ g·|Z|, g = 2·t_window·spk_scale
+            θ = exp(only(ps.log_theta))
+            r_spk = θ .* a.dec.q ./ max.(1f0 .- a.dec.q, 1f-6)
+            r_d = θ .* yd.q ./ (1f0 .- yd.q)
+            gain_ratio = median(r_spk ./ r_d)
+            @info "PhasorDense n=1 discrete vs spiking" mode bias inp a.R a.dq_mean a.dq_p95 a.dq_max gain_ratio measured_g = gain_ratio * PhasorNetworks._emit_gain(HILL_SPK)
+            @test abs(gain_ratio - 1) < 0.005
+            @test a.R > 0.99
+            @test a.dq_mean < 0.01
+            @test a.dq_p95 < 0.03
+        end
+
+        # gradients through the emitting layer (θ learnable and frozen)
+        for learn in (true, false)
+            lay = PhasorDense(Din => D; init_mode = :hippo, emit_n = 1, learn_theta = learn, spk_args = HILL_SPK)
+            ps, st = Lux.setup(Xoshiro(4), lay)
+            g = Zygote.gradient(p -> sum(first(lay(Charged(x, qin), p, st)).q), ps)[1]
+            @test all(isfinite, g.weight)
+            if learn
+                @test g.log_theta !== nothing && all(isfinite, g.log_theta) && only(g.log_theta) < 0
+            else
+                @test g.log_theta === nothing || all(iszero, g.log_theta)
+            end
+        end
+        @test_throws ArgumentError PhasorDense(2 => 2; emit_n = 0)
     end
 end

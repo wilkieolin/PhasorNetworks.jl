@@ -320,6 +320,26 @@ When `init_log_neg_lambda` is set, it replaces the per-channel value
 uniformly across `out` for both modes (overrides the HiPPO spread in
 `:hippo`).
 
+# Hill emission (opt-in)
+- `emit_n::Real = Inf` — emission sharpness. `Inf` (default) = today's rule:
+  every output is emitted with unit amplitude (bit-identical to the layer
+  without this option). Finite `n` (`n = 1` primary): the output state `z`
+  is emitted as charge `q = rⁿ/(rⁿ+θⁿ)`, `r = |z|`, with the phase of `z`
+  ([`hill_charge`](@ref)). 3D Phase / [`Charged`](@ref) dispatch: returns a
+  `Charged` stream. `:spiking` return: each spike of the train carries its
+  charge (`train.charges`), computed from the cycle-sample `|u|` mapped to
+  Dirac units, `r = |u| / g` with `g = 2·t_window·spk_scale` (the integral of
+  one spike's current kernel), so θ means the same in both paths.
+- `init_log_theta::Real = 0` — initial `log θ` (Dirac units). Stored in the
+  parameters as `log_theta` (1-element) so each copy in a `ScanStack` holds
+  its own θ.
+- `learn_theta::Bool = false` — when `false`, θ receives no gradient
+  (`ignore_derivatives`). Note: an optimiser with decoupled weight decay
+  still shrinks a frozen leaf; exclude `log_theta` from decay or reset it.
+
+The layer also accepts a [`Charged`](@ref) input (3D discrete) and a spike
+train with `charges`: every input spike then enters with amplitude `q`.
+
 See also: [`PhasorConv`](@ref), [`PhasorFixed`](@ref), [`ComplexBias`](@ref)
 """
 struct PhasorDense <: Lux.AbstractLuxLayer
@@ -335,6 +355,9 @@ struct PhasorDense <: Lux.AbstractLuxLayer
     hippo_tau_max::Union{Float32, Nothing}   # :hippo λ-range knob; nothing → HIPPO_TAU_MAX
     hippo_tau_min::Union{Float32, Nothing}   # :hippo λ-range knob; nothing → HIPPO_TAU_MIN
     spk_args::SpikingArgs
+    emit_n::Float32          # Hill emission sharpness; Inf = off (unit-amplitude emission)
+    init_log_theta::Float32  # initial log θ (Dirac units), params.log_theta when emitting
+    learn_theta::Bool        # θ trainable?
 end
 
 function PhasorDense(shape::Pair{<:Integer,<:Integer},
@@ -349,6 +372,9 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                     hippo_tau_max::Union{Real, Nothing} = nothing,
                     hippo_tau_min::Union{Real, Nothing} = nothing,
                     spk_args::SpikingArgs = SpikingArgs(),
+                    emit_n::Real = Inf,
+                    init_log_theta::Real = 0f0,
+                    learn_theta::Bool = false,
                     kwargs...)
     # Handle backward compatibility: 'init' kwarg maps to init_weight
     if init_weight === nothing && init !== nothing
@@ -380,8 +406,13 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
                         lnl_vec,
                         hippo_tau_max === nothing ? nothing : Float32(hippo_tau_max),
                         hippo_tau_min === nothing ? nothing : Float32(hippo_tau_min),
-                        spk_args)
+                        spk_args,
+                        _check_emit_n(emit_n),
+                        Float32(init_log_theta),
+                        learn_theta)
 end
+
+_emits(l) = isfinite(l.emit_n)
 
 # Per-mode log_neg_lambda initializer. ω is no longer materialized here —
 # it's derived from `spk_args.t_period` at call sites (see `_get_omega`).
@@ -417,6 +448,9 @@ function Lux.initialparameters(rng::AbstractRNG, l::PhasorDense)
         bias = l.init_bias(rng, (l.out_dims,))
         parameters = merge(parameters, (bias_real = Float32.(real.(bias)),
                                          bias_imag = Float32.(imag.(bias))))
+    end
+    if _emits(l)
+        parameters = merge(parameters, (log_theta = Float32[l.init_log_theta],))
     end
 
     return parameters
@@ -455,9 +489,14 @@ function (a::PhasorDense)(x::AbstractArray{<:Phase, 3}, params::LuxParams, state
     return _forward_3d_dirac(a, x, params, state)
 end
 
+# Charged input (Hill emission upstream): each input spike has amplitude q.
+function (a::PhasorDense)(x::Charged, params::LuxParams, state::NamedTuple)
+    return _forward_3d_dirac(a, x, params, state)
+end
+
 # ---- 3D Phase Dirac path ----
 
-function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
+function _forward_3d_dirac(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, Charged},
                            params::LuxParams, state::NamedTuple)
     λ = -exp.(params.log_neg_lambda)
     # ω·T = 2π by construction since both come from a.spk_args.t_period
@@ -514,12 +553,13 @@ function _forward_3d_dirac(a::PhasorDense, x::AbstractArray{<:Phase, 3},
     # √(|z|² + ε)), so complex_to_angle ∘ normalize_to_unit_circle
     # reduces to complex_to_angle on nonzero inputs, and both return 0
     # angle at z = 0.
-    if a.activation === normalize_to_unit_circle
-        return complex_to_angle(Z), state
-    else
-        Y = a.activation(Z)
-        return complex_to_angle(Y), state
+    φ = a.activation === normalize_to_unit_circle ? complex_to_angle(Z) :
+                                                     complex_to_angle(a.activation(Z))
+    if _emits(a)
+        # Hill emission: the wire carries q(|Z|) with the phase of Z.
+        return _hill_emit(Z, params.log_theta, a.emit_n, a.learn_theta; phase = φ), state
     end
+    return φ, state
 end
 
 # ---- SpikingCall dispatch ----
@@ -585,7 +625,11 @@ function (a::PhasorDense)(x::CurrentCall, params::LuxParams, state::NamedTuple)
                                 tspan)
         return next_call, state
     else # :spiking
-        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset)
+        # Hill emission: each spike carries q(|u|/g), g mapping ODE amplitude
+        # to Dirac units (see `_emit_gain`). Off → unit-charge train.
+        charge_fn = _emits(a) ? _spike_charge_fn(params.log_theta, a.emit_n, spk_args) : nothing
+        train = solution_to_train(sol, tspan, spk_args=spk_args, offset=x.current.offset,
+                                  charge_fn=charge_fn)
         # If warmup trimmed/shifted the spike train, the downstream layer's
         # tspan must shrink by the same amount so its ODE integration window
         # matches the train's effective span. Otherwise the downstream layer

@@ -488,6 +488,24 @@ function _hill_emit(Z::AbstractArray{<:Complex, 3}, log_theta, n::Real, learn_th
     return Charged(phase, hill_charge(_emit_r(Z), lt, n))
 end
 
+# Dirac ↔ ODE amplitude map for emission in the spiking path. One spike
+# delivers the current spk_scale·k(t − t_s) with the raised-cosine kernel k of
+# half-width 2·t_window, whose integral is 2·t_window; the discrete (Dirac)
+# path models the same spike as a unit impulse. The resonator is linear and
+# the kernel is short against the period, so the cycle-sample ODE amplitude
+# is |u| ≈ g·|Z_dirac| with g = 2·t_window·spk_scale (verified in
+# test_hill_emission.jl). The bias current carries no spk_scale, so with
+# spk_scale ≠ 1 the ODE and Dirac paths already disagree on the signal/bias
+# balance; spk_scale = 1 is the parity case.
+_emit_gain(spk_args::SpikingArgs) = 2f0 * spk_args.t_window * spk_args.spk_scale
+
+# charge_fn for `solution_to_train`: ODE amplitude |u| → q(|u|/g); θ is in Dirac units.
+function _spike_charge_fn(log_theta, n::Real, spk_args::SpikingArgs)
+    g = _emit_gain(spk_args)
+    lt = ignore_derivatives(log_theta)
+    return r -> hill_charge(max.(r ./ g, 1f-6), lt, n)
+end
+
 _check_emit_n(n::Real) = (n > 0 || throw(ArgumentError("emit_n must be > 0 (Inf = off), got $n")); Float32(n))
 
 # ================================================================

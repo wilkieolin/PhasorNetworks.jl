@@ -1318,14 +1318,36 @@ end
 _spike_time_table(train::SpikeTrainGPU, L::Int, T::Real) =
     _spike_time_table(SpikeTrain(train), L, T)
 
+# Twin of `_spike_time_table` for per-spike charges (Hill emission): (N, L)
+# table of the charge of each neuron's spike in each cycle, 0 where silent and
+# 1 for a spike of a train without charges (unit charge). Same cycle
+# assignment and last-event-wins rule as the time table.
+function _spike_charge_table(train::SpikeTrain, L::Int, T::Real)
+    T = Float32(T)
+    shape = train.shape
+    lin = LinearIndices(shape)
+    tab = zeros(Float32, prod(shape), L)
+    for (j, (idx, t)) in enumerate(zip(train.indices, train.times))
+        l = floor(Int, (t - train.offset) / T) + 1
+        (1 <= l <= L) || continue
+        tab[lin[idx], l] = train.charges === nothing ? 1f0 : train.charges[j]
+    end
+    return tab
+end
+_spike_charge_table(train::SpikeTrainGPU, L::Int, T::Real) =
+    _spike_charge_table(SpikeTrain(train), L, T)
+
 # Inverse of `_spike_time_table`: drop silent entries, rebuild a train on the
 # same device as `like`.
-function _table_to_train(tab::AbstractMatrix{Float32}, shape::Tuple, offset::Real, like)
+# An optional (N, L) charge table `qtab` gives the surviving spikes their charges.
+function _table_to_train(tab::AbstractMatrix{Float32}, shape::Tuple, offset::Real, like,
+                         qtab::Union{Nothing, AbstractMatrix{Float32}} = nothing)
     cart = CartesianIndices(shape)
     keep = findall(!isnan, tab)
     inds = [cart[k[1]] for k in keep]
     times = Float32[tab[k] for k in keep]
-    train = SpikeTrain(inds, times, shape, offset)
+    q = qtab === nothing ? nothing : Float32[qtab[k] for k in keep]
+    train = SpikeTrain(inds, times, shape, offset, q)
     return like isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
 end
 
@@ -1470,6 +1492,38 @@ function ssm_train_to_phases(call::SpikingCall)
     rest = shape[2:end]
     φ3 = reshape(φ, C, prod(rest), L)
     return reshape(permutedims(φ3, (1, 3, 2)), C, L, rest...)
+end
+
+# (N, L) table → (C, L, rest...) field, the layout of `ssm_train_to_phases`.
+function _table_to_field(tab::AbstractMatrix, shape::Tuple)
+    L = size(tab, 2)
+    length(shape) == 1 && return tab
+    C = shape[1]
+    rest = shape[2:end]
+    return reshape(permutedims(reshape(tab, C, prod(rest), L), (1, 3, 2)), C, L, rest...)
+end
+
+"""
+    ssm_train_to_charged(call::SpikingCall) -> Charged
+
+Decode a spike train with one event per neuron per carrier cycle into a
+[`Charged`](@ref) `(C, L, B)` stream: the phase of each spike (as
+[`ssm_train_to_phases`](@ref)) and its charge (`train.charges`, or 1 for a
+unit-charge train). A silent neuron decodes to phase 0 with charge 0 — the
+discrete equivalent of no spike. Pure timing/charge readout — no ODE.
+Inverse of `ssm_phases_to_train(phases; charges)`.
+"""
+function ssm_train_to_charged(call::SpikingCall)
+    T = Float32(call.spk_args.t_period)
+    L = _n_cycles(call)
+    tr = call.train
+    length(tr.shape) == 2 ||
+        throw(ArgumentError("ssm_train_to_charged expects a (C, B) train shape, got $(tr.shape)"))
+    tab = _spike_time_table(tr, L, T)
+    start = _cycle_starts(tr.offset, L, T)
+    φ = ifelse.(isnan.(tab), 0f0, 2f0 .* (tab .- start) ./ T .- 1f0)
+    q = _spike_charge_table(tr, L, T)
+    return Charged(Phase.(_table_to_field(φ, tr.shape)), _table_to_field(q, tr.shape))
 end
 
 # Bring a branch output back onto spikes, as the branch's output neurons
