@@ -66,14 +66,18 @@ include(joinpath(@__DIR__, "depth_sweep_fashionmnist.jl"))
 
 const ATTN_KINDS = (:local_self, :local_cross, :ssm_self)
 
-"Build a fresh d_model⇒d_model phase attention layer of the requested kind."
+"""Build a fresh d_model⇒d_model phase attention layer of the requested kind.
+`emit_kw` (e.g. `(; emit_n = 1, init_log_theta = 0f0)`) is passed to PhasorLSA/PhasorLCA."""
 function make_attn(kind::Symbol, D::Int; n_heads::Int = 4, n_anchors::Int = 32,
-                   init_mode::Symbol = :hippo, spk_args::SpikingArgs = SpikingArgs())
+                   init_mode::Symbol = :hippo, spk_args::SpikingArgs = SpikingArgs(),
+                   emit_kw::NamedTuple = (;))
     if kind === :local_self
-        return PhasorLSA(D => D, n_heads; init_mode = init_mode, spk_args = spk_args)
+        return PhasorLSA(D => D, n_heads; init_mode = init_mode, spk_args = spk_args, emit_kw...)
     elseif kind === :local_cross
-        return PhasorLCA(D => D, n_heads, n_anchors; init_mode = init_mode, spk_args = spk_args)
+        return PhasorLCA(D => D, n_heads, n_anchors; init_mode = init_mode, spk_args = spk_args, emit_kw...)
     elseif kind === :ssm_self
+        isempty(emit_kw) || isinf(get(emit_kw, :emit_n, Inf)) ||
+            error("Hill emission is not implemented for :ssm_self")
         return SSMSelfAttention(D => D, normalize_to_unit_circle)
     else
         error("unknown attention kind :$kind (use one of $(ATTN_KINDS))")
@@ -102,19 +106,34 @@ const TREATMENTS = (:old, :downscaled_ffn, :rezero, :rezero_recenter)
 Encoder → `depth` PhasorTransformerBlock(kind) under the given residual
 treatment → SSMReadout. `scan=true` runs the stack through one compile-once
 `ScanStack`.
+
+Hill emission (default off — the model is then identical to the one without
+these keywords): `emit_n` (`Inf` = off; `1` = the n = 1 rule) sets the
+emission sharpness at every wire emission site — encoder, attention output,
+both FFN layers; `enc_emit_n`, `attn_emit_n`, `ffn_emit_n` override it per
+site. `init_log_theta` (Dirac units; one value for every site and depth) and
+`learn_theta` are passed through. Per-site / per-depth θ: build, then
+`set_emission_theta(ps, emission_amplitudes(baseline, ps_base, st, x); q)`.
 """
 function build_attn_model(kind::Symbol, treatment::Symbol, D::Int, depth::Int;
                           n_heads::Int = 4, n_anchors::Int = 32,
                           n_classes::Int = 10, readout_frac::Float32 = 0.25f0,
                           init_mode::Symbol = :hippo,
                           spk_args::SpikingArgs = SpikingArgs(), scan::Bool = true,
-                          checkpoint::Bool = false)
+                          checkpoint::Bool = false,
+                          emit_n::Real = Inf, enc_emit_n::Real = emit_n,
+                          attn_emit_n::Real = emit_n, ffn_emit_n::Real = emit_n,
+                          init_log_theta::Real = 0f0, learn_theta::Bool = false)
     tkw = treatment_kw(treatment)
+    ekw(n) = isinf(n) ? (;) : (; emit_n = n, init_log_theta, learn_theta)
+    fkw = isinf(ffn_emit_n) ? (;) :
+        (; ffn_emit_n, ffn_init_log_theta = init_log_theta, ffn_learn_theta = learn_theta)
     enc = PhasorDense(28 => D, normalize_to_unit_circle;
-                      init_mode = init_mode, use_bias = false, spk_args = spk_args)
+                      init_mode = init_mode, use_bias = false, spk_args = spk_args, ekw(enc_emit_n)...)
     readout = SSMReadout(D => n_classes; readout_frac = readout_frac)
-    mk_block() = PhasorTransformerBlock(D, make_attn(kind, D; n_heads, n_anchors, init_mode, spk_args);
-                                        tkw...)
+    mk_block() = PhasorTransformerBlock(D, make_attn(kind, D; n_heads, n_anchors, init_mode, spk_args,
+                                                     emit_kw = ekw(attn_emit_n));
+                                        tkw..., fkw...)
     if depth == 0
         return Chain(_row_phase, enc, readout)
     elseif scan
