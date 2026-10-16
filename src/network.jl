@@ -72,7 +72,7 @@ function (f::Lux.FlattenLayer)(x::SpikeTrain, params::LuxParams, state::NamedTup
         CartesianIndex(linear_feature_idx, batch_val)
     end
 
-    flattened_train = SpikeTrain(new_indices, x.times, new_shape, x.offset)
+    flattened_train = SpikeTrain(new_indices, x.times, new_shape, x.offset, x.charges)
     return flattened_train, state
 end
 
@@ -112,7 +112,7 @@ function (f::Lux.FlattenLayer)(x::SpikeTrainGPU, params::LuxParams, state::Named
     
     # SpikeTrainGPU constructor takes AbstractArray for indices (here, CPU Array of CartesianIndex),
     # moves it to the device `x.times` lives on, and computes new linear_indices for new_shape.
-    flattened_train = SpikeTrainGPU(new_cart_indices_cpu, x.times, new_shape, x.offset)
+    flattened_train = SpikeTrainGPU(new_cart_indices_cpu, x.times, new_shape, x.offset, x.charges)
     return flattened_train, state
 end
 
@@ -132,9 +132,10 @@ function dropout(rng::AbstractRNG, x::SpikingCall, p::T, training, invp::T, dims
     keep_inds = to_device_of(train.times, rand(rng, Float32, (n_s)) .>= p)
     new_inds = train.indices[keep_inds]
     new_tms = train.times[keep_inds]
+    new_q = _sel_charges(train.charges, keep_inds)
     new_train = on_gpu(train) ?
-        SpikeTrainGPU(new_inds, new_tms, train.shape, train.offset) :
-        SpikeTrain(new_inds, new_tms, train.shape, train.offset)
+        SpikeTrainGPU(new_inds, new_tms, train.shape, train.offset, new_q) :
+        SpikeTrain(new_inds, new_tms, train.shape, train.offset, new_q)
     new_call = SpikingCall(new_train, x.spk_args, x.t_span)
 
     return new_call, (), rng
@@ -2521,6 +2522,8 @@ decoded phase value over the pooling dimensions.
 - `st::NamedTuple`: Unchanged state
 """
 function (pool::Union{MaxPool, MinPool})(call::SpikingCall, params::LuxParams, state::NamedTuple)
+    call.train.charges === nothing ||
+        throw(ArgumentError("spiking Max/MinPool selects spikes by phase only and would drop per-spike charges (Hill emission); not supported"))
     if on_gpu(call.train)
         #move to CPU if necessary
         gpu = true

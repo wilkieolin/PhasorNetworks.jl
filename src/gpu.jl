@@ -201,7 +201,8 @@ The CartesianIndex pattern stays on CPU (cheap, `C·B·L` integers) — the
 existing `phase_to_train(::AbstractGPUArray, ...)` follows the same convention.
 Backend-agnostic: the only device constant is lifted with `to_device_of`.
 """
-function ssm_phases_to_train(phases::AbstractGPUArray{<:Phase, 3}; spk_args::SpikingArgs)
+function ssm_phases_to_train(phases::AbstractGPUArray{<:Phase, 3}; spk_args::SpikingArgs,
+                             charges::Union{Nothing, AbstractArray{<:Real, 3}} = nothing)
     C, L, B = size(phases)
     shape   = (C, B)
     period  = spk_args.t_period
@@ -222,7 +223,10 @@ function ssm_phases_to_train(phases::AbstractGPUArray{<:Phase, 3}; spk_args::Spi
     base_indices = vec(CartesianIndices((C, B)))     # CPU, length C·B
     all_indices  = repeat(base_indices, L)            # CPU, length C·B·L
 
-    return SpikeTrainGPU(all_indices, all_times, shape, 0.0f0)
+    # Charges (Hill emission) follow the same (C, B, L) spike order.
+    q = charges === nothing ? nothing :
+        vec(permutedims(to_device_of(phases, Float32.(charges)), (1, 3, 2)))
+    return SpikeTrainGPU(all_indices, all_times, shape, 0.0f0, q)
 end
 
 function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
@@ -231,6 +235,11 @@ function parallel_current(stg::SpikeTrainGPU, t::Float32, spk_args::SpikingArgs)
     currents = KernelAbstractions.zeros(backend, Float32, n)
 
     raised_cosine_kernel_ka!(backend)(currents, stg.times, t, Float32(spk_args.t_window); ndrange=n)
+    # Charged spikes (Hill emission): weight each impulse by its charge
+    # before the scatter-add; `nothing` = unit charge (unchanged path).
+    if stg.charges !== nothing
+        currents .*= stg.charges
+    end
 
     output = parallel_scatter_add(stg.linear_indices, currents, stg.linear_shape)
     return output
@@ -257,6 +266,9 @@ function spike_current!(output::AbstractGPUArray{Float32}, train::SpikeTrainGPU,
     backend = get_backend(currents_buffer)
     raised_cosine_kernel_ka!(backend)(currents_buffer, train.times, t, t_window; ndrange=length(train.times))
     currents_buffer .*= scale
+    if train.charges !== nothing
+        currents_buffer .*= train.charges
+    end
 
     scatter_buffer .= 0.0f0
     parallel_scatter_add!(scatter_buffer, train.linear_indices, currents_buffer)

@@ -1354,7 +1354,7 @@ function _apply_warmup_shift(train::SpikeTrain, spk_args::SpikingArgs)
     end
     shift = Float32(w) * spk_args.t_period
     new_times = train.times .- shift
-    return SpikeTrain(train.indices, new_times, train.shape, train.offset)
+    return SpikeTrain(train.indices, new_times, train.shape, train.offset, train.charges)
 end
 
 """

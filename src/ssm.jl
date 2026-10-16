@@ -741,11 +741,17 @@ at a time determined by the phase at that step.
 - `phases`: (C × L × B) Phase array — channels × time steps × batch
 - `spk_args::SpikingArgs`: Spiking parameters (uses `t_period` for temporal mapping)
 
+# Keyword arguments
+- `charges = nothing`: optional `(C, L, B)` per-element charge (Hill
+  emission). When given, the train carries one charge per spike (same order
+  as the spikes); `nothing` → unit-charge train (unchanged).
+
 # Returns
 SpikeTrain with `shape=(C, B)` containing `C*L*B` spikes total.
 Time step `l` maps to period `[(l-1)*t_period, l*t_period)`.
 """
-function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs)
+function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs,
+                             charges::Union{Nothing, AbstractArray{<:Real, 3}} = nothing)
     C, L, B = size(phases)
     shape = (C, B)
     period = spk_args.t_period
@@ -769,7 +775,11 @@ function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::Spikin
         end
     end
 
-    return SpikeTrain(all_indices, all_times, shape, 0.0f0)
+    # Spike order is l outermost, then column-major (c, b) — i.e. the
+    # (C, B, L) permutation of the (C, L, B) charge tensor.
+    q = charges === nothing ? nothing :
+        vec(permutedims(Float32.(Array(charges)), (1, 3, 2)))
+    return SpikeTrain(all_indices, all_times, shape, 0.0f0, q)
 end
 
 """
@@ -1478,7 +1488,7 @@ function _as_spike_call(y::AbstractArray{<:Phase, 3}, ref::SpikingCall)
     train = ssm_phases_to_train(Array(y); spk_args = ref.spk_args)
     off = ref.train.offset
     if off != 0f0
-        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off)
+        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off, train.charges)
     end
     train = ref.train isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
     return SpikingCall(train, ref.spk_args, ref.t_span)

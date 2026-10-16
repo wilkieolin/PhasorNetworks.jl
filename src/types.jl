@@ -76,6 +76,11 @@ Used for modeling spiking neural networks and implementing Vector Symbolic Archi
 - `times::Array{Float32,1}`: Timing of each spike in seconds
 - `shape::Tuple`: Dimensions of the spike space
 - `offset::Float32`: Time offset of the spike train, used in synchronization
+- `charges::Union{Nothing, Vector{Float32}}`: Optional per-spike charge (one
+  entry per spike, aligned with `times`). `nothing` (the default) means every
+  spike carries unit charge — the receiving current is `Σ kernel`, exactly as
+  before charges existed. With charges set, `spike_current` delivers
+  `Σ q·kernel` (Hill emission, see [`hill_charge`](@ref)).
 
 # Type Parameter
 - `N`: Number of dimensions in the spike space
@@ -87,16 +92,24 @@ struct SpikeTrain{N}
     times::Array{Float32,1}
     shape::Tuple
     offset::Float32
+    charges::Union{Nothing, Vector{Float32}}
 
     function SpikeTrain(indices::AbstractArray,
         times::AbstractArray,
         shape::Tuple,
-        offset::Real)
+        offset::Real,
+        charges::Union{Nothing, AbstractArray} = nothing)
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
+        if charges !== nothing
+            length(charges) == length(times_f32) ||
+                throw(DimensionMismatch("charges has $(length(charges)) entries for $(length(times_f32)) spikes"))
+            charges = Vector{Float32}(vec(charges))
+        end
         return new{length(shape)}(indices,
                             times_f32,
                             shape,
-                            Float32(offset))
+                            Float32(offset),
+                            charges)
     end
 end
 
@@ -114,6 +127,8 @@ Provides the same functionality as SpikeTrain but with additional fields for eff
 - `shape::Tuple`: Dimensions of the spike space
 - `linear_shape::Int`: Total size of the flattened spike space
 - `offset::Float32`: Time offset of the spike train
+- `charges::Union{Nothing, AbstractGPUArray}`: Optional per-spike charge on
+  the device (`nothing` = unit charge; see [`SpikeTrain`](@ref)).
 
 # Type Parameter
 - `N`: Number of dimensions in the spike space
@@ -128,6 +143,7 @@ struct SpikeTrainGPU{N}
     shape::Tuple
     linear_shape::Int
     offset::Float32
+    charges::Union{Nothing, AbstractGPUArray}
 
     # `device` defaults to the device `times` (or `indices`) already lives
     # on, else the auto-selected GPU (`gpu_device()`). Pass it explicitly
@@ -135,17 +151,24 @@ struct SpikeTrainGPU{N}
     function SpikeTrainGPU(indices::AbstractArray,
                             times::AbstractArray,
                             shape::Tuple,
-                            offset::Real;
+                            offset::Real,
+                            charges::Union{Nothing, AbstractArray} = nothing;
                             device::AbstractDevice = _spike_train_device(indices, times))
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
         host_indices = Array(indices)
         linear_indices = LinearIndices(shape)[host_indices]
+        if charges !== nothing
+            length(charges) == length(times_f32) ||
+                throw(DimensionMismatch("charges has $(length(charges)) entries for $(length(times_f32)) spikes"))
+            charges = device(eltype(charges) == Float32 ? vec(charges) : Float32.(vec(charges)))
+        end
         return new{length(shape)}(device(host_indices),
                 device(linear_indices),
                 device(times_f32),
                 shape,
                 reduce(*, shape),
-                Float32(offset))
+                Float32(offset),
+                charges)
     end
 end
 
@@ -153,15 +176,31 @@ function SpikeTrainGPU(st::SpikeTrain; kwargs...)
     return SpikeTrainGPU(st.indices,
                         st.times,
                         st.shape,
-                        st.offset; kwargs...)
+                        st.offset,
+                        st.charges; kwargs...)
 end
 
 function SpikeTrain(stg::SpikeTrainGPU)
     st = SpikeTrain(Array(stg.indices),
                     Array(stg.times),
                     stg.shape,
-                    stg.offset)
+                    stg.offset,
+                    stg.charges === nothing ? nothing : Array(stg.charges))
     return st
+end
+
+# Per-spike charges of a train restricted to the spikes selected by `sel`
+# (any index into the spike list); `nothing` stays `nothing`.
+_sel_charges(c::Nothing, sel) = nothing
+_sel_charges(c::AbstractVector, sel) = c[sel]
+
+# Charges of several trains concatenated in spike order. All-`nothing` stays
+# `nothing` (unit charge); a mix fills the uncharged trains with ones (unit
+# charge is what `nothing` means).
+function _cat_charges(trains)
+    all(t -> t.charges === nothing, trains) && return nothing
+    return reduce(vcat, [t.charges === nothing ? ones(Float32, length(t.times)) : Array(t.charges)
+                         for t in trains])
 end
 
 function Base.convert(::Type{SpikeTrain}, stg::SpikeTrainGPU)
@@ -209,7 +248,7 @@ function Base.getindex(x::SpikeTrain, inds...)
     sel_times = x.times[matches]
     #map the old indicies to new values
     new_inds, new_shape = remap(sel_indices)
-    new_train = SpikeTrain(new_inds, sel_times, new_shape, x.offset)
+    new_train = SpikeTrain(new_inds, sel_times, new_shape, x.offset, _sel_charges(x.charges, matches))
 
     return new_train
 end
@@ -252,7 +291,7 @@ function Base.cat(x::SpikeTrain...; dim)
     shape = Tuple([maximum(getindex.(inds, i)) for i in 1:n_dims])
 
     #create and return the new train
-    new_train = SpikeTrain(inds, tms, shape, offset)
+    new_train = SpikeTrain(inds, tms, shape, offset, _cat_charges(x))
 end
 
 function Base.size(x::SpikeTrain, d::Int)
@@ -265,7 +304,7 @@ end
 
 function get_time(st::SpikeTrain, times::Tuple{<:Real, <:Real})
     valid = findall((st.times .> times[1]) .* (st.times .< times[2]))
-    st = SpikeTrain(st.indices[valid], st.times[valid], st.shape, st.offset)
+    st = SpikeTrain(st.indices[valid], st.times[valid], st.shape, st.offset, _sel_charges(st.charges, valid))
     return st
 end
 
