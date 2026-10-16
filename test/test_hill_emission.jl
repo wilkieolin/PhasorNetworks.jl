@@ -4,6 +4,7 @@
 function hill_emission_tests()
     @testset "Hill emission" begin
         hill_spike_charge_tests()
+        hill_charged_dirac_tests()
     end
 end
 
@@ -73,5 +74,61 @@ function hill_spike_charge_tests()
             l = floor(Int, t / sa.t_period) + 1
             @test tr.charges[j] == Q[idx[1], l, idx[2]]
         end
+    end
+end
+
+# ---- Step 2: Charged stream, causal_conv_dirac charges, gradients ---------
+
+function hill_charged_dirac_tests()
+    @testset "Charged + causal_conv_dirac" begin
+        rng = Xoshiro(11)
+        Cin, Cout, L, B = 5, 6, 7, 3
+        ph = Phase.(2f0 .* rand(rng, Float32, Cin, L, B) .- 1f0)
+        W = randn(rng, Float32, Cout, Cin)
+        λ = -0.1f0 .- 0.3f0 .* rand(rng, Float32, Cout)
+        ω = fill(2f0 * Float32(π), Cout)
+        q = 0.05f0 .+ rand(rng, Float32, Cin, L, B)
+
+        Z0 = causal_conv_dirac(ph, W, λ, ω, 1f0)
+        @test causal_conv_dirac(ph, W, λ, ω, 1f0; charges = ones(Float32, Cin, L, B)) == Z0
+        Zq = causal_conv_dirac(ph, W, λ, ω, 1f0; charges = q)
+        @test causal_conv_dirac(Charged(ph, q), W, λ, ω, 1f0) == Zq
+        # linearity in the charges: Z(q) = Σ_j contributions scaled by q_j
+        Zsum = causal_conv_dirac(ph, W, λ, ω, 1f0; charges = 2f0 .* q)
+        @test Zsum ≈ 2f0 .* Zq rtol = 1f-5
+        @test_throws DimensionMismatch Charged(ph, q[:, 1:2, :])
+        @test_throws DimensionMismatch causal_conv_dirac(ph, W, λ, ω, 1f0; charges = q[:, 1:2, :])
+
+        # finite-difference check of ∂/∂q and ∂/∂W through the charged path
+        f(qq, WW) = sum(abs2, causal_conv_dirac(ph, WW, λ, ω, 1f0; charges = qq))
+        gq, gW = Zygote.gradient(f, q, W)
+        h = 1f-2
+        for (i, j) in ((1, 1), (3, 7), (Cout * Cin, 2 * Cin * L + 4))
+            e = zeros(Float32, size(q)); e[j] = h
+            fd = (Float64(f(q .+ e, W)) - Float64(f(q .- e, W))) / (2h)
+            @test isapprox(gq[j], fd; rtol = 2f-2)
+            eW = zeros(Float32, size(W)); eW[i] = h
+            fdW = (Float64(f(q, W .+ eW)) - Float64(f(q, W .- eW))) / (2h)
+            @test isapprox(gW[i], fdW; rtol = 2f-2)
+        end
+
+        # hill_charge: value, limits and finite gradients at z = 0
+        r = Float32[1f-3, 0.5f0, 1f0, 2f0, 50f0]
+        θ = 0.7f0
+        @test hill_charge(r, [log(θ)], 1) ≈ r ./ (r .+ θ) rtol = 1f-5
+        @test hill_charge(r, [log(θ)], 4) ≈ r .^ 4 ./ (r .^ 4 .+ θ^4) rtol = 1f-4
+        Zc = ComplexF32[0 0.3+0.4im; 1e-8im -2]
+        Zc3 = reshape(Zc, 2, 2, 1)
+        for n in (1, 3, 40)
+            g = Zygote.gradient((z, lt) -> sum(PhasorNetworks._hill_emit(z, lt, n, true).q), Zc3, [log(θ)])
+            @test all(isfinite, real.(g[1])) && all(isfinite, imag.(g[1])) && all(isfinite, g[2])
+            @test g[1][1] == 0   # exactly zero gradient at the origin
+        end
+        # frozen θ: no gradient reaches log_theta
+        gfz = Zygote.gradient(lt -> sum(PhasorNetworks._hill_emit(Zc3, lt, 1, false).q), [log(θ)])[1]
+        @test gfz === nothing || all(iszero, gfz)
+        # gradient of the phase through a Charged emission is finite at z = 0
+        gp = Zygote.gradient(z -> sum(Float32.(PhasorNetworks._hill_emit(z, [0f0], 1, true).phase)), Zc3)[1]
+        @test all(isfinite, real.(gp)) && all(isfinite, imag.(gp))
     end
 end

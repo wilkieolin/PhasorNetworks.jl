@@ -16,6 +16,8 @@ PotentialSolution,
 SpikingSolution,
 CurrentSolution,
 Phase,
+Charged,
+hill_charge,
 Args,
 
 #domain conversions

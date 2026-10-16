@@ -569,3 +569,33 @@ function ChainRulesCore.rrule(::Type{Phase}, x::Real)
 end
 
 PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray{Phase}, ODESolution}
+"""
+    Charged(phase, q)
+
+A discrete-path (Dirac) stream that carries a per-element **charge** next to
+its phase: `phase::AbstractArray{<:Phase,3}` `(C, L, B)` and
+`q::AbstractArray{<:Real,3}` of the same shape. It is what a layer with Hill
+emission (`emit_n < Inf`) emits in the discrete path: the unit's complex
+state `z` goes onto the wire as charge `q = rⁿ/(rⁿ+θⁿ)` (`r = |z|`) with the
+phase of `z`, so the receiving layer sees input amplitude `q` instead of 1
+(see [`hill_charge`](@ref)). The spiking counterpart is a spike train with
+per-spike `charges`.
+
+Deliberately *not* an `AbstractArray`: a layer without a `Charged` method
+fails with a `MethodError` instead of silently dropping the charge. Layers
+that accept it: `PhasorDense` (3D path), `PhasorLSA`, `PhasorLCA`,
+`PhasorResidual`, `PhaseRecenter`, `PhasorTransformerBlock`/`ScanStack`
+(by composition) and `SSMReadout` (which reads the phase only).
+"""
+struct Charged{P<:AbstractArray{<:Phase,3}, Q<:AbstractArray{<:Real,3}}
+    phase::P
+    q::Q
+    function Charged(phase::P, q::Q) where {P<:AbstractArray{<:Phase,3}, Q<:AbstractArray{<:Real,3}}
+        size(phase) == size(q) ||
+            throw(DimensionMismatch("Charged: phase $(size(phase)) and charge $(size(q)) shapes differ"))
+        return new{P, Q}(phase, q)
+    end
+end
+Base.size(c::Charged) = size(c.phase)
+Base.size(c::Charged, d::Integer) = size(c.phase, d)
+Base.show(io::IO, c::Charged) = print(io, "Charged(", join(size(c), "×"), " phase + charge)")
