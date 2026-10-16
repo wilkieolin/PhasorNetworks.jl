@@ -229,6 +229,8 @@ function hill_dense_tests()
             end
         end
         @test_throws ArgumentError PhasorDense(2 => 2; emit_n = 0)
+        lay2 = PhasorDense(Din => D; emit_n = 1)
+        @test_throws ArgumentError lay2(x[:, 1, :], first(Lux.setup(Xoshiro(5), lay2)), NamedTuple())
     end
 end
 

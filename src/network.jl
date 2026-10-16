@@ -476,6 +476,7 @@ end
 # ---- 2D Phase dispatch ----
 
 function (a::PhasorDense)(x::AbstractArray{<:Phase}, params::LuxParams, state::NamedTuple)
+    _emits(a) && throw(ArgumentError("PhasorDense: Hill emission (emit_n < Inf) is implemented for the 3D (C, L, B) Dirac path and the spiking path only"))
     xz = angle_to_complex(x)
     y, st_new = a(xz, params, state)
     y_normalized = a.activation(y)
