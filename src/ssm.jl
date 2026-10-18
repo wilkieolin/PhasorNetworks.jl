@@ -115,6 +115,10 @@ function (l::SSMReadout)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedT
     return _readout_pool(l, x, st.codes), st
 end
 
+# Charged input (Hill emission upstream): the readout compares phases only,
+# as in the spiking path (which reads spike times).
+(l::SSMReadout)(x::Charged, ps::LuxParams, st::NamedTuple) = l(x.phase, ps, st)
+
 # ================================================================
 # 3. PSK Encoding
 # ================================================================
@@ -425,11 +429,21 @@ the V tensor in the complex domain. Output shape: `(D, L, B)` Phase.
   (`results/xform_mqar/`) shows `:hippo` here *hurts* long-range recall.
 - `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics
   for the projections.
+- `emit_n::Real = Inf`, `init_log_theta::Real = 0`, `learn_theta::Bool = false`
+  — opt-in Hill emission of the output (see [`PhasorDense`](@ref) and
+  [`hill_charge`](@ref)): with finite `emit_n` the pre-activation output
+  `Y` is emitted as `Charged(phase, q(|Y|))` and `log_theta` (1-element) is
+  added to the parameters. The output amplitude is computed by the same
+  discrete arithmetic in both paths (the spiking dispatch attends on a
+  decoded per-cycle field), so θ means the same in both. The layer also
+  accepts a [`Charged`](@ref) input (charges enter the K/V(/Q) projections
+  as input amplitudes; in the spiking path they are read from the train).
 
 # Trainable parameters
 - `q_proj`, `k_proj`, `v_proj` — bias-free `PhasorDense` parameter
   trees (`weight`, `log_neg_lambda`).
 - `scale` — 1-element `Vector{Float32}`.
+- `log_theta` — 1-element, only with Hill emission.
 """
 struct PhasorLSA <: Lux.AbstractLuxLayer
     in_dims::Int
@@ -443,6 +457,9 @@ struct PhasorLSA <: Lux.AbstractLuxLayer
     full_d_heads::Bool   # false: heads are Dh=d_model/H slices (default). true: each
                          # head is a full d_model projection (proj d_model*H), heads
                          # combined by VSA bundling — the "don't slice the symbol" variant.
+    emit_n::Float32          # Hill emission sharpness of the output; Inf = off
+    init_log_theta::Float32
+    learn_theta::Bool
 end
 
 function PhasorLSA(dims::Pair{Int,Int}, n_heads::Int,
@@ -450,21 +467,28 @@ function PhasorLSA(dims::Pair{Int,Int}, n_heads::Int,
                    init_scale::Real = 3f0,
                    init_mode::Symbol = :default,
                    full_d_heads::Bool = false,
-                   spk_args::SpikingArgs = SpikingArgs())
+                   spk_args::SpikingArgs = SpikingArgs(),
+                   emit_n::Real = Inf,
+                   init_log_theta::Real = 0f0,
+                   learn_theta::Bool = false)
     in_dims, d_model = dims.first, dims.second
     @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
     proj_out = full_d_heads ? d_model * n_heads : d_model
     q = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
     k = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
     v = PhasorDense(in_dims => proj_out; use_bias = false, init_mode = init_mode, spk_args = spk_args)
-    return PhasorLSA(in_dims, d_model, n_heads, act, q, k, v, Float32(init_scale), full_d_heads)
+    return PhasorLSA(in_dims, d_model, n_heads, act, q, k, v, Float32(init_scale), full_d_heads,
+                     _check_emit_n(emit_n), Float32(init_log_theta), learn_theta)
 end
 
+# `log_theta` leaf of an emitting layer (appended after the existing leaves).
+_theta_params(l) = _emits(l) ? (log_theta = Float32[l.init_log_theta],) : NamedTuple()
+
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorLSA)
-    return (q_proj = Lux.initialparameters(rng, l.q_proj),
-            k_proj = Lux.initialparameters(rng, l.k_proj),
-            v_proj = Lux.initialparameters(rng, l.v_proj),
-            scale  = Float32[l.init_scale])
+    return merge((q_proj = Lux.initialparameters(rng, l.q_proj),
+                  k_proj = Lux.initialparameters(rng, l.k_proj),
+                  v_proj = Lux.initialparameters(rng, l.v_proj),
+                  scale  = Float32[l.init_scale]), _theta_params(l))
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorLSA)
@@ -476,7 +500,7 @@ end
 function Lux.parameterlength(l::PhasorLSA)
     return Lux.parameterlength(l.q_proj) +
            Lux.parameterlength(l.k_proj) +
-           Lux.parameterlength(l.v_proj) + 1
+           Lux.parameterlength(l.v_proj) + 1 + _emits(l)
 end
 
 # Internal helper: bundle V over heads using the head-similarity weights.
@@ -495,8 +519,20 @@ function _lsa_head_mix(Vc::AbstractArray{<:Complex, 4}, weights::AbstractArray{<
     return reshape(Y_r, Dh, H, L, B)
 end
 
-# (i) 3D Phase — the workhorse path.
-function (l::PhasorLSA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+# Output of an attention layer: phase (after the phase activation) of the
+# complex field Y; with Hill emission, Charged(phase, q(|Y|)).
+function _attn_emit(l, Y::AbstractArray{<:Complex, 3}, ps)
+    φ = _apply_phase_activation(l.activation, complex_to_angle(Y))
+    return _emits(l) ? _hill_emit(Y, ps.log_theta, l.emit_n, l.learn_theta; phase = φ) : φ
+end
+
+# (i) 3D Phase (or Charged) — the workhorse path.
+function (l::PhasorLSA)(x::Union{AbstractArray{<:Phase, 3}, Charged}, ps::LuxParams, st::NamedTuple)
+    return _attn_emit(l, _attn_Y(l, x, ps, st), ps), st      # (D, L, B) Phase (or Charged)
+end
+
+# Complex output field Y (D, L, B) before phase extraction.
+function _attn_Y(l::PhasorLSA, x, ps::LuxParams, st::NamedTuple)
     Q, _ = l.q_proj(x, ps.q_proj, st.q_proj)             # (P, L, B) Phase, P=D or D*H
     K, _ = l.k_proj(x, ps.k_proj, st.k_proj)
     V, _ = l.v_proj(x, ps.v_proj, st.v_proj)
@@ -517,28 +553,29 @@ function (l::PhasorLSA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTu
     Y  = _lsa_head_mix(Vc, weights)                       # (Dh, H, L, B) Complex
     # Combine heads: full-D → VSA bundle (sum) over heads → (D,L,B);
     #                sliced → concat heads (reshape) → (D,L,B).
-    Y  = l.full_d_heads ? dropdims(sum(Y, dims = 2); dims = 2) : reshape(Y, D, L, B)
-    Y_phase = complex_to_angle(Y)                         # (D, L, B) Phase
-
-    return _apply_phase_activation(l.activation, Y_phase), st
+    return l.full_d_heads ? dropdims(sum(Y, dims = 2); dims = 2) : reshape(Y, D, L, B)
 end
 
 # (ii) 2D Phase — single-slice; wrap to 3D with L=1.
 function (l::PhasorLSA)(x::AbstractArray{<:Phase, 2}, ps::LuxParams, st::NamedTuple)
+    _no_emit_2d(l)
     x3 = reshape(x, size(x, 1), 1, size(x, 2))
     y3, st2 = l(x3, ps, st)
     return dropdims(y3, dims=2), st2
 end
 
-# (iii) Complex 3D back-compat — trampoline through Phase 3D.
+# (iii) Complex 3D back-compat — trampoline through Phase 3D. With Hill
+# emission the Charged output is returned as is (it has no complex form
+# that would keep phase and charge apart).
 function (l::PhasorLSA)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
     y_phase, st2 = l(complex_to_angle(x), ps, st)
-    return angle_to_complex(y_phase), st2
+    return _attn_complex_out(y_phase), st2
 end
 
-# (iv) SpikingCall — trampoline to CurrentCall.
+# (iv) SpikingCall — trampoline to CurrentCall; a charged train is decoded
+# into a Charged field instead (see `_attn_spiking`).
 function (l::PhasorLSA)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
-    return l(CurrentCall(x), ps, st)
+    return _attn_spiking(l, x, ps, st)
 end
 
 # (v) CurrentCall — reconstruct 3D phase from the ODE solution, then 3D path.
@@ -604,11 +641,21 @@ richer cross-head interaction.
 - `init_mode::Symbol = :default` — `PhasorDense` λ-init mode for the K/V
   projections; uniform read heads (see `PhasorLSA` / `results/xform_mqar/`).
 - `spk_args::SpikingArgs = SpikingArgs()` — Shared spiking dynamics.
+- `emit_n::Real = Inf`, `init_log_theta::Real = 0`, `learn_theta::Bool = false`
+  — opt-in Hill emission of the output (see [`PhasorDense`](@ref) and
+  [`hill_charge`](@ref)): with finite `emit_n` the pre-activation output
+  `Y` is emitted as `Charged(phase, q(|Y|))` and `log_theta` (1-element) is
+  added to the parameters. The output amplitude is computed by the same
+  discrete arithmetic in both paths (the spiking dispatch attends on a
+  decoded per-cycle field), so θ means the same in both. The layer also
+  accepts a [`Charged`](@ref) input (charges enter the K/V(/Q) projections
+  as input amplitudes; in the spiking path they are read from the train).
 
 # Trainable parameters
 - `k_proj`, `v_proj` — bias-free `PhasorDense` parameter trees.
 - `anchors` — `(D, A)` Phase.
 - `scale` — 1-element `Vector{Float32}`.
+- `log_theta` — 1-element, only with Hill emission.
 """
 struct PhasorLCA <: Lux.AbstractLuxLayer
     in_dims::Int
@@ -619,26 +666,33 @@ struct PhasorLCA <: Lux.AbstractLuxLayer
     k_proj::PhasorDense
     v_proj::PhasorDense
     init_scale::Float32
+    emit_n::Float32          # Hill emission sharpness of the output; Inf = off
+    init_log_theta::Float32
+    learn_theta::Bool
 end
 
 function PhasorLCA(dims::Pair{Int,Int}, n_heads::Int, n_anchors::Int,
                    act = normalize_to_unit_circle;
                    init_scale::Real = 3f0,
                    init_mode::Symbol = :default,
-                   spk_args::SpikingArgs = SpikingArgs())
+                   spk_args::SpikingArgs = SpikingArgs(),
+                   emit_n::Real = Inf,
+                   init_log_theta::Real = 0f0,
+                   learn_theta::Bool = false)
     in_dims, d_model = dims.first, dims.second
     @assert d_model % n_heads == 0 "d_model ($d_model) must be divisible by n_heads ($n_heads)"
     k = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
     v = PhasorDense(in_dims => d_model; use_bias = false, init_mode = init_mode, spk_args = spk_args)
-    return PhasorLCA(in_dims, d_model, n_heads, n_anchors, act, k, v, Float32(init_scale))
+    return PhasorLCA(in_dims, d_model, n_heads, n_anchors, act, k, v, Float32(init_scale),
+                     _check_emit_n(emit_n), Float32(init_log_theta), learn_theta)
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::PhasorLCA)
     anchors = Phase.(2f0 .* rand(rng, Float32, l.d_model, l.n_anchors) .- 1f0)
-    return (k_proj  = Lux.initialparameters(rng, l.k_proj),
-            v_proj  = Lux.initialparameters(rng, l.v_proj),
-            anchors = anchors,
-            scale   = Float32[l.init_scale])
+    return merge((k_proj  = Lux.initialparameters(rng, l.k_proj),
+                  v_proj  = Lux.initialparameters(rng, l.v_proj),
+                  anchors = anchors,
+                  scale   = Float32[l.init_scale]), _theta_params(l))
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::PhasorLCA)
@@ -649,7 +703,7 @@ end
 function Lux.parameterlength(l::PhasorLCA)
     return Lux.parameterlength(l.k_proj) +
            Lux.parameterlength(l.v_proj) +
-           l.d_model * l.n_anchors + 1
+           l.d_model * l.n_anchors + 1 + _emits(l)
 end
 
 # Internal helper: bundle anchors per head, per (l, b), weighted by attention scores.
@@ -670,8 +724,12 @@ function _lca_anchor_mix(Ac::AbstractArray{<:Complex, 3}, w::AbstractArray{<:Rea
     return permutedims(Y, (1, 4, 2, 3))                          # (Dh, H, L, B)
 end
 
-# (i) 3D Phase — the workhorse path.
-function (l::PhasorLCA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTuple)
+# (i) 3D Phase (or Charged) — the workhorse path.
+function (l::PhasorLCA)(x::Union{AbstractArray{<:Phase, 3}, Charged}, ps::LuxParams, st::NamedTuple)
+    return _attn_emit(l, _attn_Y(l, x, ps, st), ps), st      # Phase (or Charged)
+end
+
+function _attn_Y(l::PhasorLCA, x, ps::LuxParams, st::NamedTuple)
     K, _ = l.k_proj(x, ps.k_proj, st.k_proj)              # (D, L, B) Phase
     V, _ = l.v_proj(x, ps.v_proj, st.v_proj)
 
@@ -691,28 +749,48 @@ function (l::PhasorLCA)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st::NamedTu
     Bundle = _lca_anchor_mix(Ac, weights)                 # (Dh, H, L, B) Complex
     Vc     = angle_to_complex(Vh)                         # (Dh, H, L, B) Complex
     Y      = Vc .* Bundle                                 # element-wise binding
-    Y      = reshape(Y, D, L, B)
-    Y_phase = complex_to_angle(Y)
-
-    return _apply_phase_activation(l.activation, Y_phase), st
+    return reshape(Y, D, L, B)
 end
 
 # (ii) 2D Phase — single-slice; wrap to 3D with L=1.
 function (l::PhasorLCA)(x::AbstractArray{<:Phase, 2}, ps::LuxParams, st::NamedTuple)
+    _no_emit_2d(l)
     x3 = reshape(x, size(x, 1), 1, size(x, 2))
     y3, st2 = l(x3, ps, st)
     return dropdims(y3, dims=2), st2
 end
 
-# (iii) Complex 3D back-compat — trampoline through Phase 3D.
+# (iii) Complex 3D back-compat — trampoline through Phase 3D (Charged output
+# returned as is, see PhasorLSA).
 function (l::PhasorLCA)(x::AbstractArray{<:Complex, 3}, ps::LuxParams, st::NamedTuple)
     y_phase, st2 = l(complex_to_angle(x), ps, st)
-    return angle_to_complex(y_phase), st2
+    return _attn_complex_out(y_phase), st2
 end
 
-# (iv) SpikingCall — trampoline to CurrentCall.
+# (iv) SpikingCall — trampoline to CurrentCall; a charged train is decoded
+# into a Charged field instead (see `_attn_spiking`).
 function (l::PhasorLCA)(x::SpikingCall, ps::LuxParams, st::NamedTuple)
-    return l(CurrentCall(x), ps, st)
+    return _attn_spiking(l, x, ps, st)
+end
+
+_attn_complex_out(y::AbstractArray{<:Phase}) = angle_to_complex(y)
+_attn_complex_out(y::Charged) = y
+
+_no_emit_2d(l) = _emits(l) &&
+    throw(ArgumentError("$(nameof(typeof(l))): Hill emission (emit_n < Inf) needs a 3D (C, L, B) input"))
+
+# Spiking dispatch of the local attention layers. A unit-charge train keeps
+# the original route (CurrentCall → reconstruct_from_current → discrete
+# attention; bit-identical when emission is off). A train with per-spike
+# charges is decoded exactly (spike phase and charge per neuron and cycle,
+# `ssm_train_to_charged`) and attended by the Charged discrete path — the
+# reconstructing resonator normalises amplitudes away, so it cannot carry q.
+function _attn_spiking(l, x::SpikingCall, ps::LuxParams, st::NamedTuple)
+    x.train.charges === nothing && return l(CurrentCall(x), ps, st)
+    xc = ssm_train_to_charged(x)
+    xc = x.train isa SpikeTrainGPU ? Charged(to_device_of(x.train.times, xc.phase),
+                                             to_device_of(x.train.times, xc.q)) : xc
+    return l(xc, ps, st)
 end
 
 # (v) CurrentCall — reconstruct 3D phase from the ODE solution, then 3D path.
@@ -741,11 +819,17 @@ at a time determined by the phase at that step.
 - `phases`: (C × L × B) Phase array — channels × time steps × batch
 - `spk_args::SpikingArgs`: Spiking parameters (uses `t_period` for temporal mapping)
 
+# Keyword arguments
+- `charges = nothing`: optional `(C, L, B)` per-element charge (Hill
+  emission). When given, the train carries one charge per spike (same order
+  as the spikes); `nothing` → unit-charge train (unchanged).
+
 # Returns
 SpikeTrain with `shape=(C, B)` containing `C*L*B` spikes total.
 Time step `l` maps to period `[(l-1)*t_period, l*t_period)`.
 """
-function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs)
+function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::SpikingArgs,
+                             charges::Union{Nothing, AbstractArray{<:Real, 3}} = nothing)
     C, L, B = size(phases)
     shape = (C, B)
     period = spk_args.t_period
@@ -769,7 +853,11 @@ function ssm_phases_to_train(phases::AbstractArray{<:Phase, 3}; spk_args::Spikin
         end
     end
 
-    return SpikeTrain(all_indices, all_times, shape, 0.0f0)
+    # Spike order is l outermost, then column-major (c, b) — i.e. the
+    # (C, B, L) permutation of the (C, L, B) charge tensor.
+    q = charges === nothing ? nothing :
+        vec(permutedims(Float32.(Array(charges)), (1, 3, 2)))
+    return SpikeTrain(all_indices, all_times, shape, 0.0f0, q)
 end
 
 """
@@ -1022,6 +1110,12 @@ function (::PhaseRecenter)(x::AbstractArray{<:Phase}, ps::LuxParams, st::NamedTu
     mθ = complex_to_angle(sum(z, dims = 1))   # circular mean angle over channels
     return v_bind(x, .-mθ), st
 end
+# Charged stream: recenter the phase (unweighted circular mean, as the spiking
+# mean unit), pass the charge through.
+function (r::PhaseRecenter)(x::Charged, ps::LuxParams, st::NamedTuple)
+    y, st2 = r(x.phase, ps, st)
+    return Charged(y, x.q), st2
+end
 
 """
     PhasorResidual(layer; gate = :none, alpha0 = 0.1f0) <: Lux.AbstractLuxLayer
@@ -1074,9 +1168,25 @@ Lux.parameterlength(r::PhasorResidual) =
 
 function (r::PhasorResidual)(x, ps::LuxParams, st::NamedTuple)
     branch, st_layer = r.layer(x, ps.layer, st.layer)
-    y = r.gate === :rezero ? v_bind(x, ps.alpha .* branch) : v_bind(x, branch)
+    y = r.gate === :rezero ? _res_bind(x, ps.alpha, branch) : _res_bind(x, branch)
     return y, (layer = st_layer,)
 end
+
+# Residual combine. Phase ⊕ Phase is the original `v_bind(x, g·b)`. With Hill
+# emission the combine is a relay (no rule of its own): the output keeps the
+# skip's charge q_x, and the branch's phase shift is scaled by the branch
+# charge, φ_x + g·q_b·φ_b — extending the "silent branch = no shift"
+# convention of `spike_phase_bind` to graded charge.
+_res_bind(x, b) = v_bind(x, b)
+_res_bind(x, α, b) = v_bind(x, α .* b)
+_res_bind(x::Charged, b) = Charged(v_bind(x.phase, _branch_shift(b)), x.q)
+_res_bind(x::Charged, α, b) = Charged(v_bind(x.phase, α .* _branch_shift(b)), x.q)
+_res_bind(x, b::Charged) = v_bind(x, _branch_shift(b))
+_res_bind(x, α, b::Charged) = v_bind(x, α .* _branch_shift(b))
+_res_bind(x::Charged, b::Charged) = Charged(v_bind(x.phase, _branch_shift(b)), x.q)
+_res_bind(x::Charged, α, b::Charged) = Charged(v_bind(x.phase, α .* _branch_shift(b)), x.q)
+_branch_shift(b) = b
+_branch_shift(b::Charged) = b.q .* b.phase
 
 """
     PhasorTransformerBlock(d_model, attn; d_ff = d_model,
@@ -1140,6 +1250,20 @@ one spike per channel per cycle). Stacks of blocks: [`ScanStack`](@ref).
 - `attn_res::PhasorResidual` — residual-wrapped attention (+ optional pre-norm).
 - `ffn_res::PhasorResidual` — residual-wrapped feed-forward MLP (+ optional pre-norm).
 
+# Hill emission (opt-in)
+`ffn_emit_n` (default `Inf` = off), `ffn_init_log_theta` (a `Real`, or a
+`(θ₁, θ₂)` tuple of `log θ` for the two FFN layers) and `ffn_learn_theta` are
+passed to both FFN `PhasorDense` layers (see [`PhasorDense`](@ref)). The
+attention output's emission is configured on the attention layer itself
+(`PhasorLSA`/`PhasorLCA(...; emit_n, init_log_theta)`). The residual
+combines and the optional pre-norm are relays: the output keeps the skip's
+charge and the branch's phase shift is scaled by the branch's charge (see
+`PhasorResidual`, [`spike_phase_bind`](@ref)); the block then accepts and
+returns a [`Charged`](@ref) stream in the discrete path and a charged spike
+train in the spiking path. Off-torus internals (Q/K/V projections, anchors,
+biases) have no emission rule. Per-depth θ in a [`ScanStack`](@ref) lives in
+`ps.blocks[i]` (see [`emission_amplitudes`](@ref), [`set_emission_theta`](@ref)).
+
 See also: [`PhasorResidual`](@ref), [`PhaseRecenter`](@ref),
 [`ResidualBlock`](@ref), [`PhasorLSA`](@ref), [`PhasorLCA`](@ref).
 """
@@ -1158,19 +1282,26 @@ function PhasorTransformerBlock(d_model::Int, attn;
                                ffn_n_modes::Int = 1,
                                ffn_hippo_tau_max::Union{Real, Nothing} = nothing,
                                ffn_hippo_tau_min::Union{Real, Nothing} = nothing,
+                               ffn_emit_n::Real = Inf,
+                               ffn_init_log_theta::Union{Real, Tuple{Real, Real}} = 0f0,
+                               ffn_learn_theta::Bool = false,
                                recenter::Bool = false)
     iw = (rng, dims...) -> Float32(branch_init_scale) .* glorot_uniform(rng, dims...)
+    (isfinite(ffn_emit_n) && ffn_n_modes > 1) &&
+        throw(ArgumentError("ffn_emit_n: Hill emission is implemented for PhasorDense FFN layers (ffn_n_modes = 1) only"))
+    lt1, lt2 = ffn_init_log_theta isa Tuple ? ffn_init_log_theta : (ffn_init_log_theta, ffn_init_log_theta)
     # FFN sublayers: plain PhasorDense (ffn_n_modes=1) or MultiModePhasorDense
     # (ffn_n_modes>1 — the SSM state-expansion knob). Both consume the λ-range
     # knobs (ffn_hippo_tau_max/min).
-    mk_ffn(a, b) = ffn_n_modes > 1 ?
+    mk_ffn(a, b, lt) = ffn_n_modes > 1 ?
         MultiModePhasorDense(a => b, ffn_n_modes, activation; use_bias = true,
                              init_weight = iw, init_mode = ffn_init_mode,
                              hippo_tau_max = ffn_hippo_tau_max, hippo_tau_min = ffn_hippo_tau_min) :
         PhasorDense(a => b, activation; use_bias = true, init_weight = iw,
                     init_mode = ffn_init_mode,
-                    hippo_tau_max = ffn_hippo_tau_max, hippo_tau_min = ffn_hippo_tau_min)
-    ffn = Chain(mk_ffn(d_model, d_ff), mk_ffn(d_ff, d_model))
+                    hippo_tau_max = ffn_hippo_tau_max, hippo_tau_min = ffn_hippo_tau_min,
+                    emit_n = ffn_emit_n, init_log_theta = lt, learn_theta = ffn_learn_theta)
+    ffn = Chain(mk_ffn(d_model, d_ff, lt1), mk_ffn(d_ff, d_model, lt2))
     attn_branch = recenter ? Chain(PhaseRecenter(), attn) : attn
     ffn_branch  = recenter ? Chain(PhaseRecenter(), ffn) : ffn
     attn_res = PhasorResidual(attn_branch; gate = gate, alpha0 = alpha0)
@@ -1308,14 +1439,36 @@ end
 _spike_time_table(train::SpikeTrainGPU, L::Int, T::Real) =
     _spike_time_table(SpikeTrain(train), L, T)
 
+# Twin of `_spike_time_table` for per-spike charges (Hill emission): (N, L)
+# table of the charge of each neuron's spike in each cycle, 0 where silent and
+# 1 for a spike of a train without charges (unit charge). Same cycle
+# assignment and last-event-wins rule as the time table.
+function _spike_charge_table(train::SpikeTrain, L::Int, T::Real)
+    T = Float32(T)
+    shape = train.shape
+    lin = LinearIndices(shape)
+    tab = zeros(Float32, prod(shape), L)
+    for (j, (idx, t)) in enumerate(zip(train.indices, train.times))
+        l = floor(Int, (t - train.offset) / T) + 1
+        (1 <= l <= L) || continue
+        tab[lin[idx], l] = train.charges === nothing ? 1f0 : train.charges[j]
+    end
+    return tab
+end
+_spike_charge_table(train::SpikeTrainGPU, L::Int, T::Real) =
+    _spike_charge_table(SpikeTrain(train), L, T)
+
 # Inverse of `_spike_time_table`: drop silent entries, rebuild a train on the
 # same device as `like`.
-function _table_to_train(tab::AbstractMatrix{Float32}, shape::Tuple, offset::Real, like)
+# An optional (N, L) charge table `qtab` gives the surviving spikes their charges.
+function _table_to_train(tab::AbstractMatrix{Float32}, shape::Tuple, offset::Real, like,
+                         qtab::Union{Nothing, AbstractMatrix{Float32}} = nothing)
     cart = CartesianIndices(shape)
     keep = findall(!isnan, tab)
     inds = [cart[k[1]] for k in keep]
     times = Float32[tab[k] for k in keep]
-    train = SpikeTrain(inds, times, shape, offset)
+    q = qtab === nothing ? nothing : Float32[qtab[k] for k in keep]
+    train = SpikeTrain(inds, times, shape, offset, q)
     return like isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
 end
 
@@ -1348,6 +1501,11 @@ reading and the ⚠ timing idealisation).
 Silent neurons: a silent branch contributes no shift (the `v_bind` identity
 element, phase 0); a silent skip neuron stays silent.
 
+Charged trains (Hill emission): the branch spike's lead/lag is further scaled
+by its charge, `gain · q_b · (t_b − t_ref)` (graded version of "silent branch =
+no shift"), and the output spikes carry the skip spikes' charges — the
+combine unit is a relay. Unit-charge trains are unchanged.
+
 Inference only — not differentiable (the event-driven table is built
 outside the AD graph).
 """
@@ -1361,8 +1519,12 @@ function spike_phase_bind(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
     start = _cycle_starts(off, L, T)
     t_ref = start .+ Float32(T) / 2f0
     Δb = ifelse.(isnan.(tb), 0f0, tb .- t_ref)          # branch lead/lag vs reference
+    if b.train.charges !== nothing
+        Δb = Δb .* _spike_charge_table(b.train, L, T)   # charge-scaled shift
+    end
     t_out = start .+ mod.(tx .- start .+ Float32(gain) .* Δb, Float32(T))
-    train = _table_to_train(t_out, x.train.shape, off, x.train)
+    qx = x.train.charges === nothing ? nothing : _spike_charge_table(x.train, L, T)
+    train = _table_to_train(t_out, x.train.shape, off, x.train, qx)
     return SpikingCall(train, x.spk_args, x.t_span)
 end
 
@@ -1381,6 +1543,8 @@ timing idealisation as [`spike_phase_bind`](@ref). Inference only.
 """
 function spike_phase_bundle(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
     _check_compatible(x, b)
+    b.train.charges === nothing ||
+        throw(ArgumentError("spike_phase_bundle: charged branch trains (Hill emission) are not supported"))
     T = x.spk_args.t_period
     L = _n_cycles(x)
     off = x.train.offset
@@ -1393,7 +1557,8 @@ function spike_phase_bundle(x::SpikingCall, b::SpikingCall; gain::Real = 1f0)
     J = Float32(gain)
     Δ = (Float32(T) / twoπ) .* atan.(J .* sin.(θb), 1f0 .+ J .* cos.(θb))
     t_out = start .+ mod.(tx .- start .+ Δ, Float32(T))
-    train = _table_to_train(t_out, x.train.shape, off, x.train)
+    qx = x.train.charges === nothing ? nothing : _spike_charge_table(x.train, L, T)
+    train = _table_to_train(t_out, x.train.shape, off, x.train, qx)
     return SpikingCall(train, x.spk_args, x.t_span)
 end
 
@@ -1412,7 +1577,8 @@ advanced by the mean unit's lead/lag relative to the reference — the same
 delay unit as [`spike_phase_bind`](@ref) with gain −1. Only spike times cross
 between units (the resonator's amplitude stays inside the mean unit). Silent
 channels do not contribute to the mean. Same ⚠ timing idealisation as
-`spike_phase_bind`.
+`spike_phase_bind`. Charged trains: each spike keeps its charge (the mean
+unit counts every spike with unit weight, as the discrete `PhaseRecenter`).
 """
 function spike_phase_recenter(x::SpikingCall)
     T = Float32(x.spk_args.t_period)
@@ -1433,7 +1599,8 @@ function spike_phase_recenter(x::SpikingCall)
     tx3 = reshape(tx, C, rest, L)
     st3 = reshape(start, 1, 1, L)
     t_out = st3 .+ mod.(tx3 .- st3 .- t_mean, T)
-    train = _table_to_train(reshape(t_out, :, L), shape, off, x.train)
+    qx = x.train.charges === nothing ? nothing : _spike_charge_table(x.train, L, T)
+    train = _table_to_train(reshape(t_out, :, L), shape, off, x.train, qx)
     return SpikingCall(train, x.spk_args, x.t_span)
 end
 
@@ -1462,6 +1629,38 @@ function ssm_train_to_phases(call::SpikingCall)
     return reshape(permutedims(φ3, (1, 3, 2)), C, L, rest...)
 end
 
+# (N, L) table → (C, L, rest...) field, the layout of `ssm_train_to_phases`.
+function _table_to_field(tab::AbstractMatrix, shape::Tuple)
+    L = size(tab, 2)
+    length(shape) == 1 && return tab
+    C = shape[1]
+    rest = shape[2:end]
+    return reshape(permutedims(reshape(tab, C, prod(rest), L), (1, 3, 2)), C, L, rest...)
+end
+
+"""
+    ssm_train_to_charged(call::SpikingCall) -> Charged
+
+Decode a spike train with one event per neuron per carrier cycle into a
+[`Charged`](@ref) `(C, L, B)` stream: the phase of each spike (as
+[`ssm_train_to_phases`](@ref)) and its charge (`train.charges`, or 1 for a
+unit-charge train). A silent neuron decodes to phase 0 with charge 0 — the
+discrete equivalent of no spike. Pure timing/charge readout — no ODE.
+Inverse of `ssm_phases_to_train(phases; charges)`.
+"""
+function ssm_train_to_charged(call::SpikingCall)
+    T = Float32(call.spk_args.t_period)
+    L = _n_cycles(call)
+    tr = call.train
+    length(tr.shape) == 2 ||
+        throw(ArgumentError("ssm_train_to_charged expects a (C, B) train shape, got $(tr.shape)"))
+    tab = _spike_time_table(tr, L, T)
+    start = _cycle_starts(tr.offset, L, T)
+    φ = ifelse.(isnan.(tab), 0f0, 2f0 .* (tab .- start) ./ T .- 1f0)
+    q = _spike_charge_table(tr, L, T)
+    return Charged(Phase.(_table_to_field(φ, tr.shape)), _table_to_field(q, tr.shape))
+end
+
 # Bring a branch output back onto spikes, as the branch's output neurons
 # emitting one spike per cycle at their phase. Layers whose spiking dispatch
 # already emits a train pass through; layers whose spiking dispatch returns a
@@ -1478,7 +1677,21 @@ function _as_spike_call(y::AbstractArray{<:Phase, 3}, ref::SpikingCall)
     train = ssm_phases_to_train(Array(y); spk_args = ref.spk_args)
     off = ref.train.offset
     if off != 0f0
-        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off)
+        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off, train.charges)
+    end
+    train = ref.train isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
+    return SpikingCall(train, ref.spk_args, ref.t_span)
+end
+# Hill-emitting branch (PhasorLSA/PhasorLCA with emit_n): one spike per
+# channel per cycle at the phase, carrying the charge.
+function _as_spike_call(y::Charged, ref::SpikingCall)
+    L = _n_cycles(ref)
+    size(y, 2) == L ||
+        throw(DimensionMismatch("branch returned $(size(y, 2)) cycles, expected $L"))
+    train = ssm_phases_to_train(Array(y.phase); spk_args = ref.spk_args, charges = Array(y.q))
+    off = ref.train.offset
+    if off != 0f0
+        train = SpikeTrain(train.indices, train.times .+ off, train.shape, off, train.charges)
     end
     train = ref.train isa SpikeTrainGPU ? SpikeTrainGPU(train) : train
     return SpikingCall(train, ref.spk_args, ref.t_span)
@@ -1533,3 +1746,93 @@ end
 # PhasorTransformerBlock and ScanStack need no extra methods: their forward
 # passes are mode-agnostic compositions of PhasorResidual / PhaseRecenter /
 # the wrapped block, so a SpikingCall flows through them spike-in, spike-out.
+
+# ================================================================
+# 10. Hill emission: amplitude probe and θ setting
+# ================================================================
+
+"""
+    emission_amplitudes(model, ps, st, x) -> amps
+
+Discrete-path probe of the amplitude `r` at every **wire emission site** of
+`model` on input `x`: the pre-emission `|Z|` of each `PhasorDense` whose
+output goes onto the wire (encoder, FFN layers) and the output `|Y|` of each
+`PhasorLSA`/`PhasorLCA`. Off-torus internals (the attention Q/K/V
+projections) are not sites. Works on emitting and non-emitting models (the
+probe runs the model's own forward, so with emission on, downstream sites see
+charged inputs). Runs inside `ignore_derivatives`.
+
+Returns a tree mirroring `ps`: each site is `(r = Array,)` (shape `(C, L, B)`),
+other leaves are `nothing`; a `ScanStack` gives `(blocks = [tree_1, …],)`. Pass
+it to [`set_emission_theta`](@ref) to set θ from quantiles of a baseline model.
+Supported containers: `Chain`, `ScanStack`, `PhasorTransformerBlock`,
+`PhasorResidual`; other layers are run as-is and contribute no site.
+"""
+function emission_amplitudes(model, ps, st, x)
+    return ignore_derivatives() do
+        first(_emit_probe(model, x, ps, st))
+    end
+end
+
+# Each method returns (amplitude tree, output).
+function _emit_probe(c::Chain, x, ps, st)
+    ks = keys(c.layers)
+    amps = Vector{Any}(undef, length(ks))
+    for (i, k) in enumerate(ks)
+        amps[i], x = _emit_probe(c.layers[k], x, ps[k], st[k])
+    end
+    return NamedTuple{ks}(Tuple(amps)), x
+end
+function _emit_probe(s::ScanStack, x, ps, st)
+    amps = Any[]
+    for i in 1:s.depth
+        a, x = _emit_probe(s.block, x, ps.blocks[i], st.block)
+        push!(amps, a)
+    end
+    return (blocks = amps,), x
+end
+function _emit_probe(b::PhasorTransformerBlock, x, ps, st)
+    a1, h = _emit_probe(b.attn_res, x, ps.attn_res, st.attn_res)
+    a2, y = _emit_probe(b.ffn_res, h, ps.ffn_res, st.ffn_res)
+    return (attn_res = a1, ffn_res = a2), y
+end
+function _emit_probe(r::PhasorResidual, x, ps, st)
+    a, branch = _emit_probe(r.layer, x, ps.layer, st.layer)
+    y = r.gate === :rezero ? _res_bind(x, ps.alpha, branch) : _res_bind(x, branch)
+    return (layer = a,), y
+end
+function _emit_probe(a::PhasorDense, x::Union{AbstractArray{<:Phase, 3}, Charged}, ps, st)
+    Z = _dense_dirac_Z(a, x, ps)
+    return (r = abs.(Z),), _dense_dirac_out(a, Z, ps)
+end
+function _emit_probe(l::Union{PhasorLSA, PhasorLCA}, x::Union{AbstractArray{<:Phase, 3}, Charged}, ps, st)
+    Y = _attn_Y(l, x, ps, st)
+    return (r = abs.(Y),), _attn_emit(l, Y, ps)
+end
+_emit_probe(l, x, ps, st) = (nothing, first(l(x, ps, st)))
+
+"""
+    set_emission_theta(ps, amps; q = 0.5) -> ps′
+
+Set θ at every emission site in `amps` (from [`emission_amplitudes`](@ref))
+to the `q`-quantile of that site's amplitudes: adds or overwrites
+`log_theta = [log(quantile(r, q))]` in the matching leaf of `ps` (so `ps` of a
+non-emitting baseline model becomes a valid parameter tree for the same
+architecture built with emission on). `q` may also be a function `r -> θ`.
+Each `ScanStack` depth gets its own θ.
+"""
+function set_emission_theta(ps::NamedTuple, amps::NamedTuple; q = 0.5)
+    if haskey(amps, :r) && amps.r isa AbstractArray
+        r = vec(Array(amps.r))
+        θ = q isa Function ? q(r) : quantile(r, q)
+        θ > 0 || throw(ArgumentError("θ must be > 0 at every emission site (got $θ)"))
+        return merge(ps, (log_theta = to_device_of(amps.r, Float32[log(θ)]),))
+    end
+    vals = map(keys(ps)) do k
+        (haskey(amps, k) && amps[k] !== nothing) ? set_emission_theta(ps[k], amps[k]; q) : ps[k]
+    end
+    return NamedTuple{keys(ps)}(vals)
+end
+set_emission_theta(ps::AbstractVector, amps::AbstractVector; q = 0.5) =
+    [set_emission_theta(p, a; q) for (p, a) in zip(ps, amps)]
+set_emission_theta(ps, amps; q = 0.5) = ps

@@ -396,11 +396,18 @@ and  `H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])`.
 - `λ::AbstractVector` — (C_out,) per-channel decay rates
 - `ω::AbstractVector` — (C_out,) per-channel angular frequencies
 - `T::Real` — Oscillation period
+
+# Keyword arguments
+- `charges = nothing` — optional `(C_in, L, B)` per-spike charge (Hill
+  emission): each input spike enters with amplitude `q` instead of 1, i.e.
+  `H_c[n] = Σ_j W[c,j] · q_j[n] · exp(k_c · dt_j[n])`. `nothing` = unit
+  charge (unchanged path). A [`Charged`](@ref) input supplies them itself.
 """
 function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
                            W::AbstractMatrix{<:Real},
                            λ::AbstractVector, ω::AbstractVector, T::Real;
-                           group_size::Int = 8)
+                           group_size::Int = 8,
+                           charges::Union{Nothing, AbstractArray{<:Real, 3}} = nothing)
     C_in, L, B = size(phases)
     C_out = length(λ)
     k_c = ComplexF32.(λ .+ im .* ω)                        # (C_out,)
@@ -419,11 +426,17 @@ function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
     W_c = ComplexF32.(W)                                    # (C_out, C_in)
     dt_flat = reshape(dt, 1, C_in, L * B)                  # (1, C_in, L*B)
     G = min(group_size, C_out)
+    charges === nothing || size(charges) == size(phases) ||
+        throw(DimensionMismatch("charges $(size(charges)) must match phases $(size(phases))"))
+    q_flat = charges === nothing ? nothing : reshape(charges, 1, C_in, L * B)   # (1, C_in, L*B)
 
     H_slices = map(1:G:C_out) do c_start
         c_end = min(c_start + G - 1, C_out)
         k_group = reshape(k_c[c_start:c_end], :, 1, 1)     # (g, 1, 1)
         enc = _exp_kdt(k_group, dt_flat)                     # (g, C_in, L*B); custom rrule avoids Dual blowup
+        if q_flat !== nothing
+            enc = enc .* q_flat                              # charged spikes: amplitude q
+        end
         w_group = reshape(W_c[c_start:c_end, :], :, C_in, 1) # (g, C_in, 1)
         h = sum(w_group .* enc; dims=2)                      # (g, 1, L*B)
         reshape(dropdims(h; dims=2), :, L, B)                # (g, L, B)
@@ -437,6 +450,63 @@ function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
 
     return causal_conv(K, H)
 end
+
+causal_conv_dirac(x::Charged, W::AbstractMatrix{<:Real}, λ::AbstractVector,
+                  ω::AbstractVector, T::Real; kwargs...) =
+    causal_conv_dirac(x.phase, W, λ, ω, T; charges = x.q, kwargs...)
+
+# ================================================================
+# 3b. Hill emission (per-spike charge)
+# ================================================================
+
+"""
+    hill_charge(r, log_theta, n) -> q
+
+Hill emission charge `q = rⁿ/(rⁿ + θⁿ)` with `θ = exp(log_theta)`, evaluated
+as `σ(n·(log r − log θ))` (identical value; finite gradients for every `r > 0`
+and every `n`). `log_theta` broadcasts against `r` (a 1-element vector = one
+θ per layer; a `(C,)` vector = one per channel). `n = 1` gives
+`q = r/(r + θ)`.
+
+Used wherever a unit's complex state `z` is emitted onto the wire with
+`emit_n < Inf`: the wire carries charge `q(|z|)` with the phase of `z`
+(see [`Charged`](@ref), and the per-spike `charges` of [`SpikeTrain`](@ref)).
+"""
+hill_charge(r::AbstractArray{<:Real}, log_theta, n::Real) =
+    sigmoid.(Float32(n) .* (log.(r) .- log_theta))
+
+# |z| regularised at the origin (r ≥ 1e-6): keeps log r finite and the
+# gradient d r / d z = z / r at z = 0 equal to 0.
+_emit_r(z::AbstractArray{<:Complex}) = sqrt.(abs2.(real.(z)) .+ abs2.(imag.(z)) .+ 1f-12)
+
+# Emit a complex state field Z (C, L, B) with Hill emission: Charged(phase(Y), q(|Z|)),
+# Y = activation(Z) (the activation only shapes the phase, as without emission).
+# θ is frozen (no gradient) unless `learn_theta`.
+function _hill_emit(Z::AbstractArray{<:Complex, 3}, log_theta, n::Real, learn_theta::Bool;
+                    phase = complex_to_angle(Z))
+    lt = learn_theta ? log_theta : ignore_derivatives(log_theta)
+    return Charged(phase, hill_charge(_emit_r(Z), lt, n))
+end
+
+# Dirac ↔ ODE amplitude map for emission in the spiking path. One spike
+# delivers the current spk_scale·k(t − t_s) with the raised-cosine kernel k of
+# half-width 2·t_window, whose integral is 2·t_window; the discrete (Dirac)
+# path models the same spike as a unit impulse. The resonator is linear and
+# the kernel is short against the period, so the cycle-sample ODE amplitude
+# is |u| ≈ g·|Z_dirac| with g = 2·t_window·spk_scale (verified in
+# test_hill_emission.jl). The bias current carries no spk_scale, so with
+# spk_scale ≠ 1 the ODE and Dirac paths already disagree on the signal/bias
+# balance; spk_scale = 1 is the parity case.
+_emit_gain(spk_args::SpikingArgs) = 2f0 * spk_args.t_window * spk_args.spk_scale
+
+# charge_fn for `solution_to_train`: ODE amplitude |u| → q(|u|/g); θ is in Dirac units.
+function _spike_charge_fn(log_theta, n::Real, spk_args::SpikingArgs)
+    g = _emit_gain(spk_args)
+    lt = ignore_derivatives(log_theta)
+    return r -> hill_charge(max.(r ./ g, 1f-6), lt, n)
+end
+
+_check_emit_n(n::Real) = (n > 0 || throw(ArgumentError("emit_n must be > 0 (Inf = off), got $n")); Float32(n))
 
 # ================================================================
 # 4. HiPPO-LegS Initialization

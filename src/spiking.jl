@@ -66,9 +66,9 @@ function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
 
     if !on_gpu(train.indices)
-        new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
+        new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset, train.charges)
     else
-        new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset)
+        new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset, train.charges)
     end
 
     return new_train
@@ -274,8 +274,17 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
         # repeated indices (each duplicate is written from the same
         # pre-update value), so coincident spikes on one input would be
         # dropped. The loop matches the GPU path's atomic scatter-add.
-        for (j, i) in enumerate(active_inds)
-            current[i] += scale * impulses[j]
+        # Charged spikes (Hill emission) deliver q·kernel; `charges ===
+        # nothing` keeps the unit-charge loop unchanged (bit-identical).
+        if train.charges === nothing
+            for (j, i) in enumerate(active_inds)
+                current[i] += scale * impulses[j]
+            end
+        else
+            active_q = train.charges[active]
+            for (j, i) in enumerate(active_inds)
+                current[i] += scale * active_q[j] * impulses[j]
+            end
         end
     end
 
@@ -298,6 +307,9 @@ function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
     #add currents into the synapses
     current_kernel = x -> raised_cosine_kernel(x, t, spk_args.t_window)
     impulses = scale .* current_kernel(train.times)
+    if train.charges !== nothing
+        impulses = impulses .* train.charges
+    end
     current = parallel_scatter_add(train.linear_indices, impulses, train.linear_shape)
     current = reshape(current, train.shape)
 
@@ -358,7 +370,7 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
     all_indices = vcat(all_indices...)
     all_times = reduce(vcat, collect(t.times for t in trains))
 
-    new_train = SpikeTrain(all_indices, all_times, new_shape, offset)
+    new_train = SpikeTrain(all_indices, all_times, new_shape, offset, _cat_charges(trains))
     return new_train
 end
 
@@ -555,7 +567,7 @@ function vcat_trains(trains::SpikeTrain...)
     end
     
     # Create output train with combined spikes
-    output_train = SpikeTrain(all_indices, all_times, shape, offset)
+    output_train = SpikeTrain(all_indices, all_times, shape, offset, _cat_charges(trains))
     
     return output_train
 end

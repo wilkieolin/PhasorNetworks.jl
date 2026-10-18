@@ -18,10 +18,10 @@ import ChainRulesCore
 import Random
 using Random: GLOBAL_RNG, AbstractRNG
 using Interpolations: linear_interpolation
-using Statistics: cor, mean, std
+using Statistics: cor, mean, std, quantile
 using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
-using NNlib: batched_mul, softmax
+using NNlib: batched_mul, softmax, sigmoid
 using FFTW  # registers CPU FFT methods with AbstractFFTs
 using AbstractFFTs: fft, ifft
 using Base: @kwdef
