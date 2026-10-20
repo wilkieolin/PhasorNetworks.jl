@@ -173,4 +173,18 @@ function gpu_kernel_compile_tests()
                 PhasorNetworks.raised_cosine_kernel(Float32[1.005], 1.0f0, spk_args.t_window)[1])
         end
     end
+
+    # `solution_to_train` on a device array: its period offsets are built on
+    # the host from `times` and must be moved to the device before the
+    # broadcast (failed to compile on CUDA and oneAPI before).
+    @testset "solution_to_train on device matches host" begin
+        spk_args = SpikingArgs()
+        u = randn(Xoshiro(5), ComplexF32, 3, 4, 5)
+        times = collect(1.0f0:5.0f0)
+        tr = solution_to_train(u, times; spk_args = spk_args, offset = 0.0f0)
+        tr_gpu = solution_to_train(u |> GPU_DEV, times; spk_args = spk_args, offset = 0.0f0)
+        @test on_gpu(tr_gpu)
+        @test Array(tr_gpu.indices) == tr.indices
+        @test maximum(abs.(Array(tr_gpu.times) .- tr.times)) < 1e-5
+    end
 end

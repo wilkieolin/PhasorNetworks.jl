@@ -368,6 +368,74 @@ function _sum_broadcast_dims(x::AbstractArray, target_shape::NTuple{N,Int}) wher
 end
 
 """
+    _dirac_encode_sum(k, W, dt, q, G) -> ComplexF32 (C_out × N)
+
+`H[c, n] = Σ_j W[c,j] · q[j,n] · exp(k[c] · dt[j,n])` (`q === nothing` = unit
+charge), computed `G` output channels at a time so only a `(G, C_in, N)`
+encoding exists at once. `k` is `(C_out,)` complex, `W` `(C_out, C_in)` real,
+`dt` and `q` `(C_in, N)` real.
+
+The rrule recomputes each group's encoding in the pullback instead of saving
+it. Under plain Zygote every group's `(G, C_in, N)` tensor stayed on the tape,
+so a gradient step held O(C_out · C_in · N) memory: ~63 GiB for one
+PhasorLCA 256→256 at L 500, B 16. With the rrule the tape holds only the
+inputs, and the backward pass peaks at a few `(G, C_in, N)` temporaries.
+"""
+function _dirac_encode_sum(k::AbstractVector, W::AbstractMatrix{<:Real},
+                           dt::AbstractMatrix, q, G::Int)
+    C_out, C_in = size(W)
+    N = size(dt, 2)
+    W_c = ComplexF32.(W)
+    dt_r = reshape(dt, 1, C_in, N)
+    q_r = q === nothing ? nothing : reshape(q, 1, C_in, N)
+    H_slices = map(1:G:C_out) do c_start
+        cs = c_start:min(c_start + G - 1, C_out)
+        enc = _exp_kdt(reshape(k[cs], :, 1, 1), dt_r)       # (g, C_in, N)
+        q_r === nothing || (enc = enc .* q_r)
+        dropdims(sum(reshape(W_c[cs, :], :, C_in, 1) .* enc; dims=2); dims=2)  # (g, N)
+    end
+    return reduce(vcat, H_slices)
+end
+
+function ChainRulesCore.rrule(::typeof(_dirac_encode_sum), k::AbstractVector,
+                              W::AbstractMatrix{<:Real}, dt::AbstractMatrix, q, G::Int)
+    H = _dirac_encode_sum(k, W, dt, q, G)
+    function _dirac_encode_sum_pullback(H̄_)
+        H̄ = unthunk(H̄_)
+        H̄ isa ChainRulesCore.AbstractZero &&
+            return (NoTangent(), ZeroTangent(), ZeroTangent(), ZeroTangent(), ZeroTangent(), NoTangent())
+        C_out, C_in = size(W)
+        N = size(dt, 2)
+        dt_r = reshape(dt, 1, C_in, N)
+        q_r = q === nothing ? nothing : reshape(q, 1, C_in, N)
+        Wf = Float32.(W)
+        k̄ = similar(k, ComplexF32, C_out)
+        W̄ = similar(Wf, Float32, C_out, C_in)
+        dt̄ = fill!(similar(dt, Float32, C_in, N), 0f0)
+        q̄ = q === nothing ? NoTangent() : fill!(similar(q, Float32, C_in, N), 0f0)
+        for c_start in 1:G:C_out
+            cs = c_start:min(c_start + G - 1, C_out)
+            kg = reshape(k[cs], :, 1, 1)                          # (g, 1, 1)
+            Wg = reshape(Wf[cs, :], :, C_in, 1)                   # (g, C_in, 1)
+            Bc = conj.(_exp_kdt(kg, dt_r)) .* reshape(H̄[cs, :], :, 1, N)   # conj(e)·H̄, (g, C_in, N)
+            if q_r !== nothing
+                # q̄[j,n] = Re Σ_c W[c,j] conj(e) H̄
+                q̄ .+= dropdims(real.(sum(Wg .* Bc; dims=1)); dims=1)
+                Bc = Bc .* q_r                                    # conj(q e)·H̄
+            end
+            # W real: W̄[c,j] = Re Σ_n conj(q e) H̄
+            W̄[cs, :] .= dropdims(real.(sum(Bc; dims=3)); dims=3)
+            # k̄[c] = Σ_{j,n} W dt conj(q e) H̄   (holomorphic in k)
+            k̄[cs] .= vec(sum(Wg .* dt_r .* Bc; dims=(2, 3)))
+            # dt̄[j,n] = Re Σ_c W conj(k) conj(q e) H̄
+            dt̄ .+= dropdims(real.(sum(Wg .* conj.(kg) .* Bc; dims=1)); dims=1)
+        end
+        return (NoTangent(), k̄, W̄, dt̄, q̄, NoTangent())
+    end
+    return H, _dirac_encode_sum_pullback
+end
+
+"""
     causal_conv_dirac(phases, W, λ, ω, T) -> ComplexF32 (C_out × L × B)
 
 Causal convolution with Dirac discretization for phase-valued inputs.
@@ -418,30 +486,16 @@ function causal_conv_dirac(phases::AbstractArray{<:Phase, 3},
     # type's promotion rules), so no explicit cast is needed.
     dt = _spike_dt(phases, T_f)                            # (C_in, L, B) Float32
 
-    # Grouped diagonal encoding: compute H_c[n] = Σ_j W[c,j] · exp(k_c · dt_j[n])
-    # Processes G output channels at once to reduce GPU kernel launch overhead
-    # while avoiding the full (C_out, C_in, L, B) tensor.
-    # Uses map (not a mutating loop) for Zygote compatibility.
-    # Avoids scalar indexing for GPU compatibility — uses range slicing.
-    W_c = ComplexF32.(W)                                    # (C_out, C_in)
-    dt_flat = reshape(dt, 1, C_in, L * B)                  # (1, C_in, L*B)
+    # Grouped diagonal encoding: H_c[n] = Σ_j W[c,j] · q_j[n] · exp(k_c · dt_j[n]),
+    # G output channels at a time (see `_dirac_encode_sum`, whose rrule
+    # recomputes each group's encoding in the backward pass instead of keeping
+    # it on the tape).
     G = min(group_size, C_out)
     charges === nothing || size(charges) == size(phases) ||
         throw(DimensionMismatch("charges $(size(charges)) must match phases $(size(phases))"))
-    q_flat = charges === nothing ? nothing : reshape(charges, 1, C_in, L * B)   # (1, C_in, L*B)
-
-    H_slices = map(1:G:C_out) do c_start
-        c_end = min(c_start + G - 1, C_out)
-        k_group = reshape(k_c[c_start:c_end], :, 1, 1)     # (g, 1, 1)
-        enc = _exp_kdt(k_group, dt_flat)                     # (g, C_in, L*B); custom rrule avoids Dual blowup
-        if q_flat !== nothing
-            enc = enc .* q_flat                              # charged spikes: amplitude q
-        end
-        w_group = reshape(W_c[c_start:c_end, :], :, C_in, 1) # (g, C_in, 1)
-        h = sum(w_group .* enc; dims=2)                      # (g, 1, L*B)
-        reshape(dropdims(h; dims=2), :, L, B)                # (g, L, B)
-    end
-    H = reduce(vcat, H_slices)                              # (C_out, L, B)
+    dt_flat = reshape(dt, C_in, L * B)                      # (C_in, L*B)
+    q_flat = charges === nothing ? nothing : reshape(charges, C_in, L * B)
+    H = reshape(_dirac_encode_sum(k_c, W, dt_flat, q_flat, G), C_out, L, B)
 
     # Causal convolution kernel: K_c[n] = exp(k_c · n · T)
     ns_cpu = Float32.(0:L-1)
