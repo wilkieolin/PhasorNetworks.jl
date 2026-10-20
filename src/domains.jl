@@ -1357,6 +1357,13 @@ function _apply_warmup_shift(train::SpikeTrain, spk_args::SpikingArgs)
     return SpikeTrain(train.indices, new_times, train.shape, train.offset, train.charges)
 end
 
+function _apply_warmup_shift(train::SpikeTrainGPU, spk_args::SpikingArgs)
+    w = spk_args.warmup_periods
+    w == 0 && return train
+    shift = Float32(w) * spk_args.t_period
+    return SpikeTrainGPU(train.indices, train.times .- shift, train.shape, train.offset, train.charges)
+end
+
 """
 This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
 to spikes.

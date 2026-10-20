@@ -186,5 +186,8 @@ function gpu_kernel_compile_tests()
         @test on_gpu(tr_gpu)
         @test Array(tr_gpu.indices) == tr.indices
         @test maximum(abs.(Array(tr_gpu.times) .- tr.times)) < 1e-5
+        # per-layer warmup trims and shifts a device train as it does a host one
+        sw = SpikingArgs(warmup_periods = 1)
+        @test Array(PhasorNetworks._apply_warmup_shift(tr_gpu, sw).times) ≈ PhasorNetworks._apply_warmup_shift(tr, sw).times
     end
 end

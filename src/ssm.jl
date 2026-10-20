@@ -1011,7 +1011,7 @@ function reconstruct_from_current(x::CurrentCall, L::Int, spk_args::SpikingArgs)
     k = neuron_constant(spk_args)
     T = spk_args.t_period
     sample_I = x.current.current_fn(x.t_span[1])
-    u0 = zeros(ComplexF32, size(sample_I))
+    u0 = fill!(similar(sample_I, ComplexF32), 0)   # on the current's device
 
     dzdt(u, p, t) = k .* u .+ x.current.current_fn(t)
     sol = spiking_solve(dzdt, u0, x.t_span, spk_args)
