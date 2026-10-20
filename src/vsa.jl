@@ -141,7 +141,7 @@ Used in neural network layers to transform VSA representations while maintaining
 Returns transformed phases using a soft angle conversion for stable gradients.
 """
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
-    xz = batched_mul(w, angle_to_complex(x)) .+ b
+    xz = _bmul_matched(w, angle_to_complex(x)) .+ b
     y = complex_to_angle(xz)
     return y
 end

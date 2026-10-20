@@ -95,3 +95,20 @@ end
 function gpu_zeros(ref::AbstractArray, T::Type, dims...)
     return zeros(T, dims...)
 end
+
+"""
+    _bmul_matched(A, B)
+
+`batched_mul(A, B)` with the real operand promoted to the other's complex
+type, so the product is a same-type gemm. NNlib sends mixed element types
+(ComplexF32 × Float32) to `batched_mul_generic!`, a per-batch `mul!` over
+views that runs GPUArrays' generic Julia matmul kernel instead of the
+vendor BLAS; on oneAPI that kernel read out of bounds (PhasorLCA at L 500,
+B ≥ 4, Aurora 2026-10-20). Same-type inputs pass through unchanged.
+"""
+function _bmul_matched(A::AbstractArray, B::AbstractArray)
+    T = promote_type(eltype(A), eltype(B))
+    return batched_mul(_as_eltype(T, A), _as_eltype(T, B))
+end
+_as_eltype(::Type{T}, X::AbstractArray{T}) where {T} = X
+_as_eltype(::Type{T}, X::AbstractArray) where {T} = T.(X)
