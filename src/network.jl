@@ -2121,7 +2121,7 @@ function score_scale(potential::AbstractArray{<:Complex,3}, scores::AbstractArra
     scores = permutedims(scores, (2,1,3))
     d_k = size(scores,1)
     scores = exp.(scale .* scores) ./ d_k
-    scaled = _bmul_matched(potential, scores)
+    scaled = batched_mul(potential, scores)
     return scaled
 end
 
@@ -2133,7 +2133,7 @@ function attend(q::AbstractArray{<:Phase, 3}, k::AbstractArray{<:Phase, 3}, v::A
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
     #(v kt b) * (kt qt b) ... (v kt) * (kt qt) over b
-    output = _bmul_matched(v, scores)
+    output = batched_mul(v, scores)
     output = complex_to_angle(output)
     return output, scores
 end

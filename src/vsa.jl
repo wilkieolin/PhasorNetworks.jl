@@ -141,7 +141,7 @@ Used in neural network layers to transform VSA representations while maintaining
 Returns transformed phases using a soft angle conversion for stable gradients.
 """
 function v_bundle_project(x::AbstractArray, w::AbstractMatrix, b::AbstractVecOrMat)
-    xz = _bmul_matched(w, angle_to_complex(x)) .+ b
+    xz = batched_mul(w, angle_to_complex(x)) .+ b
     y = complex_to_angle(xz)
     return y
 end
@@ -679,14 +679,18 @@ function similarity_outer_heads(q::AbstractArray{<:Phase, 3},
     qc = ComplexF32.(angle_to_complex(q))           # (Dh, H, A)
     kc = ComplexF32.(angle_to_complex(k))           # (Dh, H, L, B)
 
-    # Per-head independent (A, L*B) scores, all heads in one canonical call
-    # with the head as the batch axis. (The former per-head slices
-    # `kc[:, h, :, :]` read out of bounds and returned wrong values on oneAPI
-    # at L 500, B >= 4 — Aurora, oneAPI.jl 2.9.2 — so no middle-axis slicing.)
-    Aq = permutedims(qc, (1, 3, 2))                            # (Dh, A,   H)
-    Bk = reshape(permutedims(kc, (1, 3, 4, 2)), Dh, L * B, H)  # (Dh, L*B, H)
-    s  = _similarity_outer_canonical_complex(Aq, Bk)           # (A,  L*B, H)
-    return permutedims(reshape(s, A, L, B, H), (1, 4, 2, 3))   # (A, H, L, B)
+    # Per-head independent (A, L*B) scores: each h gets its own canonical call.
+    # map (not comprehension) keeps Zygote happy and works on GPU CuArrays.
+    per_head = map(1:H) do h
+        Aq_h = reshape(qc[:, h, :],       Dh, A,     1)   # (Dh, A,   1)
+        Bk_h = reshape(kc[:, h, :, :],    Dh, L * B, 1)   # (Dh, L*B, 1)
+        s = _similarity_outer_canonical_complex(Aq_h, Bk_h)  # (A, L*B, 1)
+        reshape(s, A, L, B)                                  # (A, L, B)
+    end
+
+    # Stack on a new trailing axis → (A, L, B, H); permute → (A, H, L, B).
+    stacked = stack(per_head)                       # (A, L, B, H)
+    return permutedims(stacked, (1, 4, 2, 3))       # (A, H, L, B)
 end
 
 """

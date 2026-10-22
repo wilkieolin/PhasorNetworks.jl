@@ -210,12 +210,8 @@ function causal_conv_fft(K::AbstractMatrix{<:Complex}, H::AbstractArray{<:Comple
     # Pointwise multiply in frequency domain (broadcast K over batch)
     Z_f = reshape(K_f, C, N, 1) .* H_f   # C × N × B
 
-    # IFFT back to time domain and keep first L elements (causal part).
-    # Unnormalised bfft plus an out-of-place divide, not `ifft`: a partial-region
-    # `ifft` is AbstractFFTs' ScaledPlan, i.e. an in-place `rmul!` on the oneMKL
-    # output, which aborted with a GPU segfault on Aurora at (64, 1000, 16)
-    # (oneAPI.jl 2.9.2, NEO 25.18 LTS; bfft alone ran clean). Same result.
-    Z_full = bfft(Z_f, 2) ./ Float32(N)   # C × N × B
+    # IFFT back to time domain and keep first L elements (causal part)
+    Z_full = ifft(Z_f, 2)                 # C × N × B
     Z = Z_full[:, 1:L, :]                 # C × L × B
 
     # Only cast if FFT promoted away from ComplexF32 (e.g. from mixed precision)

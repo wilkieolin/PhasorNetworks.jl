@@ -23,7 +23,7 @@ using LinearAlgebra: diag
 using OneHotArrays: OneHotMatrix
 using NNlib: batched_mul, softmax, sigmoid
 using FFTW  # registers CPU FFT methods with AbstractFFTs
-using AbstractFFTs: fft, ifft, bfft
+using AbstractFFTs: fft, ifft
 using Base: @kwdef
 using Zygote: withgradient, Buffer, checkpointed
 using Random: Xoshiro

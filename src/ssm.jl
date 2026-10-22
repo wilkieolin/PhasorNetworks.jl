@@ -515,7 +515,7 @@ function _lsa_head_mix(Vc::AbstractArray{<:Complex, 4}, weights::AbstractArray{<
     # The Vc factor's second axis is h'; weights' first axis (after transposing
     # along (1,2)) is h' → align so the contraction sums over h'.
     W_r  = reshape(permutedims(weights, (2, 1, 3, 4)), H, H, L * B)
-    Y_r  = _bmul_matched(Vc_r, W_r)                               # (Dh, H, L*B)
+    Y_r  = batched_mul(Vc_r, W_r)                                 # (Dh, H, L*B)
     return reshape(Y_r, Dh, H, L, B)
 end
 
@@ -719,7 +719,7 @@ function _lca_anchor_mix(Ac::AbstractArray{<:Complex, 3}, w::AbstractArray{<:Rea
     L, B = size(w, 3), size(w, 4)
     Ac_b = permutedims(Ac, (1, 3, 2))                            # (Dh, A, H)
     w_b  = reshape(permutedims(w, (1, 3, 4, 2)), A, L * B, H)    # (A,  L*B, H)
-    Y_b  = _bmul_matched(Ac_b, w_b)                              # (Dh, L*B, H)
+    Y_b  = batched_mul(Ac_b, w_b)                                # (Dh, L*B, H)
     Y    = reshape(Y_b, Dh, L, B, H)
     return permutedims(Y, (1, 4, 2, 3))                          # (Dh, H, L, B)
 end

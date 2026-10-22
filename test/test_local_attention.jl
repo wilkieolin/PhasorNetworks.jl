@@ -5,7 +5,6 @@ function local_attention_tests()
     @testset "Local Attention" begin
         @info "Running local attention tests..."
         similarity_outer_heads_tests()
-        bmul_matched_tests()
         phasor_lsa_tests()
         phasor_lca_tests()
         phasor_lsa_spiking_tests()
@@ -16,26 +15,6 @@ end
 # ----------------------------------------------------------------------
 # Head-axis similarity primitive
 # ----------------------------------------------------------------------
-
-# Mixed complex × real batched_mul is promoted to a same-type gemm (the generic
-# fallback NNlib uses for mixed eltypes read out of bounds on oneAPI).
-function bmul_matched_tests()
-    @testset "_bmul_matched" begin
-        rng = Xoshiro(2)
-        A = randn(rng, ComplexF32, 4, 6, 3); W = randn(rng, Float32, 6, 5, 3)
-        @test eltype(PhasorNetworks._bmul_matched(A, W)) == ComplexF32
-        @test PhasorNetworks._bmul_matched(A, W) ≈ PhasorNetworks.batched_mul(A, W)
-        Wt = permutedims(W, (2, 1, 3)); At = permutedims(A, (2, 1, 3))
-        @test PhasorNetworks._bmul_matched(Wt, At) ≈ PhasorNetworks.batched_mul(Wt, At)
-        c = randn(rng, ComplexF32, 4, 5, 3)
-        f(g) = (a, w) -> sum(real.(conj.(c) .* g(a, w)))
-        g1 = withgradient(f(PhasorNetworks._bmul_matched), A, W).grad
-        g2 = withgradient(f(PhasorNetworks.batched_mul), A, W).grad
-        @test g1[1] ≈ g2[1]
-        @test g1[2] ≈ g2[2]
-        @test eltype(g1[2]) == Float32
-    end
-end
 
 function similarity_outer_heads_tests()
     @testset "similarity_outer_heads" begin
