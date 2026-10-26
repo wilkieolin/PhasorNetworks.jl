@@ -368,6 +368,20 @@ function _sum_broadcast_dims(x::AbstractArray, target_shape::NTuple{N,Int}) wher
 end
 
 """
+    _sum_trailing(x, nkeep) -> Array of size `size(x)[1:nkeep]`
+
+Sum `x` over all axes after the first `nkeep`, as one matrix–vector product
+(`reshape(x, m, :) * ones`). Equivalent to `sum(x; dims=nkeep+1:ndims(x))`,
+but a reduction that keeps axis 1 is nearly serial on oneAPI's Aurora LTS
+stack (`ONEAPI_LTS=1` reduces it with one work-item per output element),
+while a GEMV is parallel on every backend.
+"""
+function _sum_trailing(x::AbstractArray, nkeep::Int)
+    X = reshape(x, prod(size(x)[1:nkeep]), :)
+    return reshape(X * fill!(similar(X, size(X, 2)), one(eltype(X))), size(x)[1:nkeep])
+end
+
+"""
     _dirac_encode_sum(k, W, dt, q, G) -> ComplexF32 (C_out × N)
 
 `H[c, n] = Σ_j W[c,j] · q[j,n] · exp(k[c] · dt[j,n])` (`q === nothing` = unit
@@ -424,9 +438,10 @@ function ChainRulesCore.rrule(::typeof(_dirac_encode_sum), k::AbstractVector,
                 Bc = Bc .* q_r                                    # conj(q e)·H̄
             end
             # W real: W̄[c,j] = Re Σ_n conj(q e) H̄
-            W̄[cs, :] .= dropdims(real.(sum(Bc; dims=3)); dims=3)
+            # (_sum_trailing: these two keep axis 1, few outputs; see its docstring)
+            W̄[cs, :] .= real.(_sum_trailing(Bc, 2))
             # k̄[c] = Σ_{j,n} W dt conj(q e) H̄   (holomorphic in k)
-            k̄[cs] .= vec(sum(Wg .* dt_r .* Bc; dims=(2, 3)))
+            k̄[cs] .= _sum_trailing(Wg .* dt_r .* Bc, 1)
             # dt̄[j,n] = Re Σ_c W conj(k) conj(q e) H̄
             dt̄ .+= dropdims(real.(sum(Wg .* conj.(kg) .* Bc; dims=1)); dims=1)
         end

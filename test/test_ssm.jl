@@ -211,6 +211,15 @@ function dirac_discretization_tests()
             @test all(isfinite, grads[1])
         end
 
+        @testset "_sum_trailing matches sum over trailing dims" begin
+            # GEMV-based reduction used by the _dirac_encode_sum rrule
+            # (a dim-1-kept `sum` is nearly serial on oneAPI's LTS stack).
+            x = randn(rng, ComplexF32, 3, 5, 7)
+            @test PhasorNetworks._sum_trailing(x, 2) ≈ dropdims(sum(x; dims=3); dims=3)
+            @test PhasorNetworks._sum_trailing(x, 1) ≈ vec(sum(x; dims=(2, 3)))
+            @test PhasorNetworks._sum_trailing(Float32.(real.(x)), 1) ≈ vec(sum(real.(x); dims=(2, 3)))
+        end
+
         @testset "_dirac_encode_sum rrule matches plain AD" begin
             # The rrule recomputes the per-group encoding in the pullback
             # (memory); check it against Zygote through the same arithmetic.
