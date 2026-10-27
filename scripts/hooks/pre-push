@@ -1,0 +1,9 @@
+#!/bin/sh
+# Pushes of this library need the owner's recorded OK (arc_experiments CLAUDE.md rule 8). Installed by `make hooks`
+# into the shared hooks directory, so it covers every worktree. Override for one push, after writing the owner's
+# answer into the item's record (`owner_ok = "<date>: <what>"`):
+#     PHASOR_PUSH_OK=1 git push ...
+[ "${PHASOR_PUSH_OK:-}" = "1" ] && exit 0
+echo "pre-push: refusing. Library pushes need the owner's OK recorded in the item's record (owner_ok line);" >&2
+echo "          then: PHASOR_PUSH_OK=1 git push $*" >&2
+exit 1

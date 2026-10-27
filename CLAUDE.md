@@ -182,6 +182,21 @@ the load-dependency order.
 - `LuxParams = Union{NamedTuple, AbstractArray}` — used for layer parameter type annotations
 - `SolutionType` enum: `:phase`, `:potential`, `:current`, `:spiking`
 
+## Working here as an agent (the arc_experiments workflow)
+
+This library is a path dependency of `~/code/arc_experiments`; that tree's `CLAUDE.md` rule 8 governs changes here.
+The short form:
+
+1. **A worktree per branch**, off `main`: `git worktree add ../PhasorNetworks.jl-<name> -b <name> main`. The shared
+   checkout `~/code/PhasorNetworks.jl` stays on `main` (experiment environments point at it). Pinned GPU environments
+   in a worktree: `make envs` there (or `make env-oneapi` / `make env-cuda`).
+2. **A test in `test/`** for the change, then `make test` (CPU suite) and, for a GPU path, `make test-gpu` on the
+   backends it touches. Pass counts and the commit go into the experiment item's README.
+3. **No push without the owner's recorded OK.** Ask through the item's `needs_owner`; the owner's answer is written
+   as `owner_ok` in the item record; only then `PHASOR_PUSH_OK=1 git push` (the pre-push hook from `make hooks`
+   refuses otherwise). Never push `main`.
+4. **Open a pull request** (`gh pr create`) so CI runs here; the owner merges and deletes the branch.
+
 ## Critical Conventions
 
 ### Float32 Everywhere
