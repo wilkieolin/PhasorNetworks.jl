@@ -211,6 +211,46 @@ function dirac_discretization_tests()
             @test all(isfinite, grads[1])
         end
 
+        @testset "_sum_trailing matches sum over trailing dims" begin
+            # GEMV-based reduction used by the _dirac_encode_sum rrule
+            # (a dim-1-kept `sum` is nearly serial on oneAPI's LTS stack).
+            x = randn(rng, ComplexF32, 3, 5, 7)
+            @test PhasorNetworks._sum_trailing(x, 2) ≈ dropdims(sum(x; dims=3); dims=3)
+            @test PhasorNetworks._sum_trailing(x, 1) ≈ vec(sum(x; dims=(2, 3)))
+            @test PhasorNetworks._sum_trailing(Float32.(real.(x)), 1) ≈ vec(sum(real.(x); dims=(2, 3)))
+        end
+
+        @testset "_dirac_encode_sum rrule matches plain AD" begin
+            # The rrule recomputes the per-group encoding in the pullback
+            # (memory); check it against Zygote through the same arithmetic.
+            P = PhasorNetworks
+            function plain_H(k, W, dt, q, G)
+                C_out, C_in = size(W); N = size(dt, 2)
+                reduce(vcat, map(1:G:C_out) do c
+                    cs = c:min(c + G - 1, C_out)
+                    enc = exp.(reshape(k[cs], :, 1, 1) .* reshape(dt, 1, C_in, N))
+                    q === nothing || (enc = enc .* reshape(q, 1, C_in, N))
+                    dropdims(sum(reshape(ComplexF32.(W[cs, :]), :, C_in, 1) .* enc; dims=2); dims=2)
+                end)
+            end
+            for (C_out, C_in, N, G, useq) in ((13, 6, 9, 4, true), (16, 5, 7, 8, false))
+                λ = -rand(rng, Float32, C_out) .- 0.1f0
+                ω = Float32.(collect(range(0.2f0, 2.5f0; length=C_out)))
+                W = randn(rng, Float32, C_out, C_in); dt = rand(rng, Float32, C_in, N)
+                q = useq ? rand(rng, Float32, C_in, N) : nothing
+                w = randn(rng, ComplexF32, C_out, N)
+                kc(λ, ω) = ComplexF32.(λ .+ im .* ω)
+                f(H) = sum(real.(conj.(w) .* H))
+                @test P._dirac_encode_sum(kc(λ, ω), W, dt, q, G) ≈ plain_H(kc(λ, ω), W, dt, q, G)
+                g1 = withgradient((a...) -> f(P._dirac_encode_sum(kc(a[1], a[2]), a[3], a[4], a[5], G)), λ, ω, W, dt, q).grad
+                g2 = withgradient((a...) -> f(plain_H(kc(a[1], a[2]), a[3], a[4], a[5], G)), λ, ω, W, dt, q).grad
+                for i in 1:(useq ? 5 : 4)
+                    @test g1[i] ≈ g2[i] rtol=1e-4
+                end
+                useq || @test g1[5] === nothing
+            end
+        end
+
         @testset "PhasorDense Phase 3D uses Dirac for SSM init" begin
             C_in, C_out, L, B = 4, 8, 10, 3
             phases = Phase.(2f0 .* rand(rng, Float32, C_in, L, B) .- 1f0)

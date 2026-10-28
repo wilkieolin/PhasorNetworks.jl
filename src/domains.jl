@@ -1357,6 +1357,13 @@ function _apply_warmup_shift(train::SpikeTrain, spk_args::SpikingArgs)
     return SpikeTrain(train.indices, new_times, train.shape, train.offset, train.charges)
 end
 
+function _apply_warmup_shift(train::SpikeTrainGPU, spk_args::SpikingArgs)
+    w = spk_args.warmup_periods
+    w == 0 && return train
+    shift = Float32(w) * spk_args.t_period
+    return SpikeTrainGPU(train.indices, train.times .- shift, train.shape, train.offset, train.charges)
+end
+
 """
 This implementation takes a single matrix at pre-selected, representative times and converts each temporal slice
 to spikes.
@@ -1391,7 +1398,9 @@ function solution_to_train(u::AbstractArray{<:Complex}, times::AbstractVector{<:
     phases = potential_to_phase(u, times, spk_args = spk_args, offset = offset)  # (…, L) static frame
     within = phase_to_time(Float32.(phases), T)                                  # (…, L) in [0, T)
     # start of the period each cycle sample closes: times[l] - T
-    period_starts = reshape(Float32.(times) .- T, ntuple(_ -> 1, ndims(u) - 1)..., :)
+    # (`times` is a host vector; move the offsets to `within`'s device so the
+    # broadcast below compiles on CUDA / oneAPI)
+    period_starts = to_device_of(within, reshape(Float32.(times) .- T, ntuple(_ -> 1, ndims(u) - 1)..., :))
     tms = within .+ period_starts
     qs = charge_fn === nothing ? nothing : charge_fn(abs.(u))
 
