@@ -46,6 +46,7 @@ PhasorLCA
 MakeSpikingSSM
 ssm_phases_to_train
 ssm_train_to_phases
+ssm_train_to_charged
 ```
 
 ## Residual blocks and stacks
@@ -53,7 +54,8 @@ ssm_train_to_phases
 Residual combination on the torus (phase addition of the branch onto the skip),
 the transformer block built from it, and `ScanStack` for weight-tied or stacked
 blocks. All three run in discrete, Dirac and spiking modes. In spiking mode,
-`spike_phase_bind` adds phases by shifting spike times, and
+`spike_phase_bind` adds phases by shifting spike times,
+`spike_phase_bundle` is its counterpart for a bundled residual branch, and
 `spike_phase_recenter` rotates a spike train by a phase offset.
 
 ```@docs
@@ -62,7 +64,21 @@ PhaseRecenter
 PhasorTransformerBlock
 ScanStack
 spike_phase_bind
+spike_phase_bundle
 spike_phase_recenter
+```
+
+## Hill emission
+
+Opt-in emission (`emit_n`) gives each spike an amplitude set by a Hill function
+of the output magnitude; layers then exchange [`Charged`](@ref) values.
+`emission_amplitudes` measures a model's output magnitudes and
+`set_emission_theta` sets the thresholds from their quantiles.
+
+```@docs
+hill_charge
+emission_amplitudes
+set_emission_theta
 ```
 
 ## Output extraction

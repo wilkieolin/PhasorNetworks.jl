@@ -15,13 +15,17 @@
 ### codebook projection is a readout of the same kind as `Codebook`.
 ###
 ### The iterated unbind / similarity / cleanup loop was first written in demo
-### form in `demos/03_resonator.ipynb` (ported from the older phasor_julia
-### demos); `Resonator(projection = :abs)` lifts that loop into the library,
+### form (ported from the older phasor_julia demos);
+### `Resonator(projection = :abs)` lifts that loop into the library,
 ### `:linear` is the projection of Frady et al. 2020 / Kymn et al. 2024 as
 ### written, `:codeword` the hard-snap baseline.
 
-# Three unit vectors at 120°: k₁ + k₂ + k₃ = 0. Rows are the axes, columns the
-# 2-D input coordinates.
+"""
+    HEX_AXES
+
+Three unit vectors at 120° (`k₁ + k₂ + k₃ = 0`), used by `FPEEncoder(mode = :hex)`.
+Rows are the axes, columns the 2-D input coordinates.
+"""
 const HEX_AXES = Float32[1.0 0.0; -0.5 (sqrt(3) / 2); -0.5 (-sqrt(3) / 2)]
 
 """
@@ -300,7 +304,7 @@ to the torus:
   *magnitude* of its complex similarity to the unbound estimate, then each
   component returns to the unit circle. The magnitude is invariant to the
   global phase the other factors' estimates carry during the search, which
-  is why this cleanup (the loop of `demos/03_resonator.ipynb`) reaches far
+  is why this cleanup reaches far
   larger products ∏ m_f than the linear projection below.
 - `projection = :linear` — `x̂_f ← ∠ C_f (C_fᴴ ê_f)`: the complex
   codebook-subspace projection followed by the phasor non-linearity, the
