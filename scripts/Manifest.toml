@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "576816abf546f36412741d63be8c706f4c3d6d0d"
+project_hash = "0b3e7c87d6516201825f6177a4477ecf0fa15b82"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -385,6 +385,23 @@ weakdeps = ["SparseArrays"]
 
     [deps.ChainRulesCore.extensions]
     ChainRulesCoreSparseArraysExt = "SparseArrays"
+
+[[deps.ChunkCodecCore]]
+git-tree-sha1 = "3496e2b359c27793d12bec54ec94be7983a6ceb2"
+uuid = "0b6fb165-00bc-4d37-ab8b-79f91016dbe1"
+version = "1.0.2"
+
+[[deps.ChunkCodecLibZlib]]
+deps = ["ChunkCodecCore", "Zlib_jll"]
+git-tree-sha1 = "d4101e848e8d3f585d61d244c2fe0c80a70e6b3b"
+uuid = "4c0bbee4-addc-4d73-81a0-b6caacae83c8"
+version = "1.1.0"
+
+[[deps.ChunkCodecLibZstd]]
+deps = ["ChunkCodecCore", "Zstd_jll"]
+git-tree-sha1 = "34d9873079e4cb3d0c62926a225136824677073f"
+uuid = "55437552-ac27-4d47-9aa3-63184e8fd398"
+version = "1.0.0"
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
@@ -1147,12 +1164,10 @@ deps = ["Adapt", "GPUArraysCore", "KernelAbstractions", "LLVM", "LinearAlgebra",
 git-tree-sha1 = "adddc80fa93244e40e8f5f8cb3af53a0ddabd80c"
 uuid = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
 version = "11.5.15"
+weakdeps = ["JLD2"]
 
     [deps.GPUArrays.extensions]
     JLD2Ext = "JLD2"
-
-    [deps.GPUArrays.weakdeps]
-    JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 
 [[deps.GPUArraysCore]]
 deps = ["Adapt"]
@@ -1449,6 +1464,18 @@ version = "1.10.0"
 git-tree-sha1 = "a3f24677c21f5bbe9d2a714f95dcd58337fb2856"
 uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
+
+[[deps.JLD2]]
+deps = ["ChunkCodecCore", "ChunkCodecLibZlib", "ChunkCodecLibZstd", "FileIO", "MacroTools", "Mmap", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "9ce2e7c49ae4a7035b7d60db3a553b1f6c16875d"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.6.7"
+
+    [deps.JLD2.extensions]
+    UnPackExt = "UnPack"
+
+    [deps.JLD2.weakdeps]
+    UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 
 [[deps.JLFzf]]
 deps = ["REPL", "Random", "fzf_jll"]
@@ -2459,15 +2486,17 @@ uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 version = "3.0.0"
 
 [[deps.PhasorNetworks]]
-deps = ["AbstractFFTs", "Adapt", "ArgParse", "Atomix", "CUDA", "ChainRulesCore", "CodecZlib", "ComponentArrays", "DifferentialEquations", "Distributions", "Downloads", "FFTW", "GPUArraysCore", "Interpolations", "KernelAbstractions", "LinearAlgebra", "Lux", "LuxCUDA", "LuxCore", "LuxLib", "MLUtils", "NNlib", "OneHotArrays", "Optimisers", "Plots", "Random", "SciMLSensitivity", "Scratch", "Statistics", "Zygote", "cuDNN"]
+deps = ["AbstractFFTs", "Adapt", "ArgParse", "Atomix", "ChainRulesCore", "CodecZlib", "ComponentArrays", "DifferentialEquations", "Distributions", "Downloads", "FFTW", "GPUArraysCore", "Interpolations", "KernelAbstractions", "LinearAlgebra", "Lux", "LuxCore", "LuxLib", "MLDataDevices", "MLUtils", "NNlib", "OneHotArrays", "Optimisers", "Random", "SciMLSensitivity", "Scratch", "Statistics", "Zygote"]
 path = ".."
 uuid = "c32d742c-e486-48f1-8804-9f6fb4d3f42c"
 version = "1.0.3-DEV"
 
     [deps.PhasorNetworks.extensions]
+    PhasorNetworksCUDAExt = "CUDA"
     PhasorNetworksOneAPIExt = "oneAPI"
 
     [deps.PhasorNetworks.weakdeps]
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
     oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [[deps.Pixman_jll]]

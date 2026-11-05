@@ -1,6 +1,6 @@
 # Vanilla phasor-EP tests. Phase 1 scope: PhasorDense + StaticEP +
 # SimilarityCost + K=0 + use_bias=false. See docs/phasor_ep_design.md
-# and demos/phasor_ep_demo.ipynb for context.
+# for context.
 
 using Test
 using PhasorNetworks

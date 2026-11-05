@@ -33,7 +33,7 @@
 #   * use_bias is supported and FD-verified, and is effectively required
 #     in practice — real W plus an entrywise unit projection is
 #     axis-preserving, so without a complex bias whole input classes stay
-#     locked to one axis (see demos/lockin_demo.ipynb §7.1).
+#     locked to one axis.
 #
 # Batching: states are `(out_dims,)` for a single sample or
 # `(out_dims, B)` for a minibatch, on one code path. Every operation in
@@ -1824,9 +1824,8 @@ frequency.
 # Defaults
 
 The defaults `(ε=0.05, ω_p=0.05, dt=0.1, n_cycles=8)` give roughly
-the deep-adiabatic regime visible in
-`demos/phasor_ep_demo.ipynb` Section 6 (matches FD to a few
-percent on a 2-layer chain).
+the deep-adiabatic regime (matches FD to a few percent on a
+2-layer chain).
 """
 Base.@kwdef struct LockinEP <: AbstractEPMethod
     ε::Float32                 = 0.05f0

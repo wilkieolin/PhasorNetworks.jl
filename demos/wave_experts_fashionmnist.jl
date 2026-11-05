@@ -16,7 +16,7 @@
 # (cheap: no rollout), which also gives the per-epoch gate entropy / load trace.
 #
 # Quick CPU run by default; scale via env (WAVE_N_TRAIN, WAVE_EPOCHS, ...).
-# Run:  julia --project=. demos/wave_experts_fashionmnist.jl
+# Run:  julia --project=scripts demos/wave_experts_fashionmnist.jl
 
 ENV["GKSwstype"] = "100"
 

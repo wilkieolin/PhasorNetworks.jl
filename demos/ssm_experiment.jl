@@ -22,7 +22,7 @@ Impulse encoding: pixel v → phase θ = (2v-1) → spike time within a period,
   and the SSM must remember it through subsequent steps.
 
 Usage:
-  julia --project demos/ssm_experiment.jl [--epochs 20] [--hidden 128] [--model both]
+  julia --project=scripts demos/ssm_experiment.jl [--epochs 20] [--hidden 128] [--model both]
 =#
 
 using PhasorNetworks

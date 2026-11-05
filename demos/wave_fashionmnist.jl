@@ -18,7 +18,7 @@
 # This is a first-pass demo tuned for a quick CPU run (a subset, few epochs),
 # not a leaderboard entry. Scale the consts up for a serious run.
 #
-# Run:  julia --project=. demos/wave_fashionmnist.jl
+# Run:  julia --project=scripts demos/wave_fashionmnist.jl
 
 ENV["GKSwstype"] = "100"
 

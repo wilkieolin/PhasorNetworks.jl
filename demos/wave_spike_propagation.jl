@@ -30,7 +30,7 @@
 # result. At 256² the wrap is at t≈110 and there is a clean window. If you
 # shrink N, re-derive the window before trusting any ring statistic.
 #
-# Run:  julia --project=. demos/wave_spike_propagation.jl
+# Run:  julia --project=scripts demos/wave_spike_propagation.jl
 # Writes demos/wave_out/spike_propagation.gif and spike_regime_compare.gif
 
 ENV["GKSwstype"] = "100"                     # headless GR

@@ -41,7 +41,7 @@
 # At the stock g the DC mode wins, q*→0, and every transport diagnostic reads
 # :standing — a documented trap, see wavesheet-carrier-folds-out.
 #
-# Run:  julia --project=. demos/wave_transport_fidelity.jl
+# Run:  julia --project=scripts demos/wave_transport_fidelity.jl
 #       (env: TF_N sheet size, TF_L steps, TF_SEED, TF_SPIKE=1 to add :spike arms)
 # Outputs a table + demos/wave_out/transport_fidelity.{png,csv}.
 

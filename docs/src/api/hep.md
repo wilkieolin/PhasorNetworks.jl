@@ -14,7 +14,7 @@ given nudge; [`hep_gradient`](@ref) does the contour integration;
 [`HolomorphicReadout`](@ref) is the demodulating readout layer aligned
 with the hEP training dynamics.
 
-See `demos/hep_demo.ipynb`, `docs/phasor_hep_derivation.tex` (formal
+See `docs/phasor_hep_derivation.tex` (formal
 derivation), and `docs/hep_development_summary.md` (development
 history and known issues) for background.
 
