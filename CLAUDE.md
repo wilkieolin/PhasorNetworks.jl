@@ -25,11 +25,14 @@ julia test/gpu.jl oneapi      # e.g. in scripts/aurora_test.sh
 julia --project=.
 using Pkg; Pkg.test()
 
-# Run a specific test file interactively
+# Interactive: including runtests.jl defines the globals and test functions and
+# RUNS THE WHOLE SUITE (there is no filter). Afterwards, re-run one group from
+# the same session, e.g. network_tests()
 julia --project=.
-include("test/runtests.jl")  # loads globals, then call e.g. network_tests()
+include("test/runtests.jl")
 
-# Build docs locally
+# Build docs locally (docs/Manifest.toml is untracked, so a fresh checkout needs the first line)
+julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 julia --project=docs docs/make.jl
 
 # Training script
@@ -39,12 +42,16 @@ julia --project=envs/cuda scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --
 julia --project=scripts scripts/make_all_figures.jl
 ```
 
-Plotting and data-frame packages live in the separate `scripts/` environment
-(`scripts/Project.toml`, which develops PhasorNetworks from `..`), not in the
-core package, so library users don't install them. Scripts that need them
-activate `scripts/` themselves. GPU vendor packages live only in the
-per-backend environments `envs/cuda` (LuxCUDA) and `envs/oneapi` (oneAPI),
-each of which develops PhasorNetworks from `../..`; run GPU work with
+Plotting and data-frame packages (Plots, CSV, DataFrames, CairoMakie, …) live in
+the separate `scripts/` environment (`scripts/Project.toml`, which develops
+PhasorNetworks from `..`), not in the core package, so library users don't
+install them. Scripts that need them activate `scripts/` themselves; the
+`demos/*.jl` files that plot run with `--project=scripts`. Jupyter notebooks
+are not kept in this repository (the last commit with them is `903cf06`). GPU vendor packages are not
+dependencies of the core package. The per-backend environments are `envs/cuda`
+(LuxCUDA) and `envs/oneapi` (oneAPI), each of which develops PhasorNetworks
+from `../..`; the `scripts/` environment also carries CUDA/LuxCUDA for GPU
+figure runs. Run GPU work with
 `--project=envs/<backend>` and load the backend with
 `scripts/gpu_backend.jl`'s `load_gpu_backend()`. Change any
 `Project.toml`/`Manifest.toml` only through the Pkg API
@@ -52,7 +59,7 @@ each of which develops PhasorNetworks from `../..`; run GPU work with
 has no API for — `[extensions]` and `[compat]` of a weakdep — are the single
 exception.)
 
-There is no linter or formatter configured. Julia 1.11+ is required.
+There is no linter or formatter configured. CI, the Dockerfile, the Aurora scripts and every committed manifest use Julia 1.12; `Project.toml` declares no `julia` compat bound, so nothing enforces a minimum and older versions are untested.
 
 ## Architecture
 
@@ -67,11 +74,12 @@ families of layers share the same defining equation but differ in what
 input domain they accept:
 
 **Encoder layers** (Complex 3D in → Phase 3D out, fixed/trainable ω):
-- `PhasorResonant` — fixed per-channel ω, ZOH SSM via `phasor_kernel +
-  causal_conv`, then `complex_to_angle`. Use this to bring a sampled
-  complex sequence into the phase domain.
+- `PhasorResonant` — fixed shared ω (see *Per-channel ω rule*), ZOH SSM via
+  `phasor_kernel + causal_conv`, then `complex_to_angle`. Use this to bring a
+  sampled complex sequence into the phase domain.
 - `ResonantSTFT` — same shape as `PhasorResonant` but with **trainable**
-  ω; learned frequency decomposition.
+  per-channel ω; learned frequency decomposition. Also accepts 3D Phase and
+  `CurrentCall` input.
 
 **Phase-domain layers** (Phase 3D / 2D in → Phase out):
 - `PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, attention.
@@ -85,9 +93,10 @@ Common dispatch summary across these layers:
 
 1. **2D Phase/Complex** (`AbstractArray{<:Phase}` or `AbstractArray{<:Complex}`) — direct linear transform `W*x + bias`, fast single-step inference
 2. **3D Phase** (`AbstractArray{<:Phase, 3}`) — Dirac discretization + causal convolution via `causal_conv_dirac`, returns Phase
-3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — only on `PhasorResonant` / `ResonantSTFT` (the encoder layers); `PhasorDense` no longer has this dispatch
+3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — the SSM path on `PhasorResonant` / `ResonantSTFT` (the encoder layers); `PhasorLCA` / `PhasorLSA` also take it; `PhasorDense` no longer has this dispatch
 4. **SpikingCall** — converts to CurrentCall, then ODE integration
 5. **CurrentCall** — continuous ODE: `dz/dt = k*z + W*I(t)`, solved via DifferentialEquations.jl
+6. **Charged** — Hill-emission spikes (`Charged(phase, q)`: 3D Phase plus per-spike amplitude). A separate type, deliberately not an `AbstractArray`, accepted by `PhasorDense`, `PhasorLSA`/`PhasorLCA`, `PhasorResidual`, `PhaseRecenter`, `PhasorTransformerBlock`/`ScanStack` and `SSMReadout`; a layer without a `Charged` method raises a `MethodError`. Emission is opt-in through `emit_n` (default `Inf` = unit amplitude)
 
 The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) is mathematically equivalent to the continuous ODE, linking all modes.
 
@@ -107,8 +116,9 @@ All layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, state) -
 
 Each layer has per-channel trainable dynamics:
 - `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable, parameterized as `lambda = -exp(log_neg_lambda)`)
-- `omega` — `(out,)` Float32, per-channel angular frequency (lives in state; see *Per-channel ω rule* below)
-- `weight` — `(out, in)` Float32, connection weights
+- `weight` — `(out, in)` Float32, connection weights (in state for `PhasorFixed`, which trains only `log_neg_lambda`)
+
+`ω` is not a stored value on normal layers; see *Per-channel ω rule* below. Only `ResonantSTFT` has an `omega` parameter (`(n_freqs,)`, trainable).
 
 ### Per-channel ω rule
 
@@ -120,9 +130,10 @@ its phasor at the same carrier frequency `ω`. Per-channel ω drift would
 desynchronize the carrier and break HD-VSA invariance.
 
 So in `PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`:
-**`ω` is a single shared scalar (`= 2π`), held in state, identical for
-every channel**. Cross-channel diversity comes from `λ` (multi-timescale
-memory) and from the weight matrix.
+**`ω` is a single shared scalar, identical for every channel, derived at each
+call from `period_to_angfreq(spk_args.t_period)` (`2π` by default)**. It is in
+neither parameters nor state. Cross-channel diversity comes from `λ`
+(multi-timescale memory) and from the weight matrix.
 
 The single architectural exception is `ResonantSTFT`, which is explicitly
 a frequency-decomposition front end: it carries per-channel trainable
@@ -157,7 +168,7 @@ the load-dependency order.
 |------|------|
 | `imports.jl` | Centralized `using`/`import` of all external dependencies (Lux, MLDataDevices, KernelAbstractions, DifferentialEquations, FFTW, ChainRulesCore, …); loaded first. Never imports a GPU vendor package |
 | `constants.jl` | Module-level constants: `N_THREADS`, `pi_f32`, unit phasors (`z_0`, `z_90cw`, `z_90ccw`). (The legacy `cdev`/`gdev` globals are gone.) |
-| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
+| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Charged`, `Args` |
 | `backend.jl` | Backend-agnostic GPU helpers: `on_gpu` (any-backend detection via `AbstractGPUArray` / `SpikeTrainGPU`), `select_device(backend)` for `:auto`/`:cpu`/`:cuda`/`:oneapi`, `to_device_of` (device follows data), `gpu_zeros`, `reclaim_device!` hook. `:cuda`/`:oneapi` methods are added by `ext/PhasorNetworksCUDAExt.jl` / `ext/PhasorNetworksOneAPIExt.jl` |
 | `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
 | `activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`, …) passed as the `activation` argument to layers; pure domain conversions stay in `domains.jl` |
@@ -165,22 +176,23 @@ the load-dependency order.
 | `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
 | `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
 | `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
-| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `MultiModePhasorDense` (3D Phase path only), `PhasorConv`, `PhasorFixed`, `PhasorBind`, `ResidualBlock`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), composition layers (`PhaseRecenter`, `PhasorResidual`, `PhasorTransformerBlock`, `ScanStack`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch (`MakeSpikingSSM`). (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
 | `fpe.jl` | `FPEEncoder` (fractional-power / residue-code encoder: real x → phases `ω_j x`, modes `:uniform`/`:residue`/`:hex`, layouts `:bound`/`:blocks`), `Resonator` (factorises a bound address into its codebook entries; `:abs`/`:linear`/`:codeword` projections), `fpe_codebook(s)`, `fpe_table`, `crt_decode`. Numbers and the spiking-path status in `docs/fpe_resonator.md` |
-| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch. (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
 | `attractor_ssm.jl` | `AttractorPhasorSSM`: selective SSM adding a Hopfield-style attractor pull toward learned phasor codes (`attractor_pull`); reduces to the linear SSM when pull strength α=0 |
-| `wave.jl` | `PhasorWaveSheet` dynamics |
-| `velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
+| `wave.jl` | `PhasorWaveSheet` dynamics and dispersion analysis, `SolitonWaveSheet`, `WaveExpertSheet` (expert routing) |
+| `excitable.jl` | `ExcitableWaveSheet`: excitable fork of the wave sheet (`PhasorWaveSheet` with `transmit=:spike` is self-limiting, not excitable; the file header explains why) |
+| `velocity_bank.jl`, `velocity_bank_hw.jl` | `PhasorVelocityBank` (sheets tuned to different conduction speeds, in lattice units); `_hw` maps those to physical device units and adds noise and disorder models |
 | `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
 | `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
 | `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
-| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge. Runs on CPU or GPU (device-agnostic allocation via `gpu_zeros`); `fd_gradient_phasor` is CPU-only. **λ/ω split:** `ep_self_force` returns `½λz` only — ω is symplectic (`Re⟨z,(λ+iω)z⟩ = λ|z|²`, so it contributes nothing to Φ) and is applied instead as an exact multiplicative carrier rotation via `phasor_settle(carrier=ω, t0=…)`, never as an additive `iω·z`. For a chain with one shared ω the carrier cancels identically, so the rotating **settle** IS the static settle — see `docs/phasor_lockin_derivation.tex` §Rotating Frame for the proof, `docs/ep_rotating_extension.md` for the narrative, `scripts/ep_rotating_gates.jl` for the gates that enforce it. **This stops at the readout:** `_quantize_phase` (`readout_δ > 0`) is the one non-U(1)-equivariant operation in the pipeline — rounding commutes with a rotation only on exact multiples of the grid — so with quantization the frame is a modelling choice about what the readout clock is locked to, not a change of variables (Gate F; `scripts/ep_readout_frame_check.jl`). **Scope:** the four extension hooks (`ep_drive`/`ep_feedback`/`ep_hebbian`/`ep_energy_contribution`) have one method each, on `PhasorDense`, over a strict feedforward chain — no binding, recurrence, or skips — and every headline result is `K_mode=:zero`. Program status, recap audit and the ranked follow-up list: `docs/ep_program_status.md` |
+| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge. Runs on CPU or GPU (device-agnostic allocation via `gpu_zeros`); `fd_gradient_phasor` is CPU-only. **λ/ω split:** `ep_self_force` returns `½λz` only — ω is symplectic (`Re⟨z,(λ+iω)z⟩ = λ|z|²`, so it contributes nothing to Φ) and is applied instead as an exact multiplicative carrier rotation via `phasor_settle(carrier=ω, t0=…)`, never as an additive `iω·z`. For a chain with one shared ω the carrier cancels identically, so the rotating **settle** IS the static settle — see `docs/phasor_lockin_derivation.tex` §Rotating Frame for the proof, `docs/ep_rotating_extension.md` for the narrative, `scripts/ep_rotating_gates.jl` for the gates that enforce it. **This stops at the readout:** `_quantize_phase` (`readout_δ > 0`) is the one non-U(1)-equivariant operation in the pipeline — rounding commutes with a rotation only on exact multiples of the grid — so with quantization the frame is a modelling choice about what the readout clock is locked to, not a change of variables (Gate F; `scripts/ep_readout_frame_check.jl`). **Scope:** the four extension hooks (`ep_drive`/`ep_feedback`/`ep_hebbian`/`ep_energy_contribution`) have methods on `PhasorDense`, `PhasorBind` (fixed-key binding) and `ResidualBlock` (bind skip with a settled branch), over a feedforward chain — no recurrence or dynamic binding — and every headline result is `K_mode=:zero` (`:stored` exists and is gradient-checked). Program status, recap audit and the ranked follow-up list: `docs/ep_program_status.md` |
 
 ### Key Type Aliases
 
 - `Phase <: Real` — scalar type wrapping `Float32`, representing a phase angle in [-1, 1] (units of pi). `isbits`, 4 bytes. Arithmetic with other `Real` types promotes to `Float32`. Network layers dispatch on `AbstractArray{<:Phase}` for type safety.
 - `LuxParams = Union{NamedTuple, AbstractArray}` — used for layer parameter type annotations
-- `SolutionType` enum: `:phase`, `:potential`, `:current`, `:spiking`
+- `SolutionType` — struct wrapping a validated `Symbol`: `:phase`, `:potential`, `:current`, `:spiking` (constants `PhaseSolution`, `PotentialSolution`, `CurrentSolution`, `SpikingSolution`)
 
 ## Working here as an agent (the arc_experiments workflow)
 
@@ -223,7 +235,7 @@ In **ODE mode** (CurrentCall), bias can be injected as periodic current via `bia
 
 ### ODE Gradient Strategy
 
-Uses `BacksolveAdjoint` with `ZygoteVJP` for sensitivity analysis through DifferentialEquations.jl. Default solver is `Tsit5()` with `dt=0.005, adaptive=false`.
+Uses `BacksolveAdjoint` with `ZygoteVJP` for sensitivity analysis through DifferentialEquations.jl. `SpikingArgs` defaults to `Tsit5()` with `dt=0.01, adaptive=false`; the test suite overrides `dt=0.005`.
 
 ### GPU Backend Abstraction
 
@@ -241,6 +253,8 @@ GPU code uses KernelAbstractions.jl for vendor-neutral kernels and GPUArraysCore
 ### Exports
 
 All public API functions must be listed in the `export` block in `src/PhasorNetworks.jl`.
+
+`docs/make.jl` uses `checkdocs=:exports`, and Documenter treats a miss as an error: every exported docstring must be reachable from a page under `docs/src/api/` (a new source file needs an `@autodocs` block and a `pages` entry), and every `@ref` must resolve to a docstring. Otherwise CI's Documentation job fails and the site stops deploying, even though the test job still passes.
 
 ## Testing
 
