@@ -100,6 +100,7 @@ include("test_ep.jl")
 include("spiking_operations_tests.jl")
 include("test_fpe_resonator.jl")
 include("test_hill_emission.jl")
+include("test_attend.jl")
 
 @testset "PhasorNetworks.jl" begin
     # Backend abstraction tests — self-contained @testset, just include it.
@@ -148,4 +149,5 @@ include("test_hill_emission.jl")
     spiking_operations_tests()
     fpe_resonator_tests()
     hill_emission_tests()
+    attend_cross_tests()
 end
