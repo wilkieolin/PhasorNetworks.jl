@@ -244,7 +244,8 @@ Input (C_in × L × B) Phase
   → Q = q_proj(x)         (d_model × L × B) Phase  (Dirac SSM)
   → V = v_proj(x)         (d_model × L × B) Phase  (Dirac SSM)
   → K = ps.keys broadcast to (d_model × n_keys × B)
-  → out = attend(Q, K, V; scale)  (d_model × n_keys × B) Phase
+  → out = attend(K, Q, V; scale)  (d_model × n_keys × B) Phase
+          (the prototypes query the sequence: weights exp(scale·sim(K_k, Q_l)))
   → activation
 ```
 """
@@ -295,7 +296,10 @@ function (l::SSMCrossAttention)(x::AbstractArray{<:Phase, 3}, ps::LuxParams, st:
     B    = size(x, 3)
     # Expand stored keys to (d_model, n_keys, B) for similarity_outer.
     K    = repeat(reshape(ps.keys, l.d_model, l.n_keys, 1), 1, 1, B)
-    out, _ = attend(Q, K, V; scale = ps.scale)            # Phase 3D, attention pooled
+    # The n_keys stored prototypes are the queries of `attend`; each one reads
+    # the length-L sequence, matching it against Q (which plays the role of
+    # attend's keys) and pooling V. Output (d_model, n_keys, B).
+    out, _ = attend(K, Q, V; scale = ps.scale)            # Phase 3D, attention pooled
     return _apply_phase_activation(l.activation, out), st
 end
 
