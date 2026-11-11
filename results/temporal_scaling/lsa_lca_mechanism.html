@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhasorLSA / PhasorLCA — mechanism diagrams</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171d26; --panel2:#1e2733; --ink:#e6edf3; --dim:#9aa7b4;
+    --line:#2b3542; --q:#2d6cdf; --k:#2fa36b; --v:#c9822b; --anc:#a24cd0;
+    --hot:#ff7a45; --cool:#3b4a5a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:26px;margin:0 0 4px} h2{font-size:21px;margin:34px 0 6px}
+  h3{font-size:15px;margin:18px 0 8px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .sub{color:var(--dim);margin:0 0 8px}
+  code{background:#0b0f14;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+
+  /* pipeline */
+  .pipe{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:10px 0}
+  .box{border-radius:8px;padding:7px 11px;font-size:12.5px;font-weight:600;color:#fff;
+       border:1.5px solid rgba(255,255,255,.14);white-space:nowrap}
+  .box small{display:block;font-weight:400;opacity:.85;font-size:10.5px;margin-top:2px;font-family:ui-monospace,monospace}
+  .io{background:var(--cool)} .qb{background:var(--q)} .kb{background:var(--k)} .vb{background:var(--v)}
+  .ab{background:var(--anc)} .op{background:#33404e}
+  .arrow{color:var(--dim);font-size:17px}
+  .brace{color:var(--dim);font-size:12px;font-style:italic}
+  .shape{font-family:ui-monospace,monospace;font-size:11px;color:var(--dim)}
+
+  /* zoom: heads / matrices */
+  .zoom{display:flex;gap:26px;flex-wrap:wrap;align-items:center;margin:8px 0 2px}
+  .col{display:flex;flex-direction:column;gap:6px;align-items:center}
+  .col .lab{font-size:11px;color:var(--dim);margin-bottom:2px}
+  .chip{width:64px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+        font-size:11px;font-weight:700;color:#fff;border:1.5px solid rgba(255,255,255,.15)}
+  .grid{display:grid;gap:3px}
+  .cell{width:26px;height:26px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+        font-size:9.5px;color:#0b0f14;font-weight:700}
+  .axis{font-size:10px;color:var(--dim)}
+  .kx{writing-mode:vertical-rl;text-orientation:mixed}
+  .step{color:var(--dim);font-size:13px;margin:10px 0 2px}
+  .step b{color:var(--ink)}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font-size:12px;margin-top:6px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:13px;height:13px;border-radius:4px;display:inline-block}
+  .note{color:var(--dim);font-size:12.5px;margin:8px 0 0;border-left:3px solid var(--line);padding-left:10px}
+  .hot{color:var(--hot);font-weight:700}
+  table{border-collapse:collapse;margin:10px 0;font-size:12.5px}
+  th,td{border:1px solid var(--line);padding:5px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>PhasorLSA / PhasorLCA — how the mechanisms actually work</h1>
+<p class="sub">Both are <b>pointwise in the sequence axis L</b>: the attention step runs independently at each
+position <code>(l,b)</code>. The only cross-timestep transport is the λ-conv SSM memory <i>inside</i> the
+<code>PhasorDense</code> projections. Shapes use <code>D=d_model</code>, <code>H=n_heads</code>,
+<code>Dh=D/H</code>, <code>L</code> positions, <code>B</code> batch, <code>A=n_anchors</code>.
+Diagram uses <code>H=4</code>.</p>
+<div class="legend">
+  <span><span class="sw qb"></span>Q</span><span><span class="sw kb"></span>K</span>
+  <span><span class="sw vb"></span>V</span><span><span class="sw ab"></span>anchors</span>
+  <span><span class="sw" style="background:var(--hot)"></span>hot weight</span>
+  <span><span class="sw" style="background:var(--cool)"></span>cool weight</span>
+</div>
+
+<!-- ============================ LSA ============================ -->
+<h2>PhasorLSA — local self-attention (attention <i>between heads</i>)</h2>
+
+<div class="panel">
+<h3>Data flow (whole tensor)</h3>
+<div class="pipe">
+  <div class="box io">x<small>(D,L,B) phase</small></div>
+  <span class="arrow">→</span>
+  <div class="box qb">q_proj<small>PhasorDense D→D · λ-conv</small></div>
+  <div class="box kb">k_proj</div>
+  <div class="box vb">v_proj</div>
+  <span class="arrow">→</span>
+  <div class="box op">reshape → heads<small>(D,L,B) → (Dh,H,L,B)</small></div>
+</div>
+<div class="pipe">
+  <div class="box op">Q·K head similarity<small>similarity_outer_heads → (H,H,L,B)</small></div>
+  <span class="arrow">→</span>
+  <div class="box op">weights = exp(β·s)/H<small>(H,H,L,B) · β=scale (trainable)</small></div>
+  <span class="arrow">→</span>
+  <div class="box op">head-mix of V<small>Y[h]=Σ_h′ w[h,h′]·V[h′] → (Dh,H,L,B)</small></div>
+  <span class="arrow">→</span>
+  <div class="box io">reshape+act → y<small>(D,L,B) phase</small></div>
+</div>
+<p class="note">Each of <code>q/k/v_proj</code> is a <b>full dense</b> <code>D→D</code> map (every output channel
+sees all input channels). The <b>head split is a reshape of the output</b> into <code>H</code> contiguous
+<code>Dh</code>-slices — same as vanilla MHA. What differs is the next step.</p>
+</div>
+
+<div class="panel">
+<h3>Zoom in — one position (l,b)</h3>
+<p class="step"><b>1.</b> The <code>D</code>-dim Q (and K, V) vector at this position is split into <span class="hot">H heads</span>,
+each a <code>Dh</code>-vector:</p>
+<div class="zoom">
+  <div class="col"><span class="lab">Q heads</span>
+    <div class="chip qb">Q₁</div><div class="chip qb">Q₂</div><div class="chip qb">Q₃</div><div class="chip qb">Q₄</div></div>
+  <div class="col"><span class="lab">K heads</span>
+    <div class="chip kb">K₁</div><div class="chip kb">K₂</div><div class="chip kb">K₃</div><div class="chip kb">K₄</div></div>
+  <div class="col"><span class="lab">V heads</span>
+    <div class="chip vb">V₁</div><div class="chip vb">V₂</div><div class="chip vb">V₃</div><div class="chip vb">V₄</div></div>
+</div>
+<p class="step"><b>2.</b> Attention is computed <span class="hot">between the heads</span> — an <code>H×H</code> matrix
+<code>s[h,h′] = sim(Q head h, K head h′)</code>, then <code>w = exp(β·s)/H</code>:</p>
+<div class="zoom">
+  <div class="col">
+    <span class="lab">w[h,h′]  (rows = Q head h, cols = K head h′)</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="axis kx">Q head h →</span>
+      <div class="grid" style="grid-template-columns:repeat(4,26px)">
+        <div class="cell" style="background:#ff7a45">.7</div><div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#6a5a3a;color:#fed">.3</div><div class="cell" style="background:#4a5a6a;color:#cfe">.1</div>
+        <div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#ff9a45">.6</div><div class="cell" style="background:#4a5a6a;color:#cfe">.2</div><div class="cell" style="background:#4a5a6a;color:#cfe">.1</div>
+        <div class="cell" style="background:#6a5a3a;color:#fed">.2</div><div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#ffb045">.5</div><div class="cell" style="background:#6a5a3a;color:#fed">.2</div>
+        <div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#6a5a3a;color:#fed">.3</div><div class="cell" style="background:#ff9a45">.5</div>
+      </div>
+    </div>
+    <span class="axis">↑ K head h′</span>
+  </div>
+</div>
+<p class="step"><b>3.</b> Each output head is a weighted mix of the <span class="hot">V heads</span> using that row:
+<code>Y head h = Σ_h′ w[h,h′] · V head h′</code>. Heads <b>interact</b>.</p>
+<div class="zoom">
+  <div class="col"><span class="lab">out heads</span>
+    <div class="chip" style="background:#5a4a6a">Y₁</div><div class="chip" style="background:#5a4a6a">Y₂</div>
+    <div class="chip" style="background:#5a4a6a">Y₃</div><div class="chip" style="background:#5a4a6a">Y₄</div></div>
+  <div class="col"><span class="lab" style="max-width:280px">e.g. Y₁ = .7·V₁ + .1·V₂ + .3·V₃ + .1·V₄
+    <br>→ concat heads → D-vector → activation</span></div>
+</div>
+<p class="note"><b>Contrast with vanilla MHA:</b> there, head <code>h</code> attends across the <code>L</code> sequence
+positions (an <code>L×L</code> matrix) and heads are <i>independent</i> (recombined only by <code>W_O</code>).
+Here the attended set is the <code>H</code> heads themselves (an <code>H×H</code> matrix), <b>per position</b>,
+and there is <b>no</b> <code>W_O</code> and <b>no</b> cross-position mixing. Routing resolution = <code>H</code> (e.g. 4).</p>
+</div>
+
+<!-- ============================ LCA ============================ -->
+<h2>PhasorLCA — local cross-attention (per-head Hopfield retrieval + bind)</h2>
+
+<div class="panel">
+<h3>Data flow (whole tensor)</h3>
+<div class="pipe">
+  <div class="box io">x<small>(D,L,B) phase</small></div>
+  <span class="arrow">→</span>
+  <div class="box kb">k_proj<small>PhasorDense D→D · λ-conv</small></div>
+  <div class="box vb">v_proj</div>
+  <span class="arrow">→</span>
+  <div class="box op">reshape → heads<small>(Dh,H,L,B)</small></div>
+  <span class="brace">+ learned</span>
+  <div class="box ab">anchor bank<small>(D,A) → (Dh,H,A)</small></div>
+</div>
+<div class="pipe">
+  <div class="box op">anchor·K similarity<small>per head: (A,H,L,B)</small></div>
+  <span class="arrow">→</span>
+  <div class="box op">weights = exp(β·s)/A<small>(A,H,L,B)</small></div>
+  <span class="arrow">→</span>
+  <div class="box op">anchor bundle<small>Bundle[h]=Σ_a w[a,h]·anc[h,a]</small></div>
+  <span class="arrow">→</span>
+  <div class="box op">bind with V<small>Y = V ⊙ Bundle (phase add)</small></div>
+  <span class="arrow">→</span>
+  <div class="box io">reshape+act → y</div>
+</div>
+<p class="note">No <code>q_proj</code>: the query is a <b>fixed learned anchor bank</b> (content-addressable memory).
+<code>k/v_proj</code> are full dense <code>D→D</code>, then split into heads. Every head has its <b>own</b>
+slice of the anchor bank.</p>
+</div>
+
+<div class="panel">
+<h3>Zoom in — one head h, one position (l,b)  <span style="color:var(--dim);font-weight:400;font-size:12px">(all H heads run this independently)</span></h3>
+<p class="step"><b>1.</b> Score this head's key <code>K_h</code> against its <span class="hot">A anchors</span>
+(a Hopfield lookup), then <code>w = exp(β·s)/A</code>:</p>
+<div class="zoom">
+  <div class="col"><span class="lab">K head h</span><div class="chip kb">K_h</div></div>
+  <span class="arrow">vs</span>
+  <div class="col"><span class="lab">anchor bank (head h)</span>
+    <div style="display:flex;gap:5px">
+      <div class="chip ab" style="width:40px">a₁</div><div class="chip ab" style="width:40px">a₂</div>
+      <div class="chip ab" style="width:40px">a₃</div><div class="chip ab" style="width:40px">…</div>
+      <div class="chip ab" style="width:40px">a_A</div></div></div>
+  <span class="arrow">→</span>
+  <div class="col"><span class="lab">w[a] (A weights)</span>
+    <div style="display:flex;gap:3px">
+      <div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#ff7a45">.7</div>
+      <div class="cell" style="background:#4a5a6a;color:#cfe">.1</div><div class="cell" style="background:#4a5a6a;color:#cfe">.0</div>
+      <div class="cell" style="background:#6a5a3a;color:#fed">.1</div></div></div>
+</div>
+<p class="step"><b>2.</b> Retrieve a <span class="hot">bundle</span> = weighted sum of the anchors, then
+<span class="hot">bind</span> it onto this head's value (complex multiply = phase addition):</p>
+<div class="zoom">
+  <div class="col"><span class="lab">Bundle_h</span><div class="chip ab">Σ w[a]·a</div></div>
+  <span class="arrow">⊙</span>
+  <div class="col"><span class="lab">V head h</span><div class="chip vb">V_h</div></div>
+  <span class="arrow">=</span>
+  <div class="col"><span class="lab">out head h</span><div class="chip" style="background:#5a4a6a">Y_h</div></div>
+</div>
+<p class="note"><b>Heads are fully independent</b> — each does its own anchor retrieval + bind on its own
+<code>Dh</code>-slice; there is <b>no head-to-head mixing</b> (unlike LSA) and <b>no cross-position mixing</b>.
+Set <code>V_h</code> to zero phase and this reduces to pure Hopfield retrieval.</p>
+</div>
+
+<!-- contrast -->
+<h2>Side-by-side</h2>
+<div class="panel">
+<table>
+  <tr><th>property</th><th>vanilla MHA</th><th>PhasorLSA</th><th>PhasorLCA</th></tr>
+  <tr><td>Q/K/V projection</td><td>full D→D, split</td><td>full D→D, split</td><td>K,V full D→D, split; <b>no Q</b></td></tr>
+  <tr><td>query source</td><td>projected input</td><td>projected input (per head)</td><td><b>learned anchor bank</b></td></tr>
+  <tr><td>attention is over…</td><td>sequence positions (L×L)</td><td><b>heads (H×H)</b></td><td><b>anchors (A×), per head</b></td></tr>
+  <tr><td>heads interact?</td><td>no (then W_O)</td><td><b>yes</b> (V mixed across heads)</td><td><b>no</b> (independent)</td></tr>
+  <tr><td>cross-position mixing?</td><td>yes</td><td>no (pointwise in L)</td><td>no (pointwise in L)</td></tr>
+  <tr><td>output projection W_O?</td><td>yes</td><td>no</td><td>no</td></tr>
+  <tr><td>combine op</td><td>weighted sum</td><td>weighted sum of V-heads</td><td><b>bind</b> V ⊙ bundle (phase add)</td></tr>
+</table>
+<p class="note">In both phasor layers, all real cross-timestep transport comes from the <b>λ-conv SSM memory inside the
+projections</b>, not from these attention steps. Source: <code>src/ssm.jl</code> (PhasorLSA ≈ L480, PhasorLCA ≈ L651),
+<code>src/vsa.jl:657</code> (<code>similarity_outer_heads</code>).</p>
+</div>
+
+</div>
+</body>
+</html>

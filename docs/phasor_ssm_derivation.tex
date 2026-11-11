@@ -1,0 +1,628 @@
+% Phasor SSM Derivation — technical derivation for inclusion in a larger paper
+% Compile standalone: pdflatex phasor_ssm_derivation.tex
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\eg}{e.g.}
+\newcommand{\ie}{i.e.}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\title{The Phasor State-Space Model:\\
+A Derivation from Resonate-and-Fire Dynamics\\
+to Holographic Distributed Representations}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{The Resonate-and-Fire Neuron}\label{sec:rf}
+%======================================================================
+
+\subsection{Single-neuron dynamics}
+
+A Resonate-and-Fire (R\&F) neuron is a damped complex oscillator driven by
+input current~$I(t)$:
+\begin{equation}\label{eq:rf-ode}
+  \frac{\dd z}{\dd t} = k\,z(t) + w\,I(t),
+  \qquad k = \lambda + \im\omega,
+\end{equation}
+where $z(t)\in\C$ is the complex membrane potential,
+$\lambda<0$ is the leakage (decay rate),
+$\omega = 2\pi/T$ is the angular frequency with period~$T$, and
+$w\in\R$ is a synaptic weight.
+This is a one-dimensional complex linear ODE---equivalently, a
+two-dimensional real linear system.
+
+The potential decomposes into amplitude and phase:
+\begin{equation}
+  z(t) = r(t)\,e^{\im\pi\theta(t)},
+  \qquad r(t) = |z(t)|,
+  \quad \theta(t) = \arg(z(t))/\pi \in [-1,1].
+\end{equation}
+The neuron fires when $\operatorname{Im}(z)$ reaches a local maximum,
+\ie, when the phase aligns with the natural oscillation.
+Between spikes, the amplitude decays exponentially ($r\propto e^{\lambda t}$),
+so \textbf{phase is the information-carrying variable}---amplitude merely
+tracks signal strength.
+
+\subsection{Phase as the natural observable}
+
+In a biologically motivated network, the internal potential~$z$ of a neuron
+is not directly observable by other neurons. Other neurons receive only
+\textbf{spikes}---discrete timing events that encode the phase of~$z$ at
+peak voltage. The natural output is therefore
+\begin{equation}\label{eq:phase-readout}
+  \theta = \arg(z)/\pi \in [-1,1],
+\end{equation}
+which can be extracted from the complex potential via normalization to the
+unit circle:
+\[
+  \theta = \arg\!\bigl(z/|z|\bigr)/\pi.
+\]
+This discards amplitude and isolates the quantity that downstream neurons
+can reconstruct from spike timing.
+
+\subsection{Multi-channel R\&F layer}\label{sec:rf-multichannel}
+
+A layer of $C$ R\&F neurons, each receiving a weighted projection of
+$C_{\mathrm{in}}$ input channels, evolves as
+\begin{equation}\label{eq:rf-layer}
+  \frac{\dd z_c}{\dd t}
+    = k_c\,z_c(t) + \sum_{j=1}^{C_{\mathrm{in}}} W_{cj}\,I_j(t),
+  \qquad c=1,\dots,C,
+\end{equation}
+where $k_c = \lambda_c + \im\omega_c$ is a per-channel complex eigenvalue
+and $W\in\R^{C\times C_{\mathrm{in}}}$ is the weight matrix.
+Each neuron is an independent damped oscillator; cross-channel coupling
+occurs only through~$W$.
+
+This diagonal structure is the \textbf{physically natural} architecture:
+each oscillator is a resonator tuned to its own $(\lambda_c,\omega_c)$.
+The collection of oscillators forms a filter bank analogous to cochlear
+hair cells or cortical oscillatory populations (theta, alpha, gamma bands).
+
+%======================================================================
+\section{State-Space Models}\label{sec:ssm}
+%======================================================================
+
+\subsection{The continuous SSM}
+
+A continuous-time linear state-space model is defined by
+\begin{equation}\label{eq:ssm-continuous}
+  \frac{\dd u}{\dd t} = A\,u(t) + B\,x(t),
+  \qquad y(t) = C\,u(t) + D\,x(t),
+\end{equation}
+where $u(t)\in\R^N$ (or $\C^N$) is the hidden state, $x(t)$ is the
+input, $y(t)$ is the output, and $A,B,C,D$ are parameter matrices of
+appropriate dimension.
+
+\subsection{Three computational views}
+
+The key insight of modern SSMs (S4, S4D, Mamba) is that this system admits
+three equivalent computational forms:
+\begin{enumerate}[nosep]
+  \item \textbf{Recurrent.}
+    Via zero-order-hold (ZOH) discretization with step~$\dt$:
+    \[
+      u[n+1] = \bar A\,u[n] + \bar B\,x[n],
+      \qquad y[n] = C\,u[n] + D\,x[n],
+    \]
+    where $\bar A = e^{A\dt}$ and $\bar B = (e^{A\dt}-I)A^{-1}B$.
+
+  \item \textbf{Convolutional.}
+    Unrolling the recurrence yields a causal convolution:
+    $y = K * x$, where $K[n] = C\,\bar A^n\,\bar B$ is the impulse-response
+    kernel.
+
+  \item \textbf{Continuous.}
+    The original ODE~\eqref{eq:ssm-continuous}, solved numerically.
+\end{enumerate}
+
+\subsection{Diagonalization (S4D)}
+
+The S4D insight is that diagonalizing~$A$ decouples the state into $N$
+independent one-dimensional complex systems:
+\begin{equation}\label{eq:s4d}
+  z_n[t+1] = a_n\,z_n[t] + b_n\,x_n[t],
+  \qquad a_n = e^{k_n\dt},
+\end{equation}
+where $k_n$ is the $n$-th eigenvalue of~$A$.
+
+\subsection{HiPPO initialization and leakage}
+
+The HiPPO-LegS framework provides principled eigenvalues for multi-timescale
+memory. For $N$ oscillators remembering a window of length~$T$:
+\begin{equation}
+  k_n = -\bigl(n+\tfrac{1}{2}\bigr)/T + \im\pi\bigl(n+\tfrac{1}{2}\bigr)/T.
+\end{equation}
+The real part $\lambda_n = -(n+\tfrac12)/T$ determines the memory timescale
+$\tau_n = -1/\lambda_n$; the imaginary part couples frequency to decay so
+that each oscillator completes roughly one cycle within its memory window.
+
+In a trainable system, $\lambda$ and $\omega$ are independent parameters:
+the SSM theory guarantees a smooth optimization landscape because the kernel
+$K[n] = e^{k\dt n}\cdot B$ is smooth in~$k$.
+
+%======================================================================
+\section{The Phasor SSM}\label{sec:phasor-ssm}
+%======================================================================
+
+Comparing \eqref{eq:rf-layer} with \eqref{eq:s4d} reveals that the
+multi-channel R\&F layer \emph{is} a diagonal SSM:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+SSM & R\&F & Role \\
+\midrule
+$A = \operatorname{diag}(k_1,\dots,k_C)$ &
+  $k_c = \lambda_c + \im\omega_c$ & Complex eigenvalues \\
+$B = W$ & $W\in\R^{C\times C_{\mathrm{in}}}$ & Input projection \\
+$C = I$ & Phase extraction & Readout \\
+$D = 0$ & --- & No skip connection \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two adjustments are needed to integrate the systems: a
+discretization strategy matched to the R\&F neuron's phase-based
+communication, and an equal-period constraint that enables direct
+spike integration.
+
+\subsection{The equal-period constraint}\label{sec:equal-period}
+
+All layers in a Phasor SSM share the same resonant period~$T$.
+When a neuron fires, the receiving neuron oscillates at the same rate,
+so the spike arrives as a direct current injection---no intermediate
+oscillator is needed to decode a foreign frequency.
+
+If $T_{\text{sender}} \neq T_{\text{receiver}}$, an input oscillator
+matched to the sender's frequency would be required to translate the
+spike into the receiver's temporal frame. The equal-period constraint
+eliminates this stage: the spike's timing within the period already
+carries the phase information directly.
+
+\subsection{Two discretization strategies}\label{sec:discretization}
+
+The correct discretization depends on the input type.
+
+\paragraph{Zero-order hold (ZOH)---for continuous inputs.}
+When the input is a continuous signal sampled at intervals~$\dt$
+(\eg, pixel values encoded as complex numbers), the standard ZOH
+discretization applies:
+\begin{equation}\label{eq:zoh}
+  z_c[n+1] = A_c\,z_c[n] + B_c\sum_j W_{cj}\,x_j[n],
+  \qquad A_c = e^{k_c\dt},\quad B_c = \frac{A_c - 1}{k_c}.
+\end{equation}
+
+\paragraph{Dirac discretization---for phase/spike inputs.}
+When the input is a phase $\theta_j$ from an upstream R\&F layer, it
+encodes a spike at time $t_s = (\theta_j/2 + \tfrac12)\,T$ within the
+period. The remaining propagation time is
+$\delta t_j = T\,(\tfrac12 - \theta_j/2)$.
+
+For a Dirac spike $\delta(t-t_s)$ at input channel~$j$ with
+weight~$W_{cj}$, the single-oscillator ODE has the exact solution
+\begin{equation}\label{eq:dirac-response}
+  z_c(T) = W_{cj}\,e^{k_c\,\delta t_j}.
+\end{equation}
+This is the free response of a damped oscillator to an impulse: the
+exponential $e^{k_c\,\delta t}$ captures both decay
+($e^{\lambda_c\,\delta t}$) and rotation ($e^{\im\omega_c\,\delta t}$)
+over the remaining time.
+
+Summing over input channels and unrolling over timesteps:
+\begin{align}
+  H_c[n] &= \sum_j W_{cj}\,e^{k_c\,\delta t_{j}[n]},
+    \label{eq:dirac-encoding}\\
+  z_c[n+1] &= e^{k_c T}\,z_c[n] + H_c[n].
+    \label{eq:dirac-recurrence}
+\end{align}
+The Dirac kernel uses $K_c[n] = e^{k_c\,n\,T}$ with no ZOH gain factor,
+because the input is instantaneous.
+
+\begin{remark}
+The Dirac encoding~\eqref{eq:dirac-encoding} depends on the output
+channel's eigenvalue~$k_c$ (via $e^{k_c\,\delta t}$), unlike ZOH
+encoding which is channel-independent. This is the price of sub-period
+phase precision.
+\end{remark}
+
+The factored form separates lag-dependent and phase-dependent parts:
+\begin{equation}
+  e^{k_c\,\Delta t_{\text{elapsed}}}
+    = \underbrace{e^{k_c\,\ell\,T}}_{\text{causal kernel}}
+    \cdot \underbrace{e^{k_c\,\delta t}}_{\text{Dirac encoding}},
+\end{equation}
+enabling the convolutional view: the Dirac encoding produces the input
+signal~$H_c[n]$, which is then convolved with the causal kernel
+$K_c[n] = e^{k_c\,n\,T}$ via FFT.
+
+\subsection{Convolutional view}
+
+Both discretizations produce a linear recurrence
+$z_c[n+1] = A_c\,z_c[n] + H_c[n]$, which unrolls to a causal
+convolution:
+\begin{equation}\label{eq:causal-conv}
+  z_c[n] = \sum_{j=0}^{n} K_c[n-j]\,H_c[j]
+         = (K_c * H_c)[n],
+\end{equation}
+where
+\[
+  K_c[n] =
+  \begin{cases}
+    e^{k_c\,n\,T} & \text{(Dirac inputs)},\\
+    e^{k_c\,n\,\dt}\cdot B_c & \text{(ZOH inputs)}.
+  \end{cases}
+\]
+This convolution is computed via FFT for $O(C\,L\log L\cdot B)$ cost
+on long sequences, or via lower-triangular Toeplitz matrix multiplication
+for short sequences.
+
+The convolution operates on \textbf{complex-valued} signals, not phases.
+Phases enter through the Dirac encoding (which produces complex values
+from phase inputs) and are extracted only at the output boundary.
+
+\subsection{Equivalence between views}
+
+The three views are exactly equivalent:
+\begin{enumerate}[nosep]
+  \item \textbf{Continuous $\to$ Discrete (Dirac).} As the spike kernel
+    width $\to 0$ and the ODE solver step $\dd t \to 0$, the spiking ODE
+    output converges to the Dirac discrete output.
+  \item \textbf{Discrete $\to$ Convolutional.} The causal convolution is
+    an algebraic rearrangement of the recurrence.
+  \item \textbf{Toeplitz $\to$ FFT.} Zero-padded circular convolution
+    reproduces the linear convolution.
+\end{enumerate}
+
+\subsection{Phase update dynamics}\label{sec:phase-dynamics}
+
+On the unit circle (after amplitude normalization), the phase update
+becomes
+\begin{equation}\label{eq:phase-update}
+  \theta[n+1]
+    = \frac{1}{\pi}\arg\!\bigl(
+        A\,e^{\im\pi\theta[n]} + B\,e^{\im\pi\phi[n]}
+      \bigr),
+\end{equation}
+where $A = |A|\,e^{\im\pi\alpha}$ with $\alpha = \omega\dt/\pi$.
+This is \textbf{nonlinear in phase} due to the $\arg$ operation on a sum
+of complex numbers---fundamentally different from the linear state update
+of a standard SSM. The nonlinearity arises because phases combine via
+vector addition on the unit circle, not scalar addition.
+
+This has a critical consequence: the convolutional view cannot operate
+directly on phases. Computation must proceed in complex space (where
+everything is linear) and extract phases only at the output boundary.
+
+\subsection{The frequency diversity--coherence tension}\label{sec:tension}
+
+The filter bank interpretation (Section~\ref{sec:rf-multichannel})
+suggests each channel should resonate at a different~$\omega_c$ for
+optimal input decomposition. Empirically, networks with trainable
+per-channel~$\omega$ achieve higher accuracy.
+
+However, the phase vector
+$\bm\theta = (\theta_1,\dots,\theta_C) \in [-1,1]^C$ is only meaningful
+as a distributed representation when all channels rotate at the same
+rate. If channels have different~$\omega_c$, relative phases drift
+through time and similarity measures become time-dependent---the
+representation is no longer stable.
+
+Physically, this corresponds to the requirement that neurons in a
+population be \textbf{synchronized}: all neurons in a traveling wave share
+the same frequency, with phase offsets carrying the representational
+content.
+
+\subsection{Resolution: multi-compartment frequency decomposition}
+\label{sec:phasorstft}
+
+The \textsc{PhasorSTFT} layer resolves this tension via a multi-compartment
+neuron model. Each frequency channel~$f$ has two compartments:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Signal compartment} (driven by weighted input):
+    \(
+      \dd z_{\text{sig}}/\dd t
+        = k_f\,z_{\text{sig}} + \sum_j W_{fj}\,I_j(t)
+    \)
+  \item \textbf{Reference compartment} (free-running, analytically known):
+    \(
+      z_{\text{ref}}(t) = e^{k_f\,t}
+    \)
+\end{enumerate}
+
+The \textbf{invariant quantity} is the phase difference:
+\begin{equation}
+  \Delta\theta_f[n]
+    = \arg(z_{\text{sig}}[n]) - \arg(z_{\text{ref}}[n]),
+\end{equation}
+which represents the input's spectral content at frequency~$\omega_f$,
+independent of the carrier. This is the same principle as FM demodulation
+or lock-in amplification.
+
+To interface with downstream synchronized layers, the invariant phase is
+re-encoded at the downstream carrier~$\omega_{\text{out}}$:
+\begin{equation}\label{eq:freq-shift}
+  z_{\text{out}}[n]
+    = z_{\text{sig}}[n]
+    \cdot e^{\im(\omega_{\text{out}} - \omega_f)\,n\,\dt}.
+\end{equation}
+This frequency-shift modulation is differentiable with respect
+to~$\omega_f$, allowing the network to learn which input frequencies are
+informative. When $\omega_f = \omega_{\text{out}}$, the shift is the
+identity.
+
+The resulting architecture separates concerns:
+\begin{equation}
+  \text{Input}
+    \xrightarrow{\text{PhasorSTFT}}
+  \text{frequency-diverse}
+    \xrightarrow{\eqref{eq:freq-shift}}
+  \text{phase-coherent}
+    \xrightarrow{\text{PhasorDense}}
+  \text{readout}.
+\end{equation}
+
+\begin{remark}[Biological interpretation]
+This architecture has a direct analog in dendritic computation.
+Pyramidal neuron dendrites sustain local oscillations at frequencies
+different from the somatic oscillation; these act as resonant filters
+whose signals converge at the soma, modulating the output at the somatic
+frequency. The reference compartment corresponds to the dendrite's
+intrinsic oscillation; the phase deviation is the information
+propagated to the soma.
+\end{remark}
+
+%======================================================================
+\section{Connections to Holographic Distributed Representations}
+\label{sec:hd}
+%======================================================================
+
+The Phasor SSM's phase vectors are instances of
+\textbf{Fourier Holographic Reduced Representations} (Fourier HRR),
+the frequency-domain formulation of Plate's HRR algebra.
+In a Fourier HRR, symbols are represented as complex vectors on the unit
+torus $\bm{s} = (e^{\im\pi\theta_1},\dots,e^{\im\pi\theta_C}) \in \C^C$
+with $|\bm{s}_c| = 1$. Two algebraic operations define the representational
+system.
+
+\subsection{Binding as phase addition (complex multiplication)}
+
+The VSA \textbf{binding} operation corresponds to element-wise
+complex multiplication:
+\begin{equation}\label{eq:bind}
+  \texttt{bind}(\bm\theta_1, \bm\theta_2)_c
+    = \operatorname{remap}\bigl(\theta_{1,c} + \theta_{2,c}\bigr),
+  \qquad
+  e^{\im\pi\theta_{1,c}} \cdot e^{\im\pi\theta_{2,c}}
+    = e^{\im\pi(\theta_{1,c}+\theta_{2,c})}.
+\end{equation}
+Binding creates a new representation that is dissimilar to both operands
+but can be inverted (by binding with the conjugate), enabling
+variable--value association.
+
+In the R\&F context, the per-step state rotation
+$A_c = e^{k_c\dt}$ is itself a binding with the natural phase increment
+$\alpha_c = \omega_c\dt/\pi$. The SSM's temporal dynamics therefore
+implement a \textbf{sequence of bindings} with a fixed time-phase:
+\begin{equation}
+  z_c[n] = \texttt{bind}(z_c[0],\, n\cdot\alpha_c)
+            + \text{input contributions}.
+\end{equation}
+The accumulated rotation $n\cdot\alpha_c$ is the natural oscillator
+phase at step~$n$, and input contributions are phase-shifted copies
+of the input, each rotated by the appropriate number of time steps.
+
+\subsection{Bundling as superposition (complex addition)}
+
+The VSA \textbf{bundling} operation corresponds to element-wise complex
+addition followed by phase extraction:
+\begin{equation}\label{eq:bundle}
+  \texttt{bundle}(\bm\theta_1, \bm\theta_2)_c
+    = \frac{1}{\pi}\arg\!\bigl(
+        e^{\im\pi\theta_{1,c}} + e^{\im\pi\theta_{2,c}}
+      \bigr).
+\end{equation}
+Bundling is the constructive/destructive interference of unit phasors:
+similar phases reinforce, dissimilar phases cancel. This gives the
+R\&F system an inherent \textbf{similarity-weighted averaging} that
+linear SSMs lack.
+
+In the SSM recurrence, bundling occurs at every step:
+\begin{equation}
+  z[n+1] = A\,z[n] + B\,I[n]
+  \qquad\text{(complex addition = bundling of rotated state and new input)}.
+\end{equation}
+The causal convolution unrolls this as a \textbf{temporal bundling}:
+\begin{equation}\label{eq:temporal-bundle}
+  z_c[n] = \sum_{j=0}^{n} K_c[n-j]\,H_c[j]
+  \qquad\text{(superposition of all past inputs at different decay/rotation)}.
+\end{equation}
+Each past input is bound with a time-dependent phase rotation
+(via the kernel~$K_c$) and weighted by exponential decay, then all
+contributions are bundled into the current state.
+
+\subsection{The R\&F recurrence as VSA composition}
+
+Combining binding and bundling, the phase update~\eqref{eq:phase-update}
+decomposes as:
+\begin{equation}\label{eq:vsa-recurrence}
+  \theta[n+1]
+    = \texttt{bundle}\!\bigl(
+        \texttt{bind}(\theta[n],\,\alpha),\;
+        \texttt{bind}(\phi[n],\,\beta)
+      \bigr),
+\end{equation}
+where $\alpha$ is the per-step rotation from~$A$ and
+$\beta = \arg(B)/\pi$ is the input phase shift from the discretization
+gain.
+
+\begin{proposition}
+The R\&F recurrence is a composition of Fourier HRR binding
+(phase rotation) and bundling (interference), not a linear recurrence
+in phase space. The linearity of the underlying complex-space dynamics
+is what enables the convolutional view; the nonlinearity enters only at
+the phase-extraction boundary.
+\end{proposition}
+
+\subsection{Temporal holography: sequence memory via convolution}
+
+The causal convolution~\eqref{eq:temporal-bundle} has a direct
+interpretation as a \textbf{holographic sequence memory}.
+In the HRR literature, a sequence $x_0, x_1, \dots, x_{L-1}$
+is stored as the superposition
+\begin{equation}\label{eq:hrr-trace}
+  S = \sum_{n=0}^{L-1} \texttt{bind}(x_n,\, p^n),
+\end{equation}
+where $p$ is a position/time vector and $p^n$ denotes $n$-fold
+self-binding.
+
+In the Phasor SSM, the per-step rotation $A_c = e^{k_c T}$ plays the
+role of the position code~$p$ (with $p^n = A_c^n = e^{k_c\,nT}$),
+and the convolution kernel $K_c[n] = A_c^n$ implements the
+time-binding automatically. The convolution output is therefore
+a holographic trace: each input is bound with its temporal position
+and all are bundled into the state vector.
+
+The exponential decay $|A_c^n| = e^{\lambda_c\,nT}$ provides a
+natural \textbf{recency weighting}: recent inputs dominate the
+hologram, older inputs fade. The decay rate $\lambda_c$ controls
+the memory horizon, directly linking the SSM's leakage parameter
+to the HRR trace's temporal resolution.
+
+\subsection{Similarity-based readout as holographic retrieval}
+
+The readout equation in the Phasor SSM computes cosine similarity
+between the state phase vector and a codebook of prototypes:
+\begin{equation}\label{eq:similarity-readout}
+  y_k = \frac{1}{C}\sum_{c=1}^{C}
+    \cos\!\bigl(\pi(\theta_c - \theta_c^{(k)})\bigr),
+\end{equation}
+where $\bm\theta^{(k)}$ is the $k$-th codebook entry.
+This is exactly the \textbf{Fourier HRR similarity} measure:
+the real part of the normalized inner product between two unit-modulus
+complex vectors,
+\[
+  y_k = \frac{1}{C}\operatorname{Re}\!\Bigl(
+    \sum_c e^{\im\pi\theta_c}\,\overline{e^{\im\pi\theta_c^{(k)}}}
+  \Bigr)
+  = \frac{1}{C}\sum_c \cos\bigl(\pi(\theta_c - \theta_c^{(k)})\bigr).
+\]
+Classification therefore reduces to holographic retrieval:
+the network's temporal bundling produces a query vector, and the
+codebook lookup finds the nearest prototype in the HRR space.
+
+\subsection{The equal-period constraint as algebraic consistency}
+
+The equal-period constraint (Section~\ref{sec:equal-period}) has a
+natural interpretation in the HRR framework. For the phase vector
+$\bm\theta\in[-1,1]^C$ to be a valid holographic representation,
+all components must share the same temporal frame---otherwise the
+binding/unbinding algebra is inconsistent.
+
+If channel~$c$ rotates at~$\omega_c$, then after $n$~steps the
+time code is $e^{\im\omega_c\,n\,T}$, which differs per channel.
+Unbinding a temporal position (to retrieve what was stored at time~$j$)
+would require channel-dependent position codes, breaking the
+element-wise structure of the HRR.
+
+When all channels share $\omega$, the time code $p = e^{\im\omega T}$
+is a scalar applied uniformly, and the HRR algebra is well-defined:
+binding, unbinding, and similarity all operate element-wise with a
+consistent temporal reference.
+
+The \textsc{PhasorSTFT} layer (Section~\ref{sec:phasorstft}) resolves
+the tension between frequency diversity and algebraic consistency by
+confining per-channel~$\omega$ to the input decomposition stage and
+re-encoding at a uniform carrier before the representation enters the
+HRR regime.
+
+%======================================================================
+\section{Formal System Summary}\label{sec:summary}
+%======================================================================
+
+\begin{definition}[Phasor SSM]
+A Phasor SSM is a diagonal complex state-space model with parameters
+$W\in\R^{C\times C_{\mathrm{in}}}$,
+$\lambda\in\R^C_-$, $\omega\in\R^C_+$, $T\in\R_+$,
+and derived quantities
+$k_c = \lambda_c + \im\omega_c$,
+$A_c = e^{k_c T}$,
+$B_c = (A_c-1)/k_c$.
+It admits three equivalent computational views:
+
+\medskip
+\noindent\textbf{Continuous} (direct spike integration):
+\[
+  \frac{\dd z_c}{\dd t} = k_c\,z_c(t) + \sum_j W_{cj}\,I_j(t),
+  \qquad I_j(t) = \sum_s \kappa(t-t_s).
+\]
+
+\noindent\textbf{Discrete} (Dirac for phase inputs, ZOH for continuous):
+\[
+  z_c[n+1] = A_c\,z_c[n] + H_c[n],
+  \qquad H_c[n] =
+  \begin{cases}
+    \sum_j W_{cj}\,e^{k_c\,\delta t_j[n]} & \text{(Dirac)},\\
+    B_c\sum_j W_{cj}\,x_j[n] & \text{(ZOH)}.
+  \end{cases}
+\]
+
+\noindent\textbf{Convolutional}:
+\[
+  Z_c = K_c * H_c, \qquad
+  K_c[n] = A_c^n\ (\text{Dirac}) \text{ or } A_c^n B_c\ (\text{ZOH}).
+\]
+
+\medskip
+\noindent The phase readout $\theta_c = \arg(z_c)/\pi$ introduces a
+nonlinearity equivalent to Fourier HRR bundling. The temporal dynamics
+implement HRR binding with a time-phase. The codebook readout implements
+HRR similarity retrieval.
+\end{definition}
+
+\bigskip
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Concept} & \textbf{Standard SSM} & \textbf{Phasor SSM} \\
+\midrule
+State variable & $u\in\R^N$ or $\C^N$ & $z\in\C^C$ (complex potential) \\
+State transition & $A\in\R^{N\times N}$ & $\operatorname{diag}(e^{k_c T})$
+  (diagonal) \\
+Input projection & $B\in\R^{N\times d}$ &
+  ZOH: $\operatorname{diag}(B_c)\cdot W$;\;
+  Dirac: $e^{k_c\delta t}\cdot W$ \\
+Readout & $C\,u$ (linear) & $\arg(\cdot)/\pi$ (nonlinear phase) \\
+State addition & Linear sum & Bundling (interference) \\
+Time evolution & $e^{A\dt}$ & Binding (phase rotation) \\
+Similarity & Inner product & $\cos(\pi(\theta-\theta_{\text{ref}}))$
+  (Fourier HRR) \\
+Sequence memory & Recurrence & Holographic trace~\eqref{eq:hrr-trace} \\
+Frequency analysis & Fixed & PhasorSTFT (trainable $\omega$, re-encoded) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}

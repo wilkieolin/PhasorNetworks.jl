@@ -1,0 +1,253 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+PhasorNetworks.jl is a Julia package for phasor neural networks combining oscillatory computing, neuromorphic engineering, and Vector Symbolic Architectures (VSA). Information is represented as phases (angles in [-1, 1] in units of pi) rather than scalar activations.
+
+The architecture is built on a unified State Space Model (SSM): each layer of neurons is defined by a single equation `dz/dt = k*z + W*I(t)` where `k = lambda + i*omega` is a per-channel complex eigenvalue. This equation can be evaluated in multiple equivalent modes: discrete (phase matrices, causal convolution, FFT), or continuous ODE (spiking/current input). The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) links the modes.
+
+Built on Lux.jl (functional neural network framework), with Zygote.jl for AD, DifferentialEquations.jl for ODE solving, and KernelAbstractions.jl for hand-written GPU kernels that run on CUDA (NVIDIA) or oneAPI (Intel, Aurora) — the vendor package is a weak dependency resolved per platform.
+
+## Common Commands
+
+```bash
+# Run full test suite (CPU; no GPU vendor package is resolved)
+julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Run the full suite on the GPU: picks envs/cuda or envs/oneapi for this
+# platform (PHASOR_BACKEND=cuda|oneapi overrides; or pass it as the argument)
+julia test/gpu.jl
+julia test/gpu.jl oneapi      # e.g. in scripts/aurora_test.sh
+
+# Run from REPL
+julia --project=.
+using Pkg; Pkg.test()
+
+# Run a specific test file interactively
+julia --project=.
+include("test/runtests.jl")  # loads globals, then call e.g. network_tests()
+
+# Build docs locally
+julia --project=docs docs/make.jl
+
+# Training script
+julia --project=envs/cuda scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend auto
+
+# Experiment/figure scripts that need CSV, DataFrames, CairoMakie, etc.
+julia --project=scripts scripts/make_all_figures.jl
+```
+
+Plotting and data-frame packages live in the separate `scripts/` environment
+(`scripts/Project.toml`, which develops PhasorNetworks from `..`), not in the
+core package, so library users don't install them. Scripts that need them
+activate `scripts/` themselves. GPU vendor packages live only in the
+per-backend environments `envs/cuda` (LuxCUDA) and `envs/oneapi` (oneAPI),
+each of which develops PhasorNetworks from `../..`; run GPU work with
+`--project=envs/<backend>` and load the backend with
+`scripts/gpu_backend.jl`'s `load_gpu_backend()`. Change any
+`Project.toml`/`Manifest.toml` only through the Pkg API
+(`Pkg.add`/`Pkg.rm`/`Pkg.compat`), never by editing it. (The two entries Pkg
+has no API for — `[extensions]` and `[compat]` of a weakdep — are the single
+exception.)
+
+There is no linter or formatter configured. Julia 1.11+ is required.
+
+## Architecture
+
+### Unified SSM Model
+
+Every layer implements a single defining equation with per-channel oscillator dynamics:
+
+    dz_c/dt = k_c * z_c + W * I(t),  where k_c = lambda_c + i*omega_c
+
+This equation is evaluated via multiple dispatch on the input type. Two
+families of layers share the same defining equation but differ in what
+input domain they accept:
+
+**Encoder layers** (Complex 3D in → Phase 3D out, fixed/trainable ω):
+- `PhasorResonant` — fixed per-channel ω, ZOH SSM via `phasor_kernel +
+  causal_conv`, then `complex_to_angle`. Use this to bring a sampled
+  complex sequence into the phase domain.
+- `ResonantSTFT` — same shape as `PhasorResonant` but with **trainable**
+  ω; learned frequency decomposition.
+
+**Phase-domain layers** (Phase 3D / 2D in → Phase out):
+- `PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, attention.
+  These dispatch on `<:Phase` arrays and use `causal_conv_dirac`
+  (Dirac/spike-time encoding) for 3D Phase, or matmul for 2D Phase.
+- They also accept `SpikingCall` (→ CurrentCall → ODE) and `CurrentCall`
+  (single-stage ODE `dz/dt = k*z + W*I(t)` solved via
+  DifferentialEquations.jl).
+
+Common dispatch summary across these layers:
+
+1. **2D Phase/Complex** (`AbstractArray{<:Phase}` or `AbstractArray{<:Complex}`) — direct linear transform `W*x + bias`, fast single-step inference
+2. **3D Phase** (`AbstractArray{<:Phase, 3}`) — Dirac discretization + causal convolution via `causal_conv_dirac`, returns Phase
+3. **3D Complex** (`AbstractArray{<:Complex, 3}`) — only on `PhasorResonant` / `ResonantSTFT` (the encoder layers); `PhasorDense` no longer has this dispatch
+4. **SpikingCall** — converts to CurrentCall, then ODE integration
+5. **CurrentCall** — continuous ODE: `dz/dt = k*z + W*I(t)`, solved via DifferentialEquations.jl
+
+The discrete kernel `K[n] = A^n * B` (where `A = exp(k*dt)`, `B = (A-1)/k`) is mathematically equivalent to the continuous ODE, linking all modes.
+
+Note on `PhasorConv`: unlike `PhasorDense`, its discrete (Phase/Complex)
+path does **not** unroll the SSM kernel over time. The complex dispatch is
+a single linear convolution step (`conv(real(x)) + i·conv(imag(x)) + bias`),
+and the Phase dispatch wraps that core (`angle_to_complex` → complex step →
+activation → `complex_to_angle`). Per-channel `λ` (`log_neg_lambda`) is
+consumed only in the `CurrentCall` ODE path. Bringing the discrete path in
+line with `PhasorDense`'s temporal SSM convolution is open work.
+
+### Lux Layer Contract
+
+All layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, state) -> (output, state)`. Must implement `Lux.initialparameters(rng, layer)` and `Lux.initialstates(rng, layer)`. Trainable values go in parameters, fixed values in state.
+
+### Per-Channel Dynamics Parameters
+
+Each layer has per-channel trainable dynamics:
+- `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable, parameterized as `lambda = -exp(log_neg_lambda)`)
+- `omega` — `(out,)` Float32, per-channel angular frequency (lives in state; see *Per-channel ω rule* below)
+- `weight` — `(out, in)` Float32, connection weights
+
+### Per-channel ω rule
+
+The architecture is built on **phase-locked communication**: layer outputs
+encode information as relative phase, and downstream layers compare those
+phases via interference (similarity, binding, bundling). For the
+comparison to be well-defined, every channel within a layer must rotate
+its phasor at the same carrier frequency `ω`. Per-channel ω drift would
+desynchronize the carrier and break HD-VSA invariance.
+
+So in `PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`:
+**`ω` is a single shared scalar (`= 2π`), held in state, identical for
+every channel**. Cross-channel diversity comes from `λ` (multi-timescale
+memory) and from the weight matrix.
+
+The single architectural exception is `ResonantSTFT`, which is explicitly
+a frequency-decomposition front end: it carries per-channel trainable
+ω, then re-encodes its outputs at a single downstream `omega_out` (via
+`_freq_shift`) so subsequent layers resume phase-locked operation.
+
+Init modes for normal layers (`PhasorDense` / `PhasorConv` / `PhasorFixed`):
+- `:default` — `log_neg_lambda = log(0.2)` (single timescale).
+- `:hippo`   — `log_neg_lambda` from log-spaced HiPPO-LegS spectrum
+  (multi-timescale memory).
+
+(`:uniform` was removed — it spread ω across channels, which violates
+the per-channel ω rule.)
+
+### Data Flow
+
+```
+Input → Encoding (Phase, complex, or spike train)
+      → Network Layers (PhasorDense / PhasorConv / ResonantSTFT / PhasorAttention)
+      │   Discrete path: weight mixing → causal_conv(phasor_kernel, input)
+      │   ODE path:      dz/dt = k*z + W*I(t) via oscillator_bank
+      → Readout (Codebook / SSMReadout — similarity-based classification)
+      → Loss & Metrics
+```
+
+### Source File Responsibilities
+
+Listed in `include()` order (see `src/PhasorNetworks.jl`), which also reflects
+the load-dependency order.
+
+| File | Role |
+|------|------|
+| `imports.jl` | Centralized `using`/`import` of all external dependencies (Lux, MLDataDevices, KernelAbstractions, DifferentialEquations, FFTW, ChainRulesCore, …); loaded first. Never imports a GPU vendor package |
+| `constants.jl` | Module-level constants: `N_THREADS`, `pi_f32`, unit phasors (`z_0`, `z_90cw`, `z_90ccw`). (The legacy `cdev`/`gdev` globals are gone.) |
+| `types.jl` | `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
+| `backend.jl` | Backend-agnostic GPU helpers: `on_gpu` (any-backend detection via `AbstractGPUArray` / `SpikeTrainGPU`), `select_device(backend)` for `:auto`/`:cpu`/`:cuda`/`:oneapi`, `to_device_of` (device follows data), `gpu_zeros`, `reclaim_device!` hook. `:cuda`/`:oneapi` methods are added by `ext/PhasorNetworksCUDAExt.jl` / `ext/PhasorNetworksOneAPIExt.jl` |
+| `domains.jl` | Phase↔complex↔potential↔spike conversions, spike kernels, normalization, `bias_to_complex_offset` |
+| `activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`, …) passed as the `activation` argument to layers; pure domain conversions stay in `domains.jl` |
+| `gpu.jl` | KernelAbstractions kernels (any backend) mirroring CPU paths for spike processing, scatter-add, similarity |
+| `spiking.jl` | `oscillator_bank`, `spike_current`, `neuron_constant`, spike detection |
+| `vsa.jl` | `v_bind`, `v_unbind`, `v_bundle`, `similarity`, `codebook_loss` |
+| `kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding, HiPPO init |
+| `network.jl` | `PhasorResonant`, `ResonantSTFT` (complex→phase encoders), `PhasorDense`, `PhasorConv`, `PhasorFixed`, `ComplexBias`, `Codebook`, `PhasorAttention`, `train()` |
+| `fpe.jl` | `FPEEncoder` (fractional-power / residue-code encoder: real x → phases `ω_j x`, modes `:uniform`/`:residue`/`:hex`, layouts `:bound`/`:blocks`), `Resonator` (factorises a bound address into its codebook entries; `:abs`/`:linear`/`:codeword` projections), `fpe_codebook(s)`, `fpe_table`, `crt_decode`. Numbers and the spiking-path status in `docs/fpe_resonator.md` |
+| `ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, local attention (`PhasorLSA`/`PhasorLCA`), encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch. (No `PhasorSSM` — that struct was unified into `PhasorDense`.) |
+| `attractor_ssm.jl` | `AttractorPhasorSSM`: selective SSM adding a Hopfield-style attractor pull toward learned phasor codes (`attractor_pull`); reduces to the linear SSM when pull strength α=0 |
+| `wave.jl` | `PhasorWaveSheet` dynamics |
+| `velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
+| `metrics.jl` | `evaluate_accuracy`, `evaluate_loss`, confusion matrices, ROC curves |
+| `datasets.jl` | Dataset loaders (`fashion_mnist_data`) with on-disk caching via Scratch.jl |
+| `hep.jl` | Holomorphic Equilibrium Propagation (hEP): energy-based training with a consistent energy function — `hep_train`, `hep_energy`, `hep_equilibrium`, `HolomorphicReadout`, `holotanh` |
+| `ep.jl` | Phasor Equilibrium Propagation (vanilla EP on the unit circle): `ep_train`, `phasor_settle`, `ep_predict`, `StaticEP` (one-sided or `centered`) / `LockinEP`, `SimilarityCost`/`CodebookCost`. States are `(out,)` single-sample or `(out, B)` batched on one code path; the `1/B` lives on the Hebbian, not the nudge. Runs on CPU or GPU (device-agnostic allocation via `gpu_zeros`); `fd_gradient_phasor` is CPU-only. **λ/ω split:** `ep_self_force` returns `½λz` only — ω is symplectic (`Re⟨z,(λ+iω)z⟩ = λ|z|²`, so it contributes nothing to Φ) and is applied instead as an exact multiplicative carrier rotation via `phasor_settle(carrier=ω, t0=…)`, never as an additive `iω·z`. For a chain with one shared ω the carrier cancels identically, so the rotating **settle** IS the static settle — see `docs/phasor_lockin_derivation.tex` §Rotating Frame for the proof, `docs/ep_rotating_extension.md` for the narrative, `scripts/ep_rotating_gates.jl` for the gates that enforce it. **This stops at the readout:** `_quantize_phase` (`readout_δ > 0`) is the one non-U(1)-equivariant operation in the pipeline — rounding commutes with a rotation only on exact multiples of the grid — so with quantization the frame is a modelling choice about what the readout clock is locked to, not a change of variables (Gate F; `scripts/ep_readout_frame_check.jl`). **Scope:** the four extension hooks (`ep_drive`/`ep_feedback`/`ep_hebbian`/`ep_energy_contribution`) have one method each, on `PhasorDense`, over a strict feedforward chain — no binding, recurrence, or skips — and every headline result is `K_mode=:zero`. Program status, recap audit and the ranked follow-up list: `docs/ep_program_status.md` |
+
+### Key Type Aliases
+
+- `Phase <: Real` — scalar type wrapping `Float32`, representing a phase angle in [-1, 1] (units of pi). `isbits`, 4 bytes. Arithmetic with other `Real` types promotes to `Float32`. Network layers dispatch on `AbstractArray{<:Phase}` for type safety.
+- `LuxParams = Union{NamedTuple, AbstractArray}` — used for layer parameter type annotations
+- `SolutionType` enum: `:phase`, `:potential`, `:current`, `:spiking`
+
+## Working here as an agent (the arc_experiments workflow)
+
+This library is a path dependency of `~/code/arc_experiments`; that tree's `CLAUDE.md` rule 8 governs changes here.
+The short form:
+
+1. **A worktree per branch**, off `main`: `git worktree add ../PhasorNetworks.jl-<name> -b <name> main`. The shared
+   checkout `~/code/PhasorNetworks.jl` stays on `main` (experiment environments point at it). Pinned GPU environments
+   in a worktree: `make envs` there (or `make env-oneapi` / `make env-cuda`).
+2. **A test in `test/`** for the change, then `make test` (CPU suite) and, for a GPU path, `make test-gpu` on the
+   backends it touches. Pass counts and the commit go into the experiment item's README.
+3. **No push without the owner's recorded OK.** Ask through the item's `needs_owner`; the owner's answer is written
+   as `owner_ok` in the item record; only then `PHASOR_PUSH_OK=1 git push` (the pre-push hook from `make hooks`
+   refuses otherwise). Never push `main`.
+4. **Open a pull request** (`gh pr create`) so CI runs here; the owner merges and deletes the branch.
+
+## Critical Conventions
+
+### Float32 Everywhere
+
+Use `Float32` for all neural data. Write `1.0f0` not `1.0`. GPU kernels require this. Avoid Float64 except where external libraries demand it (e.g., Optimisers.jl learning rates).
+
+### Phase Range [-1, 1]
+
+Phases are represented as `Phase` values in [-1, 1] (units of pi). Producer functions (`complex_to_angle`, `soft_angle`, `remap_phase`, `random_symbols`, `time_to_phase`, `potential_to_phase`, `angular_mean`) return `Phase` arrays. Network layers (`PhasorDense`, `PhasorConv`, `PhasorFixed`, `Codebook`, `attend`, `PhasorAttention`) dispatch on `AbstractArray{<:Phase}` for their phase-mode forward pass. Use `Phase.()` to wrap raw `Float32` data at network input boundaries. Arithmetic on `Phase` promotes to `Float32` — use `remap_phase(x)` after arithmetic that may exceed bounds. Use circular distance metrics (`arc_error`) not naive subtraction for phase comparisons.
+
+### Bias Application
+
+In **discrete mode** (3D complex/Phase), bias is applied directly as a complex offset after causal convolution.
+
+In **ODE mode** (CurrentCall), bias can be injected as periodic current via `bias_current`, or applied post-hoc via `bias_to_complex_offset(bias, tspan; spk_args)`. For training stability, prefer post-ODE application when gradients are unstable.
+
+### Zygote AD Compatibility
+
+- Never mutate arrays in differentiable code paths — use `map` and broadcasting
+- Use `ChainRulesCore.ignore_derivatives` for bookkeeping logic
+- Use `ifelse` not `if/else` for conditional logic in hot paths
+- Avoid dictionaries, try/catch, and foreign calls in differentiable paths
+- ComponentArrays need special handling for bias parameters
+
+### ODE Gradient Strategy
+
+Uses `BacksolveAdjoint` with `ZygoteVJP` for sensitivity analysis through DifferentialEquations.jl. Default solver is `Tsit5()` with `dt=0.005, adaptive=false`.
+
+### GPU Backend Abstraction
+
+GPU code uses KernelAbstractions.jl for vendor-neutral kernels and GPUArraysCore's `AbstractGPUArray` for dispatch. The package has **no** GPU vendor dependency: CUDA and oneAPI are `[weakdeps]`, each with a package extension (`ext/PhasorNetworksCUDAExt.jl`, `ext/PhasorNetworksOneAPIExt.jl`) that registers `select_device(:cuda)` / `select_device(:oneapi)`. The backend resolves per platform from whichever vendor package the *environment* loads: `envs/cuda` (LuxCUDA) on NVIDIA machines, `envs/oneapi` on Aurora. Never `using CUDA`/`oneAPI` or name `CuArray`/`oneArray` inside `src/`.
+
+- GPU kernels in `gpu.jl` use `@kernel`/`@index` (KernelAbstractions), not `@cuda`/`blockIdx`/`threadIdx`
+- Atomic operations use `Atomix.@atomic`, not `CUDA.@atomic`
+- Dispatch on `AbstractGPUArray` instead of `CuArray` for backend-agnostic GPU paths
+- Use `gpu_zeros(ref_array, T, dims...)` or `KernelAbstractions.zeros(get_backend(ref), T, dims)` instead of `CUDA.zeros`
+- Use `select_device(backend)` instead of checking `CUDA.functional()` directly; `reclaim_device!(dev)` instead of `CUDA.reclaim()`
+- Device follows the data: lift host constants onto GPU data with `to_device_of(ref, x)` or `MLDataDevices.get_device(ref)(x)`; `SpikeTrainGPU(...; device=)` takes an explicit device when building from host data
+- `Args` has `backend::Symbol` (`:auto` default, `:cpu`, `:cuda`, `:oneapi`). `use_cuda` kwarg and property still work for backward compat.
+- `on_gpu(args...)` checks `AbstractGPUArray`, not `CuArray`
+
+### Exports
+
+All public API functions must be listed in the `export` block in `src/PhasorNetworks.jl`.
+
+## Testing
+
+Test globals defined in `test/runtests.jl`: `n_x=51, n_y=51, epsilon=0.025, repeats=10`. Default `SpikingArgs`: `leakage=-0.2, t_period=1.0, t_window=0.01`. `Pkg.test()` is the CPU suite. GPU tests run when `PHASOR_BACKEND` selects a functional backend — use `julia test/gpu.jl [cuda|oneapi]`, which activates `envs/<backend>` and sets it; test bodies use the `GPU_DEV` global (never `gpu_device()` or a vendor name) and live in `test/test_gpu.jl`. The GPU section runs before the CPU suite so device failures surface early. On Aurora, launch through `scripts/aurora_test.sh`: it strips the site oneAPI module's `LD_LIBRARY_PATH` entries, which otherwise shadow oneAPI.jl's bundled SYCL adapters and SIGABRT the first oneMKL call (`test/gpu.jl oneapi` refuses to start while they are present). Use appropriate tolerances for floating-point phase comparisons.
+
+## Code Style
+
+- 4-space indentation
+- `snake_case` for functions, `PascalCase` for types
+- Docstrings with `# Arguments`, `# Returns`, `# Implementation` sections

@@ -1,0 +1,262 @@
+# Repository Overview
+
+## Project Description
+
+**PhasorNetworks.jl** is a Julia package for implementing and simulating phasor neural networks that combine concepts from oscillatory computing, neuromorphic engineering, and Vector Symbolic Architectures (VSA).
+
+- **Main purpose:** Provide methods for manipulating phase-based vector-symbolic systems and creating deep networks utilizing these operations. It supports both atemporal floating-point computation and dynamical systems that interfere and exchange impulses through time (spiking neural networks via ODE solvers).
+- **Key goals:** Enable researchers to build, train, and evaluate phasor neural networks that operate on phase representations rather than traditional scalar activations, with GPU acceleration for large-scale experiments.
+
+### Key Technologies
+
+- **Language:** Julia 1.11+
+- **Deep Learning Framework:** [Lux.jl](https://github.com/LuxDL/Lux.jl) (functional, stateless neural network library)
+- **Automatic Differentiation:** Zygote.jl with ChainRulesCore.jl for custom rules
+- **ODE Solvers:** DifferentialEquations.jl with SciMLSensitivity.jl for differentiable ODE solving
+- **GPU Acceleration:** CUDA.jl / LuxCUDA.jl with hand-written CUDA kernels
+- **Optimisation:** Optimisers.jl (Adam, RMSProp, etc.)
+- **Data Handling:** MLDatasets.jl, MLUtils.jl, OneHotArrays.jl
+- **Documentation:** Documenter.jl (deployed to GitHub Pages)
+- **CI:** GitHub Actions (test on Julia 1.11, codecov coverage)
+
+## Architecture Overview
+
+### Unified SSM Model
+
+Phasor networks represent information as **phases** (angles in [-1, 1] in units of pi) rather than scalar activations. Each layer of neurons is defined by a single equation:
+
+    dz_c/dt = k_c * z_c + W * I(t),  where k_c = lambda_c + i*omega_c
+
+This equation discretizes to a linear recurrence `z[n+1] = A*z[n] + B*I[n]` which unrolls into a causal convolution `z = K * I` with kernel `K[n] = A^n * B`. This links three equivalent execution modes:
+
+1. **Discrete mode** — phase matrices or complex sequences processed via causal convolution (Toeplitz for short, FFT for long sequences). Fastest for training.
+2. **Continuous ODE mode** — spike train or current inputs integrated via `oscillator_bank` using DifferentialEquations.jl. Enables neuromorphic deployment.
+3. **Dirac mode** — phase inputs encoded as instantaneous spikes, processed via `causal_conv_dirac` for efficient phase-to-phase computation.
+
+Frequencies are locked across layers (or explicitly shifted via `ResonantSTFT`) to allow communication with invariant phase differences.
+
+The package also provides:
+- **VSA operations** — binding (element-wise phase addition) and bundling (circular mean) for compositional representations
+- **GPU acceleration** — custom CUDA kernels for spike-current computation, scatter-add, and interference calculations
+
+### Data Flow
+
+```
+Input Data
+    |
+    v
+Encoding (Phase, complex, or spike train)
+    |
+    v
+Network Layers (PhasorDense / PhasorConv / ResonantSTFT / PhasorAttention)
+    |  Discrete path: weight mixing -> causal_conv(phasor_kernel, input)
+    |  ODE path:      dz/dt = k*z + W*I(t) via oscillator_bank
+    |  Dirac path:    causal_conv_dirac(phases, W, lambda, omega, T)
+    v
+Readout (Codebook / SSMReadout — similarity-based classification)
+    |
+    v
+Loss & Metrics (similarity_loss, codebook_loss, evaluate_accuracy)
+```
+
+### Main Components
+
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| **Types** | `src/types.jl` | Core data structures: `SpikeTrain`, `SpikeTrainGPU`, `SpikingArgs`, `SpikingCall`, `CurrentCall`, `Phase`, `Args` |
+| **Domains** | `src/domains.jl` | Conversions between phase, complex, time, potential, spike train, and real-vector representations |
+| **Kernels** | `src/kernels.jl` | Discrete phasor kernels (`phasor_kernel`), causal convolution (Toeplitz/FFT), Dirac encoding (`dirac_encode`, `causal_conv_dirac`), HiPPO-LegS initialization |
+| **Network** | `src/network.jl` | Lux layer definitions: `PhasorDense`, `PhasorConv`, `ResonantSTFT`, `PhasorFixed`, `ComplexBias`, `Codebook`, `ResidualBlock`, `PhasorAttention`, `SingleHeadAttention`, `MinPool`, `MakeSpiking`, `train()` |
+| **SSM** | `src/ssm.jl` | `SSMReadout`, `SSMCrossAttention`, `SSMSelfAttention`, encoding helpers (`psk_encode`, `impulse_encode`), spiking dispatch for SSM layers, deprecated `PhasorSSM` constructor |
+| **VSA** | `src/vsa.jl` | Vector Symbolic Architecture ops: `v_bind`, `v_unbind`, `v_bundle`, `v_bundle_project`, `similarity`, `random_symbols` |
+| **Spiking** | `src/spiking.jl` | ODE-mode utilities: `oscillator_bank`, `spike_current`, `bias_current`, `neuron_constant`, spike detection |
+| **GPU** | `src/gpu.jl` | CUDA kernels and GPU-optimised paths for spike processing, scatter-add, interference, `oscillator_bank`, `similarity_outer` |
+| **Metrics** | `src/metrics.jl` | Evaluation: `arc_error`, `angular_mean`, `evaluate_loss`, `evaluate_accuracy`, `confusion_matrix`, ROC curves |
+| **Backend** | `src/backend.jl` | Backend-agnostic GPU helpers (`select_device`, `on_gpu`) for `:cuda`/`:cpu`/`:oneapi` |
+| **Activations** | `src/activations.jl` | Complex-domain layer activations (`soft_angle`, `soft_normalize_to_unit_circle`) |
+| **Attractor SSM** | `src/attractor_ssm.jl` | `AttractorPhasorSSM`: Hopfield-style attractor pull toward learned phasor codes |
+| **Datasets** | `src/datasets.jl` | Dataset loaders (`fashion_mnist_data`) with Scratch.jl caching |
+| **HEP** | `src/hep.jl` | Holomorphic Equilibrium Propagation (`hep_train`, `hep_energy`) |
+| **EP** | `src/ep.jl` | Vanilla Equilibrium Propagation (`ep_train`, `ep_predict`, `StaticEP`/`LockinEP`); minibatched, CPU or GPU. Carrier (rotating/R&F) support via `phasor_settle(carrier=ω)`; see `docs/ep_rotating_extension.md` |
+| **Wave** | `src/wave.jl` | `PhasorWaveSheet` dynamics |
+| **Excitable** | `src/excitable.jl` | Excitable dynamics |
+| **Velocity** | `src/velocity_bank.jl`, `velocity_bank_hw.jl` | Velocity-bank extensions |
+| **Constants** | `src/constants.jl` | Global constants: `N_THREADS` (CUDA), `pi_f32`, device handles |
+| **Imports** | `src/imports.jl` | Centralised `using`/`import` statements |
+
+### Layer Dispatch via Multiple Dispatch
+
+All custom layers extend `Lux.AbstractLuxLayer` and follow `(layer)(x, params, state) -> (output, state)`. Input type determines execution mode:
+
+- **2D Complex** `(C, B)` — linear transform `W*x + bias`, no temporal kernel
+- **3D Complex** `(C, L, B)` — weight mixing + causal convolution with per-channel kernel + activation
+- **2D Phase** — `angle_to_complex` -> 2D complex -> activation -> `complex_to_angle`
+- **3D Phase** — Dirac discretization with `causal_conv_dirac` -> `complex_to_angle`
+- **SpikingCall** — converts to CurrentCall, delegates
+- **CurrentCall** — continuous ODE `dz/dt = k*z + W*I(t)`, sampled at period boundaries
+
+Trainable parameters per layer: `log_neg_lambda` (per-channel decay), `weight` (connections). Init modes: `:default` (single-timescale `λ`) and `:hippo` (HiPPO-LegS multi-timescale `λ` spread).
+
+**Per-channel ω rule:** in normal phase-locked layers (`PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`), `ω` is a single shared scalar (= `2π`) held in state — every channel rotates at the same carrier so that output phases stay commensurable for downstream HD-VSA operations. The single architectural exception is `ResonantSTFT`, which carries per-channel trainable `ω` (frequency decomposition) and re-encodes its outputs at a uniform downstream `omega_out` so subsequent layers resume phase-locked operation.
+
+## Directory Structure
+
+```
+PhasorNetworks.jl/
+├── src/                        # Package source code
+│   ├── PhasorNetworks.jl       # Module definition and exports
+│   ├── imports.jl              # Centralised dependency imports
+│   ├── constants.jl            # Global constants (N_THREADS, pi_f32, devices)
+│   ├── backend.jl                  # Backend-agnostic GPU helpers
+│   ├── types.jl                    # Core data structures (`Phase`, `Args`, spiking types)
+│   ├── domains.jl                  # Domain conversion functions
+│   ├── kernels.jl              # Discrete phasor kernels, causal convolution, HiPPO
+│   ├── network.jl              # Neural network layers and training
+│   ├── ssm.jl                  # SSM readout, attention, encoding, spiking helpers
+│   ├── vsa.jl                  # Vector Symbolic Architecture operations
+│   ├── spiking.jl              # ODE-mode utilities (oscillator_bank, spike_current)
+│   ├── gpu.jl                  # CUDA kernels and GPU-optimised operations
+│   ├── activations.jl          # Complex-domain layer activations
+│   ├── attractor_ssm.jl        # Attractor SSM
+│   ├── datasets.jl             # Dataset loaders
+│   ├── hep.jl                  # Holomorphic EP
+│   ├── ep.jl                   # Equilibrium Propagation
+│   ├── wave.jl                 # Wave dynamics
+│   ├── velocity_bank.jl        # Velocity-bank extensions
+│   ├── velocity_bank_hw.jl     # Hardware-specific velocity bank helpers
+│   ├── excitable.jl            # Excitable dynamics
+│   └── metrics.jl              # Evaluation metrics and analysis
+├── test/                       # Test suite
+│   ├── runtests.jl             # Test entry point
+│   ├── data.jl                 # Test data helpers
+│   ├── domain_tests.jl         # Domain conversion tests
+│   ├── vsa_tests.jl            # VSA operation tests
+│   ├── network_tests.jl        # Network forward/backward pass tests
+│   ├── network_layers_tests.jl # Individual layer tests
+│   ├── test_phase_type.jl      # Phase scalar type tests
+│   ├── test_ssm.jl             # SSM kernel, causal conv, readout, attention tests
+│   ├── test_local_attention.jl # Local attention tests
+│   ├── test_local_attention_extras.jl # Local attention extras
+│   ├── test_transformer_block.jl # Transformer block tests
+│   ├── test_multimode.jl       # Multimode tests
+│   ├── test_attractor_ssm.jl   # Attractor SSM tests
+│   ├── test_wave.jl            # Wave dynamics tests
+│   ├── test_excitable.jl       # Excitable dynamics tests
+│   ├── test_hep.jl             # HEP tests
+│   ├── test_ep.jl              # EP tests
+│   ├── metrics_tests.jl        # Metrics tests
+│   ├── test_backend.jl         # Backend abstraction tests
+│   ├── test_gpu.jl             # GPU tests (any backend; uses GPU_DEV)
+│   └── spiking_operations_tests.jl  # Spiking operations tests (active)
+├── scripts/                    # Training and experiment scripts
+│   ├── train_fashionmnist.jl       # FashionMNIST training script (CLI)
+│   ├── train_fashionmnist_conv.jl  # Convolutional variant
+│   ├── dispatch_polaris.sh         # HPC job submission (PBS/Polaris)
+│   ├── dispatch_aurora.sh          # Aurora HPC dispatch
+│   ├── attractor_sweep.jl          # Attractor sweep script
+│   └── ...                         # Additional experiment scripts
+├── demos/                      # Jupyter notebooks demonstrating features
+│   ├── binding.ipynb           # VSA binding demos
+│   ├── bundling.ipynb          # VSA bundling demos
+│   ├── network fashionmnist.ipynb  # End-to-end training demo
+│   ├── layer.ipynb / layer conv.ipynb  # Layer-level demos
+│   ├── oscillator bank.ipynb   # Spiking oscillator demos
+│   └── ...                     # Many more demo notebooks
+├── tutorial/                   # Step-by-step tutorial notebooks
+│   ├── 00 julia crash course.ipynb
+│   ├── 01 representation.ipynb
+│   ├── 02 oscillators.ipynb
+│   ├── 03 similarity.ipynb
+│   └── 04 neural network.ipynb
+├── docs/                       # Documenter.jl documentation
+│   ├── make.jl                 # Doc build script
+│   └── src/                    # Doc source (index.md, api/*.md)
+├── runs/                       # Saved training run results (.jld2)
+├── results/                    # Additional experiment outputs
+├── .claude/                    # Claude project files
+├── ext/                        # Extension files
+├── CLAUDE.md                   # Claude documentation
+├── Project.toml                # Julia package manifest (deps + compat)
+├── Manifest.toml               # Locked dependency versions
+└── .github/                    # CI and automation
+    ├── workflows/              # CI configuration
+    │   ├── CI.yml              # Tests + docs deployment
+    │   ├── CompatHelper.yml    # Dependency compat auto-updates
+    │   └── TagBot.yml          # Auto-tagging releases
+    └── dependabot.yml          # Dependabot configuration
+```
+
+### Key Entry Points
+
+- **Package entry:** `src/PhasorNetworks.jl` — defines the module, exports, and includes
+- **Test entry:** `test/runtests.jl` — runs the test suite
+- **Training scripts:** `scripts/train_fashionmnist.jl` — CLI-driven training with ArgParse
+- **Doc build:** `docs/make.jl` — generates API documentation
+
+## Development Workflow
+
+### Environment Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/wilkieolin/PhasorNetworks.jl.git
+cd PhasorNetworks.jl
+
+# Start Julia and activate the project
+julia --project=.
+
+# Install dependencies
+using Pkg
+Pkg.instantiate()
+```
+
+### Building and Running
+
+```julia
+# Load the package in development mode
+using PhasorNetworks
+
+# Run a training script from the command line
+julia scripts/train_fashionmnist.jl --lr 0.001 --epochs 5 --optimizer rmsprop --batchsize 128 --backend :cuda
+```
+
+### Testing
+
+```bash
+# Run the full test suite
+julia --project=. -e 'using Pkg; Pkg.test()'
+
+# Or from the Julia REPL
+using Pkg
+Pkg.test()
+```
+
+The test suite covers: domain conversions, VSA operations (binding, bundling, similarity, orthogonality), network forward/backward passes, individual layer behaviour (PhasorDense, PhasorConv, ComplexBias, Codebook, MinPool, ResidualBlock, etc.), metrics, and optionally CUDA-specific tests.
+
+**Note:** `runtests.jl` includes all active test modules (`domain_tests`, `vsa_tests`, `network_tests`, `metrics_tests`, `network_layers_tests`, `test_phase_type`, `test_ssm`, `test_local_attention`, `test_local_attention_extras`, `test_transformer_block`, `test_multimode`, `test_attractor_ssm`, `test_wave`, `test_excitable`, `test_hep`, `test_ep`, `spiking_operations_tests`, `test_backend`). GPU tests (`test_gpu.jl`) run when `PHASOR_BACKEND` selects a functional backend: `julia test/gpu.jl [cuda|oneapi]` activates `envs/<backend>` and sets it; `Pkg.test()` is the CPU suite.
+
+### Documentation
+
+```bash
+# Build docs locally
+julia --project=docs docs/make.jl
+# Output is in docs/build/
+```
+
+Documentation is auto-deployed to GitHub Pages via CI on pushes to `main`.
+
+### Code Style and Conventions
+
+- **No formal linter/formatter** is configured. Follow existing code style: 4-space indentation, descriptive function/type names in snake_case (functions) and PascalCase (types).
+- **Docstrings:** Functions should have docstrings with `# Arguments`, `# Returns`, and `# Implementation` sections (see `src/domains.jl` and `src/gpu.jl` for good examples).
+- **Type annotations:** Use `Float32` throughout for GPU compatibility. The `LuxParams = Union{NamedTuple, AbstractArray}` type alias is used for layer parameters.
+- **Multiple dispatch:** Each operation typically has methods for `AbstractArray` (phase mode), `SpikingCall` (spike mode), and `CurrentCall` (current mode), plus CPU and GPU specialisations.
+- **Exports:** All public API functions must be listed in the `export` block in `src/PhasorNetworks.jl`.
+
+### Phase Scalar Type
+
+`Phase <: Real` — scalar type wrapping `Float32`, representing phase angles in [-1, 1] (units of pi). Network layers dispatch on `AbstractArray{<:Phase}` for phase-mode forward passes.
+
+### HPC Deployment
+
+The `scripts/dispatch_polaris.sh` script provides a PBS job template for running on the Polaris supercomputer at ALCF, loading Julia 1.11 and dispatching GPU training.

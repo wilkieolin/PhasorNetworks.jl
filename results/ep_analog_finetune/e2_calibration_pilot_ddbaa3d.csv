@@ -1,0 +1,4 @@
+gitrev,pretrain,impairment_type,param,rep,acc_clean,acc_impaired,acc_tuned,acc_bp_ft,acc_readout_only,recovery_frac,bp_recovery_frac,readout_recovery_frac,width,depth
+ddbaa3d,backprop,lognormal,0.01,1,0.8622,0.8627,0.8503,0.8668,0.8592,NaN,NaN,NaN,256,2
+ddbaa3d,backprop,lognormal,0.01,1,0.8577,0.8576,0.8284,0.8715,0.8608,-1.0,2.0,2.0,256,2
+ddbaa3d,backprop,lognormal,0.01,2,0.8577,0.8577,0.8233,0.8625,0.8579,NaN,NaN,NaN,256,2

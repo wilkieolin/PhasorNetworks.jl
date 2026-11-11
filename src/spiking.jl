@@ -1,5 +1,3 @@
-include("gpu.jl")
-
 function bias_current(bias::LuxParams, t::Real, t_offset::Real, spk_args::SpikingArgs)
     bias = bias.bias_real .+ 1im .* bias.bias_imag
     return bias_current(bias, t, t_offset, spk_args)
@@ -12,19 +10,18 @@ function bias_current(bias::AbstractArray{<:Complex}, t::Real, t_offset::Real, s
 end
 
 function bias_current(phase::AbstractArray{<:Real}, mag::AbstractArray{<:Real}, t::Real, t_offset::Real, spk_args::SpikingArgs)
-    #what times to the bias values correlate to?
-    times = phase_to_time(phase, spk_args=spk_args, offset=t_offset)
-    #determine the time within the cycle
-    t = mod(t, spk_args.t_period)
-
-    #add the active currents, scaled by the gaussian kernel & bias magnitude
-    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-    bias = mag .* current_kernel(times)
+    times = phase_to_time(phase, offset=t_offset, spk_args=spk_args)
+    impulses = periodic_raised_cosine_kernel(times, Float32(t), spk_args.t_window, spk_args.t_period)
+    bias = mag .* impulses
 
     return bias
 end
 
-function check_offsets(x::SpikeTrain, y::SpikeTrain)
+function check_offsets(x::SpikingCall, y::SpikingCall)
+    return check_offsets(x.train, y.train)
+end
+
+function check_offsets(x::Union{<:SpikeTrain, SpikeTrainGPU}, y::Union{<:SpikeTrain, <:SpikeTrainGPU})
     if x.offset != y.offset
         return false
     else
@@ -32,7 +29,7 @@ function check_offsets(x::SpikeTrain, y::SpikeTrain)
     end
 end
 
-function check_offsets(x::SpikeTrain...)
+function check_offsets(x::Union{<:SpikeTrain, <:SpikeTrainGPU}...)
     offset = x[1].offset
     for st in x
         if st.offset != offset
@@ -68,10 +65,10 @@ Used in [`match_offsets`](@ref) to align spike trains for comparison or combinat
 function delay_train(train::SpikingTypes, t::Real, offset::Real)
     times = train.times .+ t
 
-    if typeof(train) == SpikeTrain
-        new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset)
+    if !on_gpu(train.indices)
+        new_train = SpikeTrain(train.indices, times, train.shape, train.offset + offset, train.charges)
     else
-        new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset)
+        new_train = SpikeTrainGPU(train.indices, times, train.shape, train.offset + offset, train.charges)
     end
 
     return new_train
@@ -141,40 +138,6 @@ function find_spikes_rf(u::AbstractArray, t::AbstractVector, spk_args::SpikingAr
     times = t[getindex.(spikes, dim)]
     
     return channels, times
-end
-
-"""
-    gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real) -> Array{Float32}
-    gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real) -> Array{Float32}
-    arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real) -> Array{Float32}
-
-Family of kernel functions for computing spike-induced currents.
-
-# Arguments
-- `x`: Spike times or phase values
-- `t`: Current time (or vector of times for _vec variant)
-- `t_sigma`: Width parameter of the kernel
-
-# Variants
-- `gaussian_kernel`: Standard Gaussian kernel for spike times
-- `gaussian_kernel_vec`: Vectorized version for multiple evaluation times
-- `arc_gaussian_kernel`: Circular/periodic version using sine distance
-
-See also: [`gaussian_kernel_gpu`](@ref) for GPU implementation
-"""
-function gaussian_kernel(x::AbstractArray, t::Real, t_sigma::Real)
-    i = exp.(-1.0f0 .* ((t .- x) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
-end
-
-function gaussian_kernel_vec(x::AbstractVector, ts::Vector, t_sigma::Real)
-    i = exp.(-1.0f0 .* ((ts' .- x) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
-end
-
-function arc_gaussian_kernel(x::AbstractVecOrMat, t::Real, t_sigma::Real)
-    i = exp.(-1.0f0 .* (sin.(0.5f0 * pi_f32 .* (t .- x)) / (2.0f0 .* t_sigma)).^2.0f0)
-    return i
 end
 
 function generate_cycles(tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, offset::Real)
@@ -289,6 +252,8 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
     @assert typeof(spk_args.spike_kernel) <: Function || spk_args.spike_kernel == :gaussian "Unrecognized kernel type, defaulting to gaussian"
     current = zeros(Float32, train.shape)
     scale = spk_args.spk_scale
+    # Ensure t is Float32 to avoid mixed-precision issues
+    t = Float32(t)
 
     ignore_derivatives() do
         #find which channels are active 
@@ -299,27 +264,55 @@ function spike_current(train::SpikeTrain, t::Real, spk_args::SpikingArgs; sigma:
 
         #add currents into the active synapses
         if typeof(spk_args.spike_kernel) <: Function
-            current_kernel = x -> spk_args.spike_kernel(x, t)
+            current_kernel = times -> spk_args.spike_kernel(times, t)
         elseif spk_args.spike_kernel == :gaussian
-            current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
+            current_kernel = times -> raised_cosine_kernel(times, t, spk_args.t_window)
         end
         impulses = current_kernel(active_tms)
-        
-        current[active_inds] .+= (scale .*impulses)
+
+        # Accumulate explicitly: `current[active_inds] .+= ...` does not sum
+        # repeated indices (each duplicate is written from the same
+        # pre-update value), so coincident spikes on one input would be
+        # dropped. The loop matches the GPU path's atomic scatter-add.
+        # Charged spikes (Hill emission) deliver q·kernel; `charges ===
+        # nothing` keeps the unit-charge loop unchanged (bit-identical).
+        if train.charges === nothing
+            for (j, i) in enumerate(active_inds)
+                current[i] += scale * impulses[j]
+            end
+        else
+            active_q = train.charges[active]
+            for (j, i) in enumerate(active_inds)
+                current[i] += scale * active_q[j] * impulses[j]
+            end
+        end
     end
 
     return current
 end
 
+function resonant_update(u::AbstractArray{<:Complex}, leakage::Real, t_period::Real)
+    return neuron_constant(Float32(leakage), Float32(t_period)) .* u
+end
+
+function resonant_update(u::AbstractArray{<:Complex}, leakage::AbstractArray, t_period::AbstractArray)
+    return neuron_constant(Float32.(leakage), Float32.(t_period)) .* u
+end
+
 function spike_current(train::SpikeTrainGPU, t::Real, spk_args::SpikingArgs)
     scale = spk_args.spk_scale
+    # Ensure t is Float32 to avoid mixed-precision issues
+    t = Float32(t)
 
     #add currents into the synapses
-    current_kernel = x -> gaussian_kernel(x, t, spk_args.t_window)
-    impulses = current_kernel(train.times)
+    current_kernel = x -> raised_cosine_kernel(x, t, spk_args.t_window)
+    impulses = scale .* current_kernel(train.times)
+    if train.charges !== nothing
+        impulses = impulses .* train.charges
+    end
     current = parallel_scatter_add(train.linear_indices, impulses, train.linear_shape)
     current = reshape(current, train.shape)
-    
+
     return current
 end
 
@@ -377,59 +370,109 @@ function stack_trains(trains::Array{<:SpikeTrain,1})
     all_indices = vcat(all_indices...)
     all_times = reduce(vcat, collect(t.times for t in trains))
 
-    new_train = SpikeTrain(all_indices, all_times, new_shape, offset)
+    new_train = SpikeTrain(all_indices, all_times, new_shape, offset, _cat_charges(trains))
     return new_train
 end
 
+# ---- Float64 time axis for every spiking-mode solve ------------------------
+#
+# The state stays ComplexF32, but the solver's clock must not: with a Float32
+# tspan each fixed step `t += dt` rounds at eps(t)/2, the clock drifts away from
+# the time actually integrated, and samples taken at t_j = j·T land at the wrong
+# phase (≈1e-3 rad after 12 periods at dt = 0.01, 1.5e-2 after 50; X12 in
+# arc_experiments). `_t64` lifts times to Float64, reading a Float32 as the
+# decimal it was written as (0.01f0 → 0.01). The right-hand side still receives
+# `Float32(t)`: rounding once per evaluation does not accumulate, and existing
+# closures keep their Float32 arithmetic.
+_t64(t::Float32) = Float64(rationalize(t))
+_t64(t::Real) = Float64(t)
+_t64(t::AbstractArray) = _t64.(collect(t))
+
+function _time64_args(args)
+    d = Dict{Symbol,Any}(args)
+    for key in (:dt, :dtmin, :dtmax, :saveat, :tstops, :d_discontinuities)
+        haskey(d, key) && d[key] isa Union{Real, AbstractArray} && (d[key] = _t64(d[key]))
+    end
+    return d
+end
+
+_f32_time_rhs(f) = (u, p, t) -> f(u, p, Float32(t))
+
+"""
+    spiking_solve(dzdt, u0, tspan, spk_args; p = nothing, solver_args = spk_args.solver_args)
+
+Solve a spiking-mode ODE with a ComplexF32 state on a Float64 time axis (see the
+note above `_t64`). `p` is passed both to the problem and to `solve` (as the
+adjoint needs); `solver_args` replaces `spk_args.solver_args` when given.
+"""
+function spiking_solve(dzdt, u0, tspan, spk_args::SpikingArgs; p = nothing,
+                       solver_args = spk_args.solver_args)
+    f    = _f32_time_rhs(dzdt)
+    ts   = (_t64(tspan[1]), _t64(tspan[2]))
+    args = ignore_derivatives(() -> _time64_args(solver_args))
+    if p === nothing
+        return solve(ODEProblem(f, u0, ts), spk_args.solver; args...)
+    end
+    return solve(ODEProblem(f, u0, ts, p), spk_args.solver; p = p, args...)
+end
+
 function oscillator_bank(u0::AbstractArray, dzdt::Function; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the memory compartment
-    prob = ODEProblem(dzdt, u0, tspan)
-    sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-    
-    return sol
+    return spiking_solve(dzdt, u0, tspan, spk_args)
 end
 
 function oscillator_bank(u0::AbstractArray, dzdt::Function, params::LuxParams; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #solve the memory compartment with external parameters passed
-    prob = ODEProblem(dzdt, u0, tspan, params)
-    sol = solve(prob, spk_args.solver, p = params; spk_args.solver_args...)
-    
-    return sol
+    return spiking_solve(dzdt, u0, tspan, spk_args; p = params)
 end
 
+"""
+    oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params, state)
+
+Solve the layer ODE driven by the current in `x`, applying the layer's weight
+matrix at each time step.
+
+Uses the unified SSM equation: dz/dt = k*z + W*I(t) [+ bias_current]
+where k = lambda + i*omega are per-channel eigenvalues read from params/state.
+
+Expects `params` to contain:
+- `weight` — (out, in) real weight matrix
+- `log_neg_lambda` — (out,) log-parameterized decay rates
+- `bias_real`, `bias_imag` — (out,) complex bias (when use_bias=true)
+
+ω is derived from `layer.spk_args.t_period` via [`period_to_angfreq`](@ref);
+the layer's `spk_args` is the canonical source for dynamics (ω, T), while
+`x.spk_args` drives the simulation (solver, bias_current, etc.).
+"""
 function oscillator_bank(x::CurrentCall, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple)
-    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args,)
+    return oscillator_bank(x.current, layer, params, state, tspan=x.t_span, spk_args=x.spk_args)
 end
 
 function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxParams, state::NamedTuple; tspan::Tuple{<:Real, <:Real} = (0.0f0, 10.0f0), spk_args::SpikingArgs, use_bias::Bool=true)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-    #set up compartments for each sample
-    output_sample = layer.layer(x.current_fn(0.0f0), params.layer, state.layer)[1]
-    u0 = similar(output_sample, ComplexF32)
+    # Determine output shape from a sample
+    sample_I = x.current_fn(0.0f0)
+    out_shape = ndims(sample_I) >= 2 ? (layer.out_dims, size(sample_I)[2:end]...) : (layer.out_dims,)
+    u0 = similar(sample_I, ComplexF32, out_shape)
     ignore_derivatives() do
-        u0 .= zero(ComplexF32) # Or ComplexF32(0.0f0)
+        u0 .= zero(ComplexF32)
     end
 
-    #resonate in time with the input spikes, applying the kernel to the spike current
+    has_bias = use_bias && haskey(params, :bias_real)
+    # ω from layer.spk_args is the dynamics source (per-channel ω rule);
+    # spk_args (from the CurrentCall) drives the solver only.
+    ω_val = period_to_angfreq(layer.spk_args.t_period)
+
     function dzdt(u, p, t)
-        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        biasing_current = bias_current(p.bias, t, x.offset, spk_args)
-        return update_fn(u) .+ transformed_current .+ biasing_current
+        λ = -exp.(p.log_neg_lambda)
+        k = ComplexF32.(λ .+ im .* ω_val)
+        I_transformed = p.weight * x.current_fn(t)
+        result = k .* u .+ I_transformed
+        if has_bias
+            bias_val = p.bias_real .+ 1im .* p.bias_imag
+            result = result .+ bias_current(bias_val, t, x.offset, spk_args)
+        end
+        return result
     end
 
-    function dzdt_nobias(u, p, t)
-        transformed_current = layer.layer(x.current_fn(t), p.layer, state.layer)[1]
-        return update_fn(u) .+ transformed_current
-    end
-
-     #solve the memory compartment using the base oscillator_bank method
-    if use_bias
-        sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
-    else
-        sol = oscillator_bank(u0, dzdt_nobias, tspan=tspan, spk_args=spk_args, params)
-    end
-
+    sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args, params)
     return sol
 end
 
@@ -438,14 +481,11 @@ function oscillator_bank(x::CurrentCall)
 end
 
 function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs)
-    #set up functions to define the neuron's differential equations
-    update_fn = spk_args.update_fn
-
     #call the current function to find if we're on CPU or GPU
     sample = x.current_fn(tspan[1])
     #make the initial potential the bias value
-    if typeof(sample) <: CuArray
-        u0 = CUDA.zeros(ComplexF32, x.shape)
+    if sample isa AbstractGPUArray
+        u0 = KernelAbstractions.zeros(get_backend(sample), ComplexF32, x.shape...)
     else
         u0 = zeros(ComplexF32, x.shape)
     end
@@ -454,7 +494,7 @@ function oscillator_bank(x::LocalCurrent; tspan::Tuple{<:Real, <:Real}, spk_args
     tspan = tspan .+ x.offset
 
     #solve the ODE over the given time span
-    dzdt(u, p, t) = update_fn(u) + x.current_fn(t)
+    dzdt(u, p, t) = resonant_update(u, spk_args.leakage, spk_args.t_period) + x.current_fn(t)
     sol = oscillator_bank(u0, dzdt, tspan=tspan, spk_args=spk_args)
 
     return sol
@@ -486,88 +526,50 @@ function oscillator_bank(x::SpikingTypes; tspan::Tuple{<:Real, <:Real}, spk_args
     return oscillator_bank(local_current, tspan=tspan, spk_args=spk_args)
 end
 
-# #special version used for ODE layers
-# function oscillator_bank(x::LocalCurrent, params; tspan::Tuple{<:Real, <:Real}, spk_args::SpikingArgs, return_solution::Bool=false)
-#     #set up functions to define the neuron's differential equations
-#     output_shape = (size(params.weight, 1), x.shape[2])
-#     #make the initial potential the bias value
-#     u0 = zeros(ComplexF32, output_shape)
-#     #shift the solver span by the function's time offset
-#     tspan = tspan .+ x.offset
-    
-#     #override spk args with params leakage and frequency if provided
-#     function calc_k(p)
-#         if haskey(p, :leakage) && haskey(p, :t_period)
-#             angular_frequency = 2.0f0 * pi_f32 / p.t_period[1]
-#             k = (p.leakage[1] + 1.0f0im * angular_frequency)
-#         else
-#             k = neuron_constant(spk_args)
-#         end
-#         return k
-#     end
-    
-#     function dzdt(u, p, t)
-#         k = calc_k(p)
-#         du = k .* u + p.weight * x.current_fn(t) .+ bias_current(p.bias_real .+ 1im .* p.bias_imag, t, x.offset, spk_args)
-#         return du
-#     end
-
-#     function dzdt_nobias(u, p, t)
-#         k = calc_k(p)
-#         du = k .* u + p.weight * x.current_fn(t)
-#         return du
-#     end
-    
-#     #enable bias if used
-#     if haskey(params, :bias_real) && haskey(params, :bias_imag)
-#         prob = ODEProblem(dzdt, u0, tspan, params)
-#     else
-#         prob = ODEProblem(dzdt_nobias, u0, tspan, params)
-#     end
-    
-#     sol = solve(prob, spk_args.solver; spk_args.solver_args...)
-#     return sol
-# end
-
 """
-    vcat_trains(trains::Array{<:SpikingTypes,1})
+    vcat_trains(trains::SpikingTypes...) -> SpikingTypes
 
-Vertically concatenate multiple spike trains with identical shapes and offsets.
+Concatenate multiple spike trains by combining their spikes into a single train.
+
+All input trains must have identical shapes and offsets. The resulting train
+contains all spikes from all input trains, preserving temporal information.
 
 # Arguments
-- `trains`: Array of spike trains to concatenate
+- `trains::SpikingTypes...`: Variable number of spike trains to concatenate
 
 # Returns
-- A concatenated spike train
+- `SpikeTrain` or `SpikeTrainGPU`: Combined spike train with all input spikes
 
-# Notes
-All input trains must have identical shapes and offsets.
+# Requirements
+- All input trains must have identical shapes
+- All input trains must have identical offsets
 """
-function vcat_trains(trains::Array{<:SpikingTypes,1})
+function vcat_trains(trains::SpikeTrain...)
+    n_trains = length(trains)
+    @assert n_trains > 0 "Must provide at least one spike train"
+    
     check_offsets(trains...)
-    n_t = length(trains)
     shape = trains[1].shape
     offset = trains[1].offset
+    
     for t in trains
-        @assert shape == t.shape "Spike trains must have identical shape to be stacked"
-        @assert offset == t.offset "Spike trains must have identical offsets"
+        @assert shape == t.shape "All spike trains must have identical shape"
+        @assert offset == t.offset "All spike trains must have identical offsets"
     end
-
-    new_shape = (n_t, shape[2:end]...)
-    all_indices = []
-
-    for (i, train) in enumerate(trains)
-        old_indices = train.indices
-        #add the new dimension for each index
-        new_indices = [CartesianIndex((i, Tuple(idx)[2:end]...)) for idx in old_indices]
-        append!(all_indices, new_indices)
+    
+    # Collect all indices and times from all trains
+    all_indices = CartesianIndex[]
+    all_times = Float32[]
+    
+    for train in trains
+        append!(all_indices, train.indices)
+        append!(all_times, train.times)
     end
-
-    all_indices = vcat(all_indices...)
-    all_times = reduce(vcat, collect(t.times for t in trains))
-
-    new_train = SpikeTrain(all_indices, all_times, new_shape, offset)
-    return new_train
+    
+    # Create output train with combined spikes
+    output_train = SpikeTrain(all_indices, all_times, shape, offset, _cat_charges(trains))
+    
+    return output_train
 end
 
 function zero_nans(phases::AbstractArray)

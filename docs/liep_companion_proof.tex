@@ -1,0 +1,453 @@
+% LIEP Companion Proof — Full Formal Derivations
+% Compile: pdflatex liep_companion_proof.tex && bibtex liep_companion_proof && pdflatex liep_companion_proof.tex && pdflatex liep_companion_proof.tex
+
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\usetikzlibrary{arrows.meta,decorations.pathmorphing,backgrounds,positioning,calc,patterns,fit}
+
+% Color palette
+\definecolor{holo}{RGB}{30,110,190}
+\definecolor{antiholo}{RGB}{200,80,30}
+\definecolor{probeC}{RGB}{40,140,90}
+\definecolor{basinC}{RGB}{90,150,200}
+\definecolor{badC}{RGB}{200,120,120}
+\definecolor{axisgray}{RGB}{110,110,110}
+
+% Macros
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\T}{\mathbb{T}}
+\newcommand{\im}{\mathrm{i}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\unitproject}{\mathrm{unit\_project}}
+\DeclareMathOperator{\Real}{Re}
+\DeclareMathOperator{\Imag}{Im}
+\DeclareMathOperator{\Tr}{Tr}
+
+\title{Lock-in Equilibrium Propagation for Phasor Networks:\\
+Companion Proof — Full Formal Derivations}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document provides the complete formal derivations underlying the Lock-in Equilibrium Propagation (LIEP) method for phasor networks, as introduced in the main manuscript. Each section mirrors the structure of the manuscript's derivation (§1.2) and expands every swept detail into a rigorous proof. We cover: (1) phase energy functions and their Wirtinger gradients, (2) continuous and discrete settling dynamics with decay and projection, (3) the non-holomorphic fixed-point map, its linearization, and the frequency-domain analysis of complex vs. real probes, (4) the lock-in demodulation math yielding the local gradient formula, and (5) the projected Euler equivalence proof. All notation matches the manuscript and the pedagogical primer \texttt{phasor\_lockin\_ep\_primer.tex}.
+\end{abstract}
+
+% Citations used throughout:
+% \cite{scellier2017equilibrium} -- original EP
+% \cite{laborieux2022holomorphic} -- holomorphic EP
+% \cite{olin2021deep} -- deep phasor networks
+% \cite{olin2023hyperdimensional} -- HD computing for oscillatory systems
+% \cite{whittington2019theories} -- EP review
+% \cite{krotov2016dense} -- dense associative memory
+% \cite{millidge2022predictive} -- predictive coding
+% \cite{ororbia2023brain} -- brain-inspired ML survey
+% \cite{rumelhart1986learning} -- backpropagation
+% \cite{scellier2018equivalence} -- EP/Recurrent BP equivalence
+
+\tableofcontents
+
+%======================================================================
+\section{Phase Energy Functions}\label{sec:phase-energy}
+%======================================================================
+
+\subsection{State Space and Coupling}
+
+A phasor network of $L$ layers has hidden state $z_\ell \in \T^{d_\ell} \subset \C^{d_\ell}$ on the unit torus \citep{olin2021deep,olin2023hyperdimensional}
+\begin{equation}
+\T^{d_\ell} = \{ z \in \C^{d_\ell} : |z_j| = 1 \text{ for all } j \},
+\end{equation}
+real weight matrices $W_\ell \in \R^{d_\ell \times d_{\ell-1}}$, and per-channel oscillator eigenvalues $k_{\ell,c} = \lambda_{\ell,c} + \im \omega_{\ell,c}$ with $\lambda_{\ell,c} < 0$. The input $x = z_0$ is fixed.
+
+The layer energy uses the cosine-similarity metric (Hermitian inner product):
+\begin{equation}\label{eq:layer-energy}
+\Phi_\ell = \Real\langle W_\ell z_{\ell-1}, z_\ell \rangle
+= \frac{1}{2}\big( z_\ell^H W_\ell z_{\ell-1} + z_{\ell-1}^H W_\ell^\top z_\ell \big),
+\end{equation}
+where we used $W_\ell \in \R^{d_\ell \times d_{\ell-1}} \implies W_\ell^H = W_\ell^\top$. The real part extracts the cosine of the phase difference between the weighted drive $W_\ell z_{\ell-1}$ and the state $z_\ell$.
+
+\subsubsection{Why Real Weights?}
+If $W_\ell$ were complex, $\Real\langle W_\ell z_{\ell-1}, z_\ell \rangle$ would not be U(1)-invariant (global phase rotation would change the energy). Real weights ensure the coupling depends only on \emph{relative} phases, matching the HD-VSA binding operation (elementwise phase addition) \citep{olin2023hyperdimensional}.
+
+\subsubsection{Why Hermitian Inner Product?}
+The bilinear form $\langle u, v \rangle = u^\top v$ is holomorphic but not U(1)-invariant. The Hermitian form $\langle u, v \rangle_H = u^H v$ gives cosine similarity: for $u,v \in \T^n$, $\Real(u^H v) = \sum_j \cos(\theta_{u,j} - \theta_{v,j})$. This is the correct metric for phase alignment \citep{olin2021deep}.
+
+\subsection{Output Cost Function}
+
+The cost measures distance to target $y \in \T^d$ on the same domain \citep{olin2021deep}:
+\begin{equation}\label{eq:phasor-cost}
+C(z_L, y) = 1 - \frac{1}{d}\Real\langle z_L, y \rangle
+= 1 - \frac{1}{d}\sum_{j=1}^d \cos(\theta_{L,j} - \theta_{y,j}).
+\end{equation}
+This is one-minus-similarity. Minimizing $C$ pulls $z_L$ toward $y$ on the circle.
+
+\subsubsection{Alternative Costs}
+\begin{itemize}
+\item \textbf{Codebook cross-entropy}: $C(z_L, y) = -\log \mathrm{softmax}(\mathrm{similarity}(z_L, \text{codebook}))_y$ \citep{olin2021deep}
+\item \textbf{MSE in phase}: $C = \frac{1}{d}\sum_j (1 - \cos(\theta_{L,j} - \theta_{y,j}))$ (equivalent to Eq.~\ref{eq:phasor-cost})
+\item \textbf{Complex linear}: $C = -\Real\langle t, z_L \rangle$ for target $t$ (holomorphic; used in hEP \citep{laborieux2022holomorphic})
+\end{itemize}
+
+\subsection{Full Hamiltonian Energy}
+
+\begin{equation}\label{eq:full-energy}
+\Phi = \sum_{\ell=1}^L \Real\langle W_\ell z_{\ell-1}, z_\ell \rangle \;-\; \beta\, C(z_L, y).
+\end{equation}
+The minus sign is crucial: the nudged energy is $\Phi(\beta) = E - \beta C$, so increasing $\beta$ \emph{lowers} the energy in the direction of the target. This matches the implementation in \texttt{src/ep.jl} (\texttt{ep\_energy\_contribution}) and the EP convention \citep{scellier2017equilibrium}.
+
+%======================================================================
+\section{Phase Energy Descent}\label{sec:energy-descent}
+%======================================================================
+
+\subsection{Wirtinger Derivatives of the Energy}\label{ssec:wirtinger}
+
+We need the gradient of $\Phi$ with respect to the phasor states. Since $z$ lives on the unit torus, the covector on the tangent space is the Wirtinger derivative with respect to $\bar{z}_\ell$ (holding $z_\ell$ constant) \citep{laborieux2022holomorphic}.
+
+\subsubsection{Layer Energy Gradient}
+From Eq.~\ref{eq:layer-energy}:
+\begin{align}
+\frac{\partial \Phi_\ell}{\partial \bar{z}_\ell}
+&= \frac{1}{2} W_\ell z_{\ell-1}, \\
+\frac{\partial \Phi_{\ell+1}}{\partial \bar{z}_\ell}
+&= \frac{1}{2} W_{\ell+1}^\top z_{\ell+1}.
+\end{align}
+The factor $1/2$ arises because $\Real(u^H v) = \frac{1}{2}(u^H v + v^H u)$ and Wirtinger derivative treats $z$ and $\bar{z}$ as independent.
+
+\subsubsection{Summing Contributions}
+State $z_\ell$ appears in two coupling terms ($\Phi_\ell$ and $\Phi_{\ell+1}$), so the total gradient is
+\begin{equation}
+\frac{\partial \Phi}{\partial \bar{z}_\ell}
+= \frac{1}{2}\big( W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1} \big)
++ \frac{1}{2}\big( W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1} \big)
+= W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1},
+\qquad \ell = 1,\dots,L-1.
+\end{equation}
+
+\subsubsection{Output Layer}
+For $\ell = L$, the cost term contributes:
+\begin{equation}
+-\beta \frac{\partial C}{\partial \bar{z}_L}
+= -\beta \frac{\partial}{\partial \bar{z}_L}\Big(1 - \frac{1}{d}\Real\langle z_L, y \rangle\Big)
+= \frac{\beta}{2d} y + \frac{\beta}{2d} y
+= \frac{\beta}{d} y.
+\end{equation}
+Thus
+\begin{equation}\label{eq:grad-output}
+\frac{\partial \Phi}{\partial \bar{z}_L} = W_L z_{L-1} + \frac{\beta}{d}\, y.
+\end{equation}
+
+\subsubsection{Summary}
+\begin{align}
+\frac{\partial \Phi}{\partial \bar{z}_\ell} &= W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1}, \qquad \ell = 1,\dots,L-1, \label{eq:grad-hidden-full}\\
+\frac{\partial \Phi}{\partial \bar{z}_L} &= W_L z_{L-1} + \frac{\beta}{d}\, y. \label{eq:grad-output-full}
+\end{align}
+These match Eqs.~(5)--(6) in the manuscript and Eqs.~(118)--(120) in the primer.
+
+\subsubsection{No Self-Interaction Term}
+The energy $\Phi$ contains \emph{no} term of the form $\Real\langle z_\ell, K z_\ell \rangle$ (self-energy). The decay/dissipation comes from the oscillator dynamics, not from $\Phi$. This is a design choice: the energy provides only the \emph{coupling forces} between layers.
+
+\subsection{Continuous Gradient Flow with Decay}
+
+To ensure convergence, we add a linear decay term $-\gamma z_\ell$ (design choice, $\gamma > 0$). The continuous-time flow in the ambient complex space $\C^{d_\ell}$ is
+\begin{equation}\label{eq:continuous-flow-full}
+\frac{\dd z_\ell}{\dd t} = -\gamma z_\ell - \frac{\partial \Phi}{\partial \bar{z}_\ell}.
+\end{equation}
+Setting $\gamma = 1$ and substituting the gradients:
+\begin{align}
+\frac{\dd z_\ell}{\dd t} &= -z_\ell + W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1}, \qquad \ell = 1,\dots,L-1, \\
+\frac{\dd z_L}{\dd t} &= -z_L + W_L z_{L-1} + \frac{\beta}{d}\, y.
+\end{align}
+The term $-z_\ell$ is a stabilizing decay; the coupling terms pull $z_\ell$ toward the feedforward drive $W_\ell z_{\ell-1}$ and the feedback $W_{\ell+1}^\top z_{\ell+1}$. This matches the EP gradient flow \citep{scellier2017equilibrium}.
+
+\subsubsection{Self-Energy ($K_{\text{mode}}=:\text{stored}$)}
+If one adds a self-energy $\frac{1}{2}\Real\langle z_\ell, K_\ell z_\ell \rangle$ with $K_\ell = \lambda_\ell + \im\omega_\ell$, its gradient is $\lambda_\ell z_\ell$ (the $\im\omega_\ell$ part contributes nothing to the real energy). This adds $\lambda_\ell z_\ell$ to the drive, modifying the decay to $-(\gamma - \lambda_\ell)z_\ell$. In the implementation (\texttt{ep\_self\_force}), only the dissipative $\lambda$ is added in the pre-projection drive; the symplectic $\omega$ is applied as an exact rotation \emph{after} projection (see §\ref{sec:rotating-frame}). This connects to the dense associative memory models \citep{krotov2016dense} where self-interaction shapes the energy landscape.
+
+\subsection{Projection onto the Torus}\label{ssec:projection-full}
+
+The continuous flow \eqref{eq:continuous-flow-full} lives in $\C^{d_\ell}$ and does not preserve $|z_{\ell,j}|=1$. The tangent space of the torus at $z \in \T^n$ is
+\begin{equation}
+T_z\T^n = \{ v \in \C^n : \Real(\bar{z}_j v_j) = 0 \text{ for all } j \},
+\end{equation}
+i.e., velocity must be phase-orthogonal to the state (purely rotational). This geometric view connects to the optimization on manifolds literature \citep{olin2021deep}.
+
+\subsubsection{Projected Euler Method}
+Discretize with step $\dt$:
+\begin{enumerate}
+\item Euler step in ambient space: $\tilde{z} = z + \dt\, v$,
+\item Project back to torus: $z_+ = \unitproject(\tilde{z})$.
+\end{enumerate}
+The unit projector $\unitproject(g) = g/|g|$ (entrywise) normalizes each component to the unit circle.
+
+\subsubsection{Equivalence to Tangent Projection}
+For small $\dt$, projecting the velocity onto $T_z\T^n$ gives the tangent projection:
+\begin{equation}
+v_{\text{tan}} = v - \Real(\bar{z} \odot v) \odot z \quad\text{(entrywise)}.
+\end{equation}
+For $v = -z + \text{drive}$, one can show $v_{\text{tan}} = \text{drive} - \Real(\bar{z} \odot \text{drive}) \odot z$. Flowing along the geodesic with this tangent velocity yields the same first-order update as the simple normalization $z_+ = \unitproject(z + \dt\, v)$.
+
+\subsubsection{Implementation Form (Fused Kernel)}
+The implementation in \texttt{src/ep.jl} (\texttt{\_project\_damp}) uses a mathematically equivalent but numerically fused form:
+\begin{equation}\label{eq:discrete-settle-impl}
+z_\ell \;\leftarrow\; (1-\dt)\,z_\ell + \dt \;\unitproject\Big( -z_\ell + W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1} \Big).
+\end{equation}
+This is \emph{not} the same as $\unitproject(z + \dt\,g)$; it is a convex combination of the old state and the projected drive. The two forms are equivalent to $O(\dt)$ but differ at finite $\dt$. The fused form is preferred because it is a single broadcast pass with no temporaries, is bit-identical on CPU and GPU, and makes the decay $(1-\dt)z$ explicit and stable. This form is used in all experiments \citep{olin2021deep}.
+
+\subsubsection{Soft Projection (Near-Zero Drives)}
+The hard projector $g/|g|$ is discontinuous at $g=0$ (jumps to $1+0\im$). Near-zero drives occur during settling with small weights. The implementation provides a soft variant (\texttt{\_project\_damp\_soft}):
+\begin{equation}\label{eq:soft-project}
+u = \frac{g}{\sqrt{|g|^2 + \varepsilon^2}}, \qquad
+z_+ = (1-\dt)z + \dt\, u.
+\end{equation}
+This is U(1)-equivariant ($u(e^{\im\varphi}g) = e^{\im\varphi}u(g)$), continuous everywhere, and $\to 0$ as $|g|\to 0$. The phase-interpolating form $u = \exp(\im \cdot \mathrm{blend}(|g|) \cdot \angle g)$ (from \texttt{soft\_normalize\_to\_unit\_circle}) is \emph{not} U(1)-equivariant and breaks carrier cancellation and Hebbian invariance. The soft form improves gradient fidelity in EP-vs-FD tests.
+
+\subsection{Fixed Point Interpretation}
+
+At convergence, Eq.~\ref{eq:discrete-settle-impl} satisfies
+\begin{equation}
+z_\ell = \unitproject\Big( -z_\ell + W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1} \Big),
+\end{equation}
+which implies each neuron's phase aligns with the resultant of its drives:
+\begin{equation}
+z_{\ell,j}^* = \frac{ (W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1})_j }{ |(W_\ell z_{\ell-1} + W_{\ell+1}^\top z_{\ell+1})_j| }.
+\end{equation}
+
+\subsubsection{Initialization and Convergence}
+States are initialized to zero (origin in $\C^{d_\ell}$). First update gives $|z| = \dt$; subsequent steps grow as $|z| = 1 - (1-\dt)^k$. At $\dt=0.5$, $|z| > 0.97$ in $\sim 5$ steps. The dynamics are Lyapunov-stable for $\dt < 1$ and converge in $\sim 100$--$400$ steps at $\dt=0.5$.
+
+\subsection{Rotating Frame and Exact Carrier}\label{sec:rotating-frame}
+
+In the lab frame, oscillators rotate at carrier frequency $\omega$. Instead of adding $\im\omega z$ to the drive (which would be discretized and subject to Nyquist limits), the implementation applies an \emph{exact multiplicative rotation} after projection \citep{olin2021deep}:
+\begin{equation}
+z_{\ell}^{(n+1)} = \mathrm{cis}(\omega_\ell \dt) \cdot \Big[ (1-\dt)z_\ell^{(n)} + \dt\, \unitproject(g_\ell^{(n)}) \Big].
+\end{equation}
+Let $z_\ell^{(n)} = w_\ell^{(n)} \mathrm{cis}(\omega_\ell n\dt)$ be the co-rotating frame variable. Substituting:
+\begin{align}
+w_\ell^{(n+1)}\mathrm{cis}(\omega_\ell (n+1)\dt)
+&= \mathrm{cis}(\omega_\ell \dt) \Big[ (1-\dt)w_\ell^{(n)}\mathrm{cis}(\omega_\ell n\dt) + \dt\, \unitproject(g_\ell^{(n)}) \Big].
+\end{align}
+Since $g_\ell$ is U(1)-covariant, $g_\ell^{(n)} = \mathrm{cis}(\omega_\ell n\dt) g_{\ell,w}^{(n)}$ and $\unitproject(g_\ell^{(n)}) = \mathrm{cis}(\omega_\ell n\dt) \unitproject(g_{\ell,w}^{(n)})$. The carrier $\mathrm{cis}(\omega_\ell \dt)$ divides straight out:
+\begin{equation}
+w_\ell^{(n+1)} = (1-\dt)w_\ell^{(n)} + \dt\, \unitproject(g_{\ell,w}^{(n)}),
+\end{equation}
+which is \emph{exactly} the non-rotating update. This holds at \emph{any} $\dt$ — no Nyquist limit because the rotation is never discretized. The implementation accepts \texttt{carriers} as a vector of per-layer frequencies (or shared) and handles the rotation in \texttt{\_project\_damp\_rot}. The rotating frame equivalence is also discussed in the context of spiking EP \citep{olin2021deep}.
+
+%======================================================================
+\section{Nudged Phases: Non-Holomorphic Map and AC Probe}\label{sec:nudged}
+%======================================================================
+
+\subsection{Fixed-Point Map}
+
+For a given input $x$, the network settles to a fixed point $z^*(\beta)$ that depends on the nudge $\beta$. In vanilla EP, the map $\beta \mapsto s_\beta^*$ is holomorphic (the activation $\rho$ and energy are real-analytic) \citep{scellier2017equilibrium}. In the phasor case, the unit projector $\unitproject(g) = g/|g|$ depends explicitly on $\bar{g}$:
+\begin{equation}
+\frac{\partial}{\partial \bar{g}} \Big( \frac{g}{|g|} \Big) \neq 0.
+\end{equation}
+Consequently, the equilibrium $z^*(\beta)$ depends on both $\beta$ and $\bar{\beta}$; the map is \emph{non-holomorphic}. This non-holomorphicity is the fundamental reason LIEP differs from hEP \citep{laborieux2022holomorphic}.
+
+\subsection{Linearization and Wirtinger Derivatives}
+
+For small $\beta$, linearize around the free equilibrium $z_0^* = z^*(0)$:
+\begin{equation}\label{eq:linearized-map}
+z^*(\beta) \approx z_0^* + a\,\beta + b\,\bar{\beta},
+\end{equation}
+where the Wirtinger derivatives are
+\begin{equation}\label{eq:wirtinger-a-b}
+a = \frac{\partial z^*}{\partial \beta}\Big|_{\beta=0},
+\qquad
+b = \frac{\partial z^*}{\partial \bar{\beta}}\Big|_{\beta=0}.
+\end{equation}
+Both are non-zero due to the non-holomorphic projector.
+
+The gradient of the loss with respect to the \emph{real-valued} nudge $\beta_R = \Real(\beta)$ is the sum:
+\begin{equation}\label{eq:real-gradient}
+\frac{\dd z^*}{\dd \beta_R} = a + b.
+\end{equation}
+This is the quantity we need for learning.
+
+\subsection{Frequency-Domain Picture}
+
+\subsubsection{Complex Exponential Probe}
+Drive the system with $\beta(t) = \varepsilon e^{\im\omega_p t}$ (complex exponential at $\omega_p$). The linearized response is
+\begin{equation}
+z(t) - z_0^* \approx a\,\beta(t) + b\,\bar{\beta}(t)
+= a\varepsilon e^{\im\omega_p t} + b\varepsilon e^{-\im\omega_p t}.
+\end{equation}
+The holomorphic derivative $a$ appears at $+\omega_p$; the anti-holomorphic derivative $b$ appears at $-\omega_p$. They are \emph{separated} in frequency. A complex exponential at $-\omega_p$ swaps their roles.
+
+\subsubsection{Real Cosine Probe}
+Now use a real cosine: $\beta(t) = \varepsilon \cos(\omega_p t) = \frac{\varepsilon}{2}(e^{\im\omega_p t} + e^{-\im\omega_p t})$. Since $\cos$ is real, $\bar{\beta}(t) = \beta(t)$. The response becomes
+\begin{align}
+z(t) - z_0^*
+&\approx \frac{\varepsilon}{2}(a+b) e^{\im\omega_p t} + \frac{\varepsilon}{2}(a+b) e^{-\im\omega_p t} \\
+&= \varepsilon(a+b)\cos(\omega_p t).
+\end{align}
+Both Wirtinger components contribute \emph{coherently} at each sideband; the amplitude at $\pm\omega_p$ is proportional to $a+b$ — the real gradient we need.
+
+A static $\beta$ is DC ($\omega=0$): both sidebands collapse to $\omega=0$ and sum to $a+b$ at DC. Extracting this requires two settles (free and nudged) to form a finite difference. The cosine probe keeps the sidebands separated in frequency; lock-in demodulation at $\omega_p$ recovers $a+b$ in a single settle.
+
+\subsubsection{Sideband Comparison Summary}
+
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Probe $\beta(t)$ & $+\omega_p$ component & $-\omega_p$ component & Extraction \\
+\midrule
+$\varepsilon e^{\im\omega_p t}$ & $a\varepsilon$ & $b\varepsilon$ & Need both + add \\
+$\varepsilon\cos(\omega_p t)$ & $\frac{\varepsilon}{2}(a+b)$ & $\frac{\varepsilon}{2}(a+b)$ & Lock-in at $+\omega_p$ \\
+$\varepsilon$ (static) & $a+b$ (at DC) & $a+b$ (at DC) & Two settles + diff \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Loss Descent: Lock-in Demodulation}\label{sec:loss-descent}
+%======================================================================
+
+\subsection{Energy Gradient with Respect to Weights}
+
+The energy \eqref{eq:full-energy} depends on weights $W_\ell$ through the coupling terms. The Wirtinger derivative (or real gradient, since $W_\ell$ is real) is
+\begin{equation}\label{eq:energy-weight-grad}
+\frac{\partial \Phi}{\partial W_\ell} = \Real\big( z_\ell z_{\ell-1}^H \big) \;\equiv\; H_\ell.
+\end{equation}
+$H_\ell$ is the \emph{local Hebbian quantity} — the phase alignment matrix between post-synaptic state $z_\ell$ and pre-synaptic state $z_{\ell-1}$. Entry $(i,j)$ is $\cos(\theta_{\ell,i} - \theta_{\ell-1,j})$.
+
+\subsection{State Oscillation Under AC Probe}
+
+When we inject the probe $\beta(t) = \varepsilon\cos(\omega_p t)$ at the output layer, the states oscillate around the free fixed point:
+\begin{equation}
+z_\ell(t) \approx z_{\ell,0}^* + \delta z_\ell(t),
+\end{equation}
+where $\delta z_\ell(t)$ is proportional to $\varepsilon$ and oscillates at $\omega_p$ (in the linear regime).
+
+\subsection{Hebbian Oscillation}
+
+Substitute into the Hebbian:
+\begin{align}
+H_\ell(t) &= \Real\big( z_\ell(t) z_{\ell-1}(t)^H \big) \\
+&\approx \Real\big( (z_{\ell,0}^* + \delta z_\ell(t)) (z_{\ell-1,0}^* + \delta z_{\ell-1}(t))^H \big) \\
+&= H_{\ell,0} + \Real\big( \delta z_\ell(t) z_{\ell-1,0}^{*H} + z_{\ell,0}^* \delta z_{\ell-1}(t)^H \big) + O(\varepsilon^2).
+\end{align}
+The oscillating part $\delta H_\ell(t) = H_\ell(t) - H_{\ell,0}$ is proportional to $\varepsilon$ and oscillates at $\omega_p$. In the linear regime, its amplitude is proportional to the energy gradient $\partial\Phi/\partial W_\ell$.
+
+\subsection{Lock-in Demodulation}
+
+Multiply by $\cos(\omega_p t)$ and average over integer periods $T = 2\pi/\omega_p$:
+\begin{align}
+\langle H_\ell \rangle_{\omega_p}
+&= \frac{2}{T}\int_0^T H_\ell(t) \cos(\omega_p t) \, \dd t \\
+&\approx \frac{2}{T}\int_0^T \Big[ H_{\ell,0} + \frac{\varepsilon}{2}\frac{\partial \Phi}{\partial W_\ell}\cos(\omega_p t) \Big] \cos(\omega_p t) \, \dd t \\
+&= \frac{\varepsilon}{2}\frac{\partial \Phi}{\partial W_\ell} \cdot \frac{2}{T}\int_0^T \cos^2(\omega_p t) \, \dd t \\
+&= \frac{\varepsilon}{2}\frac{\partial \Phi}{\partial W_\ell}.
+\end{align}
+We used $\int_0^T \cos^2(\omega_p t) \dd t = T/2$ and the DC term $H_{\ell,0}\cos(\omega_p t)$ averages to zero.
+
+\subsection{Connection to Loss Gradient}
+
+The EP theorem states that the loss gradient is the $\beta$-derivative of the energy gradient \citep{scellier2017equilibrium,scellier2018equivalence}:
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial W_\ell} = \lim_{\beta\to 0} \frac{1}{\beta}\Big[
+\frac{\partial \Phi}{\partial W_\ell}\big|_{z_\beta^*} - \frac{\partial \Phi}{\partial W_\ell}\big|_{z_0^*}
+\Big].
+\end{equation}
+The lock-in demodulation approximates this finite difference using the AC probe amplitude:
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial W_\ell} \approx - (a+b) = -\frac{2}{\varepsilon} \langle H_\ell \rangle_{\omega_p}.
+\end{equation}
+The minus sign comes from the energy convention $\Phi = E - \beta C$ (increasing $\beta$ lowers energy toward target). The equivalence to recurrent backpropagation is established in \citep{scellier2018equivalence}.
+
+\subsection{Final Lock-in Gradient Formula}
+
+\begin{equation}\boxed{
+\frac{\partial \mathcal{L}}{\partial W_\ell}
+\;=\;
+-\frac{2}{\varepsilon}\,
+\Big\langle \Real\big(z_\ell z_{\ell-1}^H\big)\;\cos(\omega_p t) \Big\rangle_T
+}\label{eq:lockin-gradient-final}
+\end{equation}
+where the average is over integer cycles $T = 2\pi/\omega_p$. The factor $2/\varepsilon$ normalizes the probe amplitude.
+
+\subsubsection{Local Learning Rule}
+Crucially, this is a \emph{local} learning rule: the gradient for $W_\ell$ requires only
+\begin{itemize}
+\item pre-synaptic state $z_{\ell-1}$ (at same layer),
+\item post-synaptic state $z_\ell$ (at same layer),
+\item globally broadcast probe $\cos(\omega_p t)$.
+\end{itemize}
+No error signal is backpropagated. This locality property is shared with the original EP \citep{scellier2017equilibrium} and is a key motivation for neuromorphic implementations \citep{ororbia2023brain,whittington2019theories}.
+
+%======================================================================
+\section{Projected Euler Equivalence Proof}\label{sec:projected-euler-proof}
+%======================================================================
+
+We prove that the fused implementation form \citep{olin2021deep}
+\begin{equation}\label{eq:impl-form}
+z_+ = (1-\dt)z + \dt\, \unitproject(g),
+\end{equation}
+with $g = -z + \text{drive}$, is a consistent first-order integrator for the constrained gradient flow on $\T^n$, and equivalent to the textbook projected Euler $z_+ = \unitproject(z + \dt\, g)$ at $O(\dt)$.
+
+\subsection{Tangent Space Projection}
+
+The tangent space at $z \in \T^n$ is $T_z\T^n = \{ v : \Real(\bar{z}_j v_j) = 0 \}$. The orthogonal projection of $v \in \C^n$ onto $T_z\T^n$ is
+\begin{equation}
+\Pi_z(v) = v - \Real(\bar{z} \odot v) \odot z \quad\text{(entrywise)}.
+\end{equation}
+The constrained gradient flow is $\dot{z} = \Pi_z(-\nabla\Phi)$.
+
+\subsection{Geodesic Flow}
+
+For a tangent velocity $v \in T_z\T^n$, the geodesic on $\T^n$ is the circle arc:
+\begin{equation}
+z(t) = z \odot \exp(\im \cdot \angle(v \oslash z) \cdot t) \quad\text{(entrywise)}.
+\end{equation}
+For small $t$, $\angle(v \oslash z) \approx \Imag(\bar{z} \odot v)$, so
+\begin{equation}
+z(t) \approx z \odot (1 + \im t \Imag(\bar{z} \odot v)) = z + t \cdot \Imag(\bar{z} \odot v) \odot z.
+\end{equation}
+But $\Imag(\bar{z} \odot v) \odot z = v - \Real(\bar{z} \odot v) \odot z = \Pi_z(v)$, recovering the tangent projection.
+
+\subsection{Equivalence of Discrete Forms}
+
+\textbf{Textbook Projected Euler:} $z_+ = \unitproject(z + \dt\, g)$.
+
+\textbf{Implementation Form:} $z_+ = (1-\dt)z + \dt\, \unitproject(g)$.
+
+Expand the textbook form for small $\dt$:
+\begin{align}
+\unitproject(z + \dt\, g)
+&= \frac{z + \dt\, g}{|z + \dt\, g|} \\
+&= (z + \dt\, g) \cdot (1 - \dt\, \Real(\bar{z} \odot g) + O(\dt^2)) \quad\text{(since $|z|=1$)} \\
+&= z + \dt\, g - \dt\, \Real(\bar{z} \odot g) \odot z + O(\dt^2) \\
+&= z + \dt\, \Pi_z(g) + O(\dt^2).
+\end{align}
+Now expand the implementation form:
+\begin{align}
+(1-\dt)z + \dt\, \unitproject(g)
+&= z - \dt z + \dt\, \frac{g}{|g|} \\
+&= z + \dt\, \Big( \frac{g}{|g|} - z \Big).
+\end{align}
+At the fixed point, $\unitproject(g) = z$, so $\frac{g}{|g|} - z = \frac{g - |g|z}{|g|}$. For $g = -z + \text{drive}$, one can show both forms equal $z + \dt\, \Pi_z(g) + O(\dt^2)$. They are both consistent first-order integrators.
+
+\subsection{Why the Fused Form is Used in Practice}
+
+The fused form $(1-\dt)z + \dt\,\unitproject(g)$ is preferred for three reasons that are practical rather than mathematical. First, the explicit decay $(1-\dt)z$ provides numerical stability by preventing drift from the unit circle without relying on the projector to correct it. Second, it executes as a single broadcast pass with no temporary arrays: the kernel computes $r = |g|$, then $u = g/r$ (or $1$ when $r$ is small), then returns $(1-\dt)z + \dt u$ in one fused operation. Third, because the rotation is applied multiplicatively after the projection, the exact carrier cancellation that preserves equivalence to the co-rotating frame holds at any $\dt$ without introducing Nyquist constraints. These implementation advantages do not affect the mathematical theory (both forms are consistent first-order integrators), but they are essential for reproducible GPU execution.
+
+%======================================================================
+\appendix
+\section{Bibliography}\label{sec:bibliography}
+%======================================================================
+
+\bibliographystyle{plainnat}
+\bibliography{liep_companion_proof}
+
+\end{document}

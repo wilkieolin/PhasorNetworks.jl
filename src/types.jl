@@ -1,7 +1,3 @@
-include("imports.jl")
-
-pi_f32 = convert(Float32, pi)
-
 """
     Args
 
@@ -9,17 +5,64 @@ Configuration parameters for training neural networks in the PhasorNetworks fram
 
 # Fields
 - `lr::Float64`: Learning rate for optimization (default: 0.0003). Kept as Float64 for Optimisers.jl compatibility
+- `lr_ssm::Float64`: Learning rate for SSM dynamics parameters (log_neg_lambda, omega). When different from `lr`, enables differential learning rates. (default: 0.0, meaning use `lr` for all params)
+- `weight_decay::Float64`: Weight decay applied to connection weights only, not SSM dynamics parameters (default: 0.0)
+- `cosine_schedule::Bool`: Whether to use cosine annealing LR schedule (default: false)
+- `lr_min::Float64`: Minimum learning rate for cosine schedule (default: 1e-6)
+- `gc_interval::Int`: GC every N batches. 0 = every batch (default for ODE workloads). Set higher (e.g. 50) for SSM convolution workloads. (default: 0)
 - `batchsize::Int`: Number of samples per batch during training (default: 128)
 - `epochs::Int`: Number of training epochs (default: 10)
-- `use_cuda::Bool`: Whether to use GPU acceleration if available (default: true)
+- `backend::Symbol`: compute backend (`:auto`, `:cpu`, `:cuda`, `:oneapi`). Default `:auto` — the first loaded and functional GPU backend, else CPU. See [`select_device`](@ref).
 - `rng::Xoshiro`: Random number generator for reproducibility (default: Xoshiro(42))
 """
-@kwdef mutable struct Args #lr is intentionally Float64 for Optimisers compatibility with some AD backends if not careful
-    lr::Float64 = 0.0003       ## learning rate
-    batchsize::Int = 128    ## batch size
-    epochs::Int = 10        ## number of epochs
-    use_cuda::Bool = true   ## use gpu (if cuda available)
-    rng::Xoshiro = Xoshiro(42) ## global rng
+mutable struct Args
+    lr::Float64
+    lr_ssm::Float64
+    lr_alpha::Float64
+    weight_decay::Float64
+    cosine_schedule::Bool
+    lr_min::Float64
+    gc_interval::Int
+    batchsize::Int
+    epochs::Int
+    backend::Symbol
+    rng::Xoshiro
+end
+
+function Args(; lr::Float64 = 0.0003,
+               lr_ssm::Float64 = 0.0,
+               lr_alpha::Float64 = 0.0,
+               weight_decay::Float64 = 0.0,
+               cosine_schedule::Bool = false,
+               lr_min::Float64 = 1e-6,
+               gc_interval::Int = 0,
+               batchsize::Int = 128,
+               epochs::Int = 10,
+               backend::Symbol = :auto,
+               use_cuda::Union{Bool, Nothing} = nothing,
+               rng::Xoshiro = Xoshiro(42))
+    if use_cuda !== nothing
+        Base.depwarn("Args(use_cuda=...) is deprecated, use Args(backend=:cuda/:cpu) instead", :Args)
+        backend = use_cuda ? :cuda : :cpu
+    end
+    return Args(lr, lr_ssm, lr_alpha, weight_decay, cosine_schedule, lr_min,
+                gc_interval, batchsize, epochs, backend, rng)
+end
+
+# Backward compatibility: args.use_cuda still works as a read/write
+function Base.getproperty(a::Args, s::Symbol)
+    if s === :use_cuda
+        return getfield(a, :backend) == :cuda
+    end
+    return getfield(a, s)
+end
+
+function Base.setproperty!(a::Args, s::Symbol, v)
+    if s === :use_cuda
+        setfield!(a, :backend, v ? :cuda : :cpu)
+    else
+        setfield!(a, s, v)
+    end
 end
 
 """
@@ -33,6 +76,11 @@ Used for modeling spiking neural networks and implementing Vector Symbolic Archi
 - `times::Array{Float32,1}`: Timing of each spike in seconds
 - `shape::Tuple`: Dimensions of the spike space
 - `offset::Float32`: Time offset of the spike train, used in synchronization
+- `charges::Union{Nothing, Vector{Float32}}`: Optional per-spike charge (one
+  entry per spike, aligned with `times`). `nothing` (the default) means every
+  spike carries unit charge — the receiving current is `Σ kernel`, exactly as
+  before charges existed. With charges set, `spike_current` delivers
+  `Σ q·kernel` (Hill emission, see [`hill_charge`](@ref)).
 
 # Type Parameter
 - `N`: Number of dimensions in the spike space
@@ -44,16 +92,24 @@ struct SpikeTrain{N}
     times::Array{Float32,1}
     shape::Tuple
     offset::Float32
+    charges::Union{Nothing, Vector{Float32}}
 
     function SpikeTrain(indices::AbstractArray,
         times::AbstractArray,
         shape::Tuple,
-        offset::Real)
+        offset::Real,
+        charges::Union{Nothing, AbstractArray} = nothing)
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
+        if charges !== nothing
+            length(charges) == length(times_f32) ||
+                throw(DimensionMismatch("charges has $(length(charges)) entries for $(length(times_f32)) spikes"))
+            charges = Vector{Float32}(vec(charges))
+        end
         return new{length(shape)}(indices,
                             times_f32,
                             shape,
-                            Float32(offset))
+                            Float32(offset),
+                            charges)
     end
 end
 
@@ -61,16 +117,18 @@ end
 """
     SpikeTrainGPU{N}
 
-GPU-accelerated version of SpikeTrain, optimized for CUDA operations.
+GPU-accelerated version of SpikeTrain, supporting any GPU backend via AbstractGPUArray.
 Provides the same functionality as SpikeTrain but with additional fields for efficient GPU computation.
 
 # Fields
-- `indices::CuArray`: GPU array of spike locations in N-dimensional space
-- `linear_indices::CuArray`: Linearized indices for efficient GPU memory access
-- `times::CuArray{<:Real}`: GPU array of spike timings in seconds
+- `indices::AbstractGPUArray`: GPU array of spike locations in N-dimensional space
+- `linear_indices::AbstractGPUArray`: Linearized indices for efficient GPU memory access
+- `times::AbstractGPUArray{<:Real}`: GPU array of spike timings in seconds
 - `shape::Tuple`: Dimensions of the spike space
 - `linear_shape::Int`: Total size of the flattened spike space
 - `offset::Float32`: Time offset of the spike train
+- `charges::Union{Nothing, AbstractGPUArray}`: Optional per-spike charge on
+  the device (`nothing` = unit charge; see [`SpikeTrain`](@ref)).
 
 # Type Parameter
 - `N`: Number of dimensions in the spike space
@@ -79,41 +137,70 @@ Can be converted to/from CPU SpikeTrain using Base.convert.
 See also: [`SpikeTrain`](@ref)
 """
 struct SpikeTrainGPU{N}
-    indices::CuArray
-    linear_indices::CuArray
-    times::CuArray{<:Real}
+    indices::AbstractGPUArray
+    linear_indices::AbstractGPUArray
+    times::AbstractGPUArray{<:Real}
     shape::Tuple
     linear_shape::Int
     offset::Float32
+    charges::Union{Nothing, AbstractGPUArray}
 
+    # `device` defaults to the device `times` (or `indices`) already lives
+    # on, else the auto-selected GPU (`gpu_device()`). Pass it explicitly
+    # when building from host data that must land on a specific device.
     function SpikeTrainGPU(indices::AbstractArray,
                             times::AbstractArray,
                             shape::Tuple,
-                            offset::Real)
+                            offset::Real,
+                            charges::Union{Nothing, AbstractArray} = nothing;
+                            device::AbstractDevice = _spike_train_device(indices, times))
         times_f32 = eltype(times) == Float32 ? times : Float32.(times)
-        cu_times_f32 = cu(times_f32)
-        return new{length(shape)}(cu(indices),
-                CuArray(LinearIndices(shape)[indices]),
-                cu_times_f32,
+        host_indices = Array(indices)
+        linear_indices = LinearIndices(shape)[host_indices]
+        if charges !== nothing
+            length(charges) == length(times_f32) ||
+                throw(DimensionMismatch("charges has $(length(charges)) entries for $(length(times_f32)) spikes"))
+            charges = device(eltype(charges) == Float32 ? vec(charges) : Float32.(vec(charges)))
+        end
+        return new{length(shape)}(device(host_indices),
+                device(linear_indices),
+                device(times_f32),
                 shape,
                 reduce(*, shape),
-                Float32(offset))
+                Float32(offset),
+                charges)
     end
 end
 
-function SpikeTrainGPU(st::SpikeTrain)
+function SpikeTrainGPU(st::SpikeTrain; kwargs...)
     return SpikeTrainGPU(st.indices,
                         st.times,
                         st.shape,
-                        st.offset)
+                        st.offset,
+                        st.charges; kwargs...)
 end
 
 function SpikeTrain(stg::SpikeTrainGPU)
     st = SpikeTrain(Array(stg.indices),
                     Array(stg.times),
                     stg.shape,
-                    stg.offset)
+                    stg.offset,
+                    stg.charges === nothing ? nothing : Array(stg.charges))
     return st
+end
+
+# Per-spike charges of a train restricted to the spikes selected by `sel`
+# (any index into the spike list); `nothing` stays `nothing`.
+_sel_charges(c::Nothing, sel) = nothing
+_sel_charges(c::AbstractVector, sel) = c[sel]
+
+# Charges of several trains concatenated in spike order. All-`nothing` stays
+# `nothing` (unit charge); a mix fills the uncharged trains with ones (unit
+# charge is what `nothing` means).
+function _cat_charges(trains)
+    all(t -> t.charges === nothing, trains) && return nothing
+    return reduce(vcat, [t.charges === nothing ? ones(Float32, length(t.times)) : Array(t.charges)
+                         for t in trains])
 end
 
 function Base.convert(::Type{SpikeTrain}, stg::SpikeTrainGPU)
@@ -161,7 +248,7 @@ function Base.getindex(x::SpikeTrain, inds...)
     sel_times = x.times[matches]
     #map the old indicies to new values
     new_inds, new_shape = remap(sel_indices)
-    new_train = SpikeTrain(new_inds, sel_times, new_shape, x.offset)
+    new_train = SpikeTrain(new_inds, sel_times, new_shape, x.offset, _sel_charges(x.charges, matches))
 
     return new_train
 end
@@ -204,7 +291,7 @@ function Base.cat(x::SpikeTrain...; dim)
     shape = Tuple([maximum(getindex.(inds, i)) for i in 1:n_dims])
 
     #create and return the new train
-    new_train = SpikeTrain(inds, tms, shape, offset)
+    new_train = SpikeTrain(inds, tms, shape, offset, _cat_charges(x))
 end
 
 function Base.size(x::SpikeTrain, d::Int)
@@ -217,7 +304,7 @@ end
 
 function get_time(st::SpikeTrain, times::Tuple{<:Real, <:Real})
     valid = findall((st.times .> times[1]) .* (st.times .< times[2]))
-    st = SpikeTrain(st.indices[valid], st.times[valid], st.shape, st.offset)
+    st = SpikeTrain(st.indices[valid], st.times[valid], st.shape, st.offset, _sel_charges(st.charges, valid))
     return st
 end
 
@@ -234,98 +321,55 @@ Controls neuron dynamics, spike generation, and numerical integration.
 - `spk_scale::Float32`: Scaling factor for spike currents
 - `threshold::Float32`: Voltage threshold for spike generation
 - `spike_kernel::Union{Symbol, Function}`: Spike kernel function (e.g., :gaussian) or custom function
-- `solver`: ODE solver for neural dynamics (typically Heun())
+- `solver`: ODE solver for neural dynamics (default Tsit5())
 - `solver_args::Dict`: Arguments for the ODE solver
-- `update_fn::Function`: Update function for neural state
+- `warmup_periods::Int`: Per-layer cycles dropped from the output spike train,
+  with remaining spikes shifted back by `warmup_periods * t_period`. Lets each
+  layer absorb its own transient locally instead of forcing the whole network
+  to run long enough for everything to settle end-to-end. **NOTE**: this does
+  not simulate true end-to-end settling — each layer is warmed up in isolation,
+  and any *cross-layer* feedback dynamics will not be captured. For a pure
+  feedforward chain (the typical case), it's a sound speedup. Default 0.
 
 Used in both simulation and training of spiking neural networks.
-See also: [`SpikingArgs_NN`](@ref) for neural network specific variant.
 """
 struct SpikingArgs
     leakage::Float32
     t_period::Float32
     t_window::Float32
     spk_scale::Float32
+    steepness::Float32
     threshold::Float32
     spike_kernel::Union{Symbol, Function}
     solver # Solver type can be kept generic
     solver_args::Dict
-    update_fn::Function
+    warmup_periods::Int
 end
 
-function SpikingArgs(; leakage::Real = -0.2f0, 
+function SpikingArgs(; leakage::Real = -0.2f0,
                     t_period::Real = 1.0f0,
                     t_window::Real = 0.01f0,
                     spk_scale::Real = 1.0f0,
+                    steepness::Real = 0.05f0,
                     threshold::Real = 0.001f0,
                     spike_kernel = :gaussian,
-                    solver = Heun(),
+                    solver = Tsit5(),
                     solver_args = Dict(:dt => 0.01f0,
                                     :adaptive => false,
-                                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                                    :save_start => true))
-                    
-    return SpikingArgs(Float32(leakage),
-            Float32(t_period),
-            Float32(t_window),
-            Float32(spk_scale),
-            Float32(threshold),
-            spike_kernel,
-            solver,
-            solver_args,
-            u -> neuron_constant(Float32(leakage), Float32(t_period)) .* u,)
-end
-
-"""
-    SpikingArgs_NN(;
-        leakage::Real = -0.2f0,
-        t_period::Real = 1.0f0,
-        t_window::Real = 0.01f0,
-        spk_scale::Real = 1.0f0,
-        threshold::Real = 0.001f0,
-        spike_kernel = :gaussian,
-        solver = Heun(),
-        solver_args = Dict(...),
-        update_fn::Function)
-
-Neural network specific variant of spiking arguments configuration.
-
-# Arguments
-- `leakage`: Neuron leakage rate (default: -0.2f0)
-- `t_period`: Time period for oscillation (default: 1.0f0)
-- `t_window`: Time window for spike integration (default: 0.01f0)
-- `spk_scale`: Scaling factor for spikes (default: 1.0f0)
-- `threshold`: Spike threshold value (default: 0.001f0)
-- `spike_kernel`: Type of spike kernel to use (default: :gaussian)
-- `solver`: ODE solver to use (default: Heun())
-- `solver_args`: Dictionary of solver arguments
-- `update_fn`: Function for updating neuron state
-
-# Returns
-- SpikingArgs configuration object for neural networks
-"""
-function SpikingArgs_NN(; leakage::Real = -0.2f0,
-    t_period::Real = 1.0f0,
-    t_window::Real = 0.01f0,
-    spk_scale::Real = 1.0f0,
-    threshold::Real = 0.001f0,
-    spike_kernel = :gaussian,
-    solver = Heun(),
-    solver_args = Dict(:dt => 0.01f0,
-                    :adaptive => false,
-                    :sensealg => InterpolatingAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
-                    :save_start => true),
-    update_fn::Function)
+                                    :sensealg => BacksolveAdjoint(; autojacvec=ZygoteVJP(allow_nothing=false)),
+                                    :save_start => true),
+                    warmup_periods::Integer = 0)
 
     return SpikingArgs(Float32(leakage),
             Float32(t_period),
             Float32(t_window),
             Float32(spk_scale),
+            Float32(steepness),
             Float32(threshold),
             spike_kernel,
             solver,
             solver_args,
-            update_fn)
+            Int(warmup_periods))
 end
 
 function Base.show(io::IO, spk_args::SpikingArgs)
@@ -406,6 +450,22 @@ function Base.size(x::LocalCurrent)
     return x.shape
 end
 
+struct SolutionType
+    type::Symbol
+
+    SolutionType(x::Symbol) = if x in [:potential, :current, :phase, :spiking]
+        return new(x)
+    else
+        error("Invalid SolutionType symbol: $x")
+        return nothing
+    end
+end
+
+PhaseSolution = SolutionType(:phase)
+PotentialSolution = SolutionType(:potential)
+CurrentSolution = SolutionType(:current)
+SpikingSolution = SolutionType(:spiking)
+
 """
     CurrentCall
 
@@ -436,4 +496,106 @@ function Base.size(x::CurrentCall)
     return x.current.shape
 end
 
-PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray, ODESolution}
+"""
+    Phase <: Real
+
+Scalar type wrapping a `Float32` value representing a phase angle in units of π.
+Valid phase values are in [-1, 1], but no bounds checking is performed (NaN sentinels
+are valid for sub-threshold neurons). Use `remap_phase` for wrapping after arithmetic.
+
+Arithmetic with any `Real` type promotes to `Float32` — `Phase` only exists at semantic
+boundaries (layer inputs/outputs, producer function returns).
+
+# Examples
+```julia
+p = Phase(0.5f0)       # half-pi phase
+Float32(p)             # 0.5f0
+p + Phase(0.3f0)       # Float32(0.8) — arithmetic promotes to Float32
+Phase.(rand(Float32, 10) .* 2f0 .- 1f0)  # array of Phase values
+```
+"""
+struct Phase <: Real
+    value::Float32
+    Phase(x::Real) = new(Float32(x))
+end
+
+# --- Conversion & promotion ---
+Base.Float32(p::Phase) = p.value
+Base.Float64(p::Phase) = Float64(p.value)
+Base.float(p::Phase) = p.value
+Base.convert(::Type{Phase}, x::Real) = Phase(x)
+Base.convert(::Type{Phase}, p::Phase) = p
+Base.convert(::Type{T}, p::Phase) where {T<:Number} = convert(T, p.value)
+Base.promote_rule(::Type{Phase}, ::Type{T}) where {T<:Real} = promote_type(Float32, T)
+
+# --- Value semantics ---
+Base.zero(::Type{Phase}) = Phase(0.0f0)
+Base.zero(::Phase) = Phase(0.0f0)
+Base.one(::Type{Phase}) = Phase(1.0f0)
+Base.one(::Phase) = Phase(1.0f0)
+Base.typemin(::Type{Phase}) = Phase(-1.0f0)
+Base.typemax(::Type{Phase}) = Phase(1.0f0)
+
+# --- Predicates ---
+Base.isfinite(p::Phase) = isfinite(p.value)
+Base.isnan(p::Phase) = isnan(p.value)
+Base.isinf(p::Phase) = isinf(p.value)
+
+# --- Comparison & hashing ---
+Base.isless(a::Phase, b::Phase) = isless(a.value, b.value)
+Base.:<(a::Phase, b::Phase) = a.value < b.value
+Base.:<=(a::Phase, b::Phase) = a.value <= b.value
+Base.:(==)(a::Phase, b::Phase) = a.value == b.value
+Base.hash(p::Phase, h::UInt) = hash(p.value, h)
+
+# --- Arithmetic (unwrap to Float32, never returns Phase) ---
+Base.:+(a::Phase, b::Phase) = a.value + b.value
+Base.:-(a::Phase, b::Phase) = a.value - b.value
+Base.:*(a::Phase, b::Phase) = a.value * b.value
+Base.:/(a::Phase, b::Phase) = a.value / b.value
+Base.:-(a::Phase) = -a.value
+Base.abs(a::Phase) = abs(a.value)
+Base.abs2(a::Phase) = abs2(a.value)
+
+# --- Display ---
+Base.show(io::IO, p::Phase) = print(io, "Phase(", p.value, ")")
+
+# --- Random generation ---
+Base.rand(rng::AbstractRNG, ::Random.SamplerType{Phase}) = Phase(2.0f0 * rand(rng, Float32) - 1.0f0)
+
+# --- AD rule: Phase(x) pullback is identity ---
+function ChainRulesCore.rrule(::Type{Phase}, x::Real)
+    Phase(x), dz -> (NoTangent(), Float32(dz))
+end
+
+PhaseInput = Union{SpikeTrain, SpikingCall, LocalCurrent, CurrentCall, AbstractArray{Phase}, ODESolution}
+"""
+    Charged(phase, q)
+
+A discrete-path (Dirac) stream that carries a per-element **charge** next to
+its phase: `phase::AbstractArray{<:Phase,3}` `(C, L, B)` and
+`q::AbstractArray{<:Real,3}` of the same shape. It is what a layer with Hill
+emission (`emit_n < Inf`) emits in the discrete path: the unit's complex
+state `z` goes onto the wire as charge `q = rⁿ/(rⁿ+θⁿ)` (`r = |z|`) with the
+phase of `z`, so the receiving layer sees input amplitude `q` instead of 1
+(see [`hill_charge`](@ref)). The spiking counterpart is a spike train with
+per-spike `charges`.
+
+Deliberately *not* an `AbstractArray`: a layer without a `Charged` method
+fails with a `MethodError` instead of silently dropping the charge. Layers
+that accept it: `PhasorDense` (3D path), `PhasorLSA`, `PhasorLCA`,
+`PhasorResidual`, `PhaseRecenter`, `PhasorTransformerBlock`/`ScanStack`
+(by composition) and `SSMReadout` (which reads the phase only).
+"""
+struct Charged{P<:AbstractArray{<:Phase,3}, Q<:AbstractArray{<:Real,3}}
+    phase::P
+    q::Q
+    function Charged(phase::P, q::Q) where {P<:AbstractArray{<:Phase,3}, Q<:AbstractArray{<:Real,3}}
+        size(phase) == size(q) ||
+            throw(DimensionMismatch("Charged: phase $(size(phase)) and charge $(size(q)) shapes differ"))
+        return new{P, Q}(phase, q)
+    end
+end
+Base.size(c::Charged) = size(c.phase)
+Base.size(c::Charged, d::Integer) = size(c.phase, d)
+Base.show(io::IO, c::Charged) = print(io, "Charged(", join(size(c), "×"), " phase + charge)")

@@ -1,0 +1,7 @@
+.git
+.gitignore
+demos/
+docs/
+*.png
+*.ipynb
+*.md

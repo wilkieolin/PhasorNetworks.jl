@@ -1,5 +1,3 @@
-include("network.jl")
-
 #Misc. metrics
 
 """
@@ -21,7 +19,7 @@ function arc_error(phase::Real)
 end
 
 function arc_error(phases::AbstractArray)
-    return arc_error.(phases)
+    return sin.(pi_f32 .* phases)
 end
 
 """
@@ -45,7 +43,7 @@ Phase values representing the circular mean along specified dimensions.
 function angular_mean(phases::AbstractArray; dims)
     u = exp.(pi_f32 * 1.0f0im .* phases)
     u_mean = mean(u, dims=dims)
-    phase = angle.(u_mean) ./ pi_f32
+    phase = Phase.(angle.(u_mean) ./ pi_f32)
     return phase
 end
 
@@ -130,6 +128,44 @@ function cycle_correlation(static_phases::AbstractMatrix{<:Real}, dynamic_phases
 end
 
 """
+    cycle_arc_error(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3}) -> Vector{<:Real}
+
+Worst-case per-cycle circular distance between a static reference and a
+dynamic (cycled) phase trajectory.
+
+For each cycle `i`, computes `maximum(abs(arc_error(static - dynamic[:,:,i])))`
+where `arc_error(δ) = sin(π·δ)`. The result is in `[0, 1]`: 0 means every
+element is exactly aligned (or antipodal — `arc_error` is binding-invariant);
+1 means at least one element sits at quadrature (90° off). NaN entries in
+the dynamic trace (silent cycles) are filtered before the reduction; a
+cycle with no valid entries reports `NaN`.
+
+Use this in place of `cycle_correlation` when you want to track the worst
+neuron's angular drift rather than a population correlation that's
+insensitive to circular wrap.
+
+# Arguments
+- `static_phases`: Reference phase matrix (2D), values in `[-1, 1]` (units of π)
+- `dynamic_phases`: Time-varying phase matrices (3D, cycles as third dim)
+
+# Returns
+Vector of max-abs arc errors, one per cycle.
+
+See also: [`arc_error`](@ref), [`cycle_correlation`](@ref).
+"""
+function cycle_arc_error(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractArray{<:Real,3})
+    n_cycles = axes(dynamic_phases, 3)
+    s = vec(static_phases)
+    err_vals = map(n_cycles) do i
+        δ = s .- vec(dynamic_phases[:,:,i])
+        e = abs.(arc_error(δ))
+        valid = .!isnan.(e)
+        sum(valid) == 0 ? convert(eltype(e), NaN) : maximum(e[valid])
+    end
+    return err_vals
+end
+
+"""
     cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3}) -> Vector{<:Real}
 
 Calculate the sparsity (proportion of NaN values) for each cycle of dynamic phases.
@@ -143,7 +179,7 @@ Vector of sparsity values (0.0-1.0) for each cycle, where:
 - 0.0 indicates no NaN values
 - 1.0 indicates all values are NaN
 """
-function cycle_sparsity(static_phases::Matrix{<:Real}, dynamic_phases::Array{<:Real,3})
+function cycle_sparsity(static_phases::AbstractMatrix{<:Real}, dynamic_phases::AbstractArray{<:Real,3})
     n_cycles = axes(dynamic_phases, 3)
     total = reduce(*, size(static_phases))
     sparsity_vals = [sum(isnan.(dynamic_phases[:,:,i])) / total for i in n_cycles]
@@ -210,25 +246,27 @@ Calculate True Positive Rate (TPR) and False Positive Rate (FPR) curves for ROC 
 # Returns
 - Tuple of (TPR, FPR) arrays for ROC curve plotting
 """
-function tpr_fpr(prediction, labels, points::Int = 201, epsilon::Real = 0.01f0)
-    test_points = range(start = 0.0f0, stop = -20.0f0, length = points)
-    test_points = vcat(exp.(test_points), 0.0f0, reverse(-1.0f0 .* exp.(test_points)))
+function tpr_fpr(prediction::AbstractArray{<:Real}, labels::AbstractArray{<:Real}, points::Int = 201, epsilon::Real = 0.01f0)::Tuple{Vector{Float32}, Vector{Float32}}
+    # Generate a set of thresholds uniformly spaced between 0 and 1
+    # The number of thresholds matches the requested 'points' length
+    thresholds = range(start = 0.0f0, stop = 1.0f0, length = points)
+
+    # For each threshold compute the summed OvR confusion matrix across all classes
     fn = x -> sum(OvR_matrices(prediction, labels, x))
-    confusion = cat(fn.(test_points)..., dims=3)
+    confusion = cat(fn.(thresholds)..., dims = 3)
 
-    classifications = dropdims(sum(confusion, dims=2), dims=2)
-    cond_true = classifications[1,:]
-    cond_false = classifications[2,:]
+    # Aggregate confusion matrices to obtain per‑threshold true/false condition counts
+    classifications = dropdims(sum(confusion, dims = 2), dims = 2)
+    cond_true = classifications[1, :]    # total positives per threshold
+    cond_false = classifications[2, :]   # total negatives per threshold
 
-    #return cond_true, cond_false
+    # Extract true‑positive and false‑positive counts per threshold
+    true_positives = confusion[1, 1, :]
+    false_positives = confusion[2, 1, :]
 
-    true_positives = confusion[1,1,:]
-    false_positives = confusion[2,1,:]
-
-    #return true_positives, false_positives
-
-    tpr = true_positives ./ cond_true
-    fpr = false_positives ./ cond_false
+    # Compute rates, guarding against division by zero with epsilon
+    tpr = true_positives ./ (cond_true .+ epsilon)
+    fpr = false_positives ./ (cond_false .+ epsilon)
 
     return tpr, fpr
 end
@@ -339,7 +377,7 @@ Returns a loss that:
 - Is properly scaled for gradient-based optimization
 """
 function similarity_loss(similarities::AbstractArray, truth::AbstractArray; dim::Int = 1)
-    distance = abs.(1.0 .- similarities) .* truth
+    distance = abs.(1.0f0 .- similarities) .* truth
     distance = sum(distance .* truth, dims = dim)
     loss = 2.0f0 .* sin.(pi_f32/4.0f0 .* distance) .^ 2.0f0
     return loss
@@ -420,7 +458,7 @@ Automatically handles GPU arrays by moving to CPU for argmin operation.
 """
 function predict_quadrature(phases::AbstractArray; dim::Int=1)
     if on_gpu(phases)
-        phases = phases |> cdev
+        phases = phases |> cpu_device()
     end
 
     answer_shape = reduce_shape(size(phases), dim)
@@ -444,7 +482,7 @@ Automatically handles GPU arrays by moving to CPU for argmax operation.
 """
 function predict_similarity(sims::AbstractArray; dim::Int=1)
     if on_gpu(sims)
-        sims = sims |> cdev
+        sims = sims |> cpu_device()
     end
 
     answer_shape = reduce_shape(size(sims), dim)
@@ -519,8 +557,8 @@ See also: [`predict`](@ref) for the underlying prediction mechanism
 """
 function evaluate_accuracy(values::AbstractArray, truth::AbstractArray, encoding::Symbol; reduce_dim::Int=1)
     if on_gpu(values, truth)
-        values = values |> cdev
-        truth = truth |> cdev
+        values = values |> cpu_device()
+        truth = truth |> cpu_device()
     end
 
     predictions = predict(values, encoding, reduce_dim=reduce_dim)
@@ -551,7 +589,7 @@ Evaluate model loss and accuracy on a dataset.
 - `model`: Neural network model
 - `ps`: Model parameters
 - `st`: Model state
-- `args`: Configuration arguments (including use_cuda)
+- `args`: Configuration arguments (including backend)
 - `reduce_dim`: Dimension for reduction operations
 - `encoding`: Phase encoding scheme (:codebook or :quadrature)
 
@@ -559,16 +597,12 @@ Evaluate model loss and accuracy on a dataset.
 Tuple of (average_loss, accuracy)
 
 # Notes
-Automatically handles GPU/CPU device placement based on args.use_cuda
+Automatically handles GPU/CPU device placement based on args.backend
 """
 function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
     loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim)
 
-    if args.use_cuda && CUDA.functional()
-        dev = gdev
-    else
-        dev = cdev
-    end
+    dev = select_device(args.backend)
 
     num = 0
     correct = 0
@@ -580,8 +614,8 @@ function loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, 
         ŷ, _ = model(x, ps, st)
         @assert typeof(ŷ) != SpikingCall "Must call spiking models with SpikingArgs provided"
 
-        ls += sum(stack(cdev(loss_fn(ŷ, y)))) #sum across batches
-        model_correct, n_answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
+        ls += sum(stack(cpu_device()(loss_fn(ŷ, y)))) #sum across batches
+        model_correct, n_answers = cpu_device().(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         correct += model_correct[1]
         num += n_answers
     end
@@ -612,13 +646,9 @@ Tuple of (losses, accuracies) where:
 Useful for assessing the reliability of spiking network performance.
 """
 function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim::Int=1, encoding::Symbol = :codebook)
-    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cdev
+    loss_fn = (x, y) -> evaluate_loss(x, y, encoding, reduce_dim=reduce_dim) .|> cpu_device()
 
-    if args.use_cuda && CUDA.functional()
-        dev = gdev
-    else
-        dev = cdev
-    end
+    dev = select_device(args.backend)
 
     num = 0
     correct = []
@@ -630,7 +660,7 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
         ŷ, _ = model(x, ps, st)
         loss_vals = sum.(zero_nans.(loss_fn(ŷ, y)))
         append!(ls, [loss_vals,])
-        model_correct, answers = cdev.(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
+        model_correct, answers = cpu_device().(evaluate_accuracy(ŷ, y, encoding, reduce_dim=reduce_dim))
         append!(correct, model_correct)
         num += answers
     end
@@ -638,4 +668,31 @@ function spiking_loss_and_accuracy(data_loader, model, ps, st, args; reduce_dim:
     correct = stack(correct) ./ num
     ls = stack(ls) ./ num
     return ls, correct
+end
+
+"""
+    near_wrap_fraction(x; tol = 1f-4) -> Float32
+
+Fraction of elements whose phase lies within `tol` (units of π) of the Dirac
+slot edge θ = ±1. `x` is a phase array (`Phase` or real, in [-1, 1]) or an
+array of complex potentials (converted with [`complex_to_angle`](@ref)); NaN
+phases (silent neurons) are ignored.
+
+At the slot edge a spike's contribution keeps its phase but its magnitude jumps
+by `e^{λT}` (see [`_spike_dt`](@ref)), so units there are not differentiable and
+flip branch under any perturbation. Report this fraction alongside finite-
+difference gradient checks, Hessian/gain analyses and perturbation sweeps; a
+non-zero value on clean data usually means the real-axis invariance is intact
+(real weights, real bias, inputs on {0, ±1}) — see [`default_bias`](@ref).
+"""
+near_wrap_fraction(x::AbstractArray{<:Complex}; tol::Real = 1f-4) =
+    near_wrap_fraction(complex_to_angle(x); tol = tol)
+
+function near_wrap_fraction(x::AbstractArray; tol::Real = 1f-4)
+    θ = Float32.(x)
+    valid = .!isnan.(θ)
+    n = count(valid)
+    n == 0 && return 0f0
+    edge = ((1f0 .- abs.(θ)) .<= Float32(tol)) .& valid
+    return Float32(count(edge) / n)
 end
