@@ -2108,8 +2108,9 @@ Phasor QKV Attention
 
 
 function score_scale(scores::AbstractArray{<:Real,3}; scale::AbstractVector{<:Real})
-    #this function takes interference scores on [-1,1] and exponentially scales them
-    d_k = size(scores,1)
+    #this function takes interference scores on [-1,1] of shape (Lq, Lk, B)
+    # and exponentially scales them, normalising by the number of keys Lk
+    d_k = size(scores,2)
     return exp.(scale .* scores) ./ d_k
 end
 
@@ -2125,15 +2126,31 @@ function score_scale(potential::AbstractArray{<:Complex,3}, scores::AbstractArra
     return scaled
 end
 
+"""
+    attend(q, k, v; scale=[1f0]) -> (output, scores)
+
+Phase-domain attention. `q :: (D, Lq, B)`, `k :: (D, Lk, B)` and
+`v :: (D, Lk, B)` are `Phase` arrays; `Lq` and `Lk` may differ
+(cross-attention). With `s[i,j,b]` the cosine similarity of query `i`
+and key `j`,
+
+    scores[i,j,b] = exp(scale · s[i,j,b]) / Lk          (Lq, Lk, B)
+    output[:,i,b] = angle( Σ_j v[:,j,b] · scores[i,j,b] )   (D, Lq, B)
+
+i.e. values are summed in the complex domain, weighted by the scores of
+the query they are read for. Returns the output and the `scores` array.
+"""
 function attend(q::AbstractArray{<:Phase, 3}, k::AbstractArray{<:Phase, 3}, v::AbstractArray{<:Phase, 3}; scale::AbstractArray=[1.0f0,])
+    @assert size(k, 2) == size(v, 2) "attend: keys and values must have the same length; got k=$(size(k)), v=$(size(v))"
     #compute qk scores
     #produces (qt kt b)
     scores = score_scale(similarity_outer(q, k, dims=2), scale=scale)
-    #do complex-domain matrix multiply of values by scores (kt v b)
+    #do complex-domain matrix multiply of values by scores
     v = angle_to_complex(v)
     #multiply each value by the scores across batch
-    #(v kt b) * (kt qt b) ... (v kt) * (kt qt) over b
-    output = batched_mul(v, scores)
+    #(v kt b) * (kt qt b) ... (v kt) * (kt qt) over b; the scores are
+    #(qt kt b), so they are transposed to (kt qt b) first
+    output = batched_mul(v, permutedims(scores, (2, 1, 3)))
     output = complex_to_angle(output)
     return output, scores
 end
@@ -2170,10 +2187,10 @@ function attend(q::SpikingTypes, k::SpikingTypes, v::SpikingTypes; spk_args::Spi
     #produces [time][b qt kt]
     scores = similarity_outer(q, k, spk_args=spk_args, tspan=tspan)
     #convert the values to potentials
-    d_k = size(k)[2]
     values = oscillator_bank(v, tspan=tspan, spk_args=spk_args)
-    #multiply by the scores found at eachb time step
-    output_u = score_scale.(values.u, scores, scale=scale, d_k=d_k)
+    #multiply by the scores found at each time step (score_scale transposes
+    #the (qt kt b) scores and normalises by the number of keys)
+    output_u = score_scale.(values.u, scores, scale=scale)
     if return_solution 
         return output_u 
     end
