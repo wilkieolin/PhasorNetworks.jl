@@ -9,7 +9,7 @@
 # cycles and sweeping the carrier gives smooth traveling waves; hue encodes that
 # instantaneous phase, so wavefronts appear as moving colour bands.
 #
-# Run:  julia --project=. demos/wave_spiking_video.jl
+# Run:  julia --project=scripts demos/wave_spiking_video.jl
 #   env: SPK_L (cycles, 30), SPK_SUB (sub-frames/cycle, 6), SPK_IMG (image idx, 7)
 #
 ENV["GKSwstype"] = "100"

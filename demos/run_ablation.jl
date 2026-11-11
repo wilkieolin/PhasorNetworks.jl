@@ -5,9 +5,9 @@ Ablation Experiment Runner + Plotting
 Runs the ablation experiments and generates result plots.
 
 Usage:
-  julia --project=. demos/run_ablation.jl
-  julia --project=. demos/run_ablation.jl --epochs 20 --hidden 64
-  julia --project=. demos/run_ablation.jl --lr-ssm 1e-4 --cosine-schedule
+  julia --project=scripts demos/run_ablation.jl
+  julia --project=scripts demos/run_ablation.jl --epochs 20 --hidden 64
+  julia --project=scripts demos/run_ablation.jl --lr-ssm 1e-4 --cosine-schedule
 =#
 
 include("long_range_demo.jl")

@@ -19,7 +19,7 @@ PhasorNetworks.jl is a Julia package for implementing and simulating phasor neur
 
 ```julia
 using Pkg
-Pkg.add("PhasorNetworks")
+Pkg.add(url="https://github.com/wilkieolin/PhasorNetworks.jl")
 ```
 
 ## Quick Start

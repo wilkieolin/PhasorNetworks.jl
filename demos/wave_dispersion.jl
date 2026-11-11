@@ -12,7 +12,7 @@
 #         • detune g below/above criticality → extinguish / saturate;
 #         • add adaptation → standing bump destabilizes and travels.
 #
-# Run:  julia --project=. demos/wave_dispersion.jl
+# Run:  julia --project=scripts demos/wave_dispersion.jl
 # Outputs PNG/GIF into demos/wave_out/ and prints diagnostics to stdout.
 
 ENV["GKSwstype"] = "100"                     # headless GR (no display needed)

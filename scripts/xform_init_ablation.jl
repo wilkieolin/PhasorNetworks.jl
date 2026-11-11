@@ -44,8 +44,8 @@
 #
 # Usage
 # -----
-#   julia --project=. scripts/xform_init_ablation.jl                       # full run
-#   julia --project=. -e 'include("scripts/xform_init_ablation.jl"); main(; smoke=true)'
+#   julia --project=scripts scripts/xform_init_ablation.jl                       # full run
+#   julia --project=scripts -e 'include("scripts/xform_init_ablation.jl"); main(; smoke=true)'
 #
 using PhasorNetworks, Lux, Zygote, Optimisers, CUDA, LuxCUDA
 using OneHotArrays: onehotbatch

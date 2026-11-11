@@ -18,11 +18,11 @@
 # Everything here is CPU: src/ep.jl allocates host arrays throughout.
 # Peak footprint is a few hundred MB, dominated by the encoded dataset.
 #
-# Run:   julia --project=. -t auto demos/ep_fashionmnist.jl
+# Run:   julia --project=scripts -t auto demos/ep_fashionmnist.jl
 # Quick: EP_N_TRAIN=4000 EP_N_TEST=1000 EP_EPOCHS=3 EP_RUN_LOCKIN=0 \
-#          julia --project=. -t auto demos/ep_fashionmnist.jl
+#          julia --project=scripts -t auto demos/ep_fashionmnist.jl
 # Calibrate lock-in knobs only (no training):
-#        EP_MODE=calibrate julia --project=. -t auto demos/ep_fashionmnist.jl
+#        EP_MODE=calibrate julia --project=scripts -t auto demos/ep_fashionmnist.jl
 
 ENV["GKSwstype"] = "100"
 

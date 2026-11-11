@@ -13,9 +13,7 @@ gradient; [`ep_train`](@ref) is the training loop;
 [`fd_gradient_phasor`](@ref) is the finite-difference oracle used for
 verification.
 
-See `demos/phasor_ep_demo.ipynb` (package-API walkthrough),
-`demos/lockin_demo.ipynb` (lock-in derivation),
-`demos/ep_fashionmnist.jl` (FashionMNIST MLP), and
+See `demos/ep_fashionmnist.jl` (FashionMNIST MLP), and
 `docs/phasor_ep_design.md` (full design doc, including the temporal-
 Cauchy lock-in derivation) for background.
 

@@ -1024,7 +1024,7 @@ one of two modes, selected at construction:
   so `r_hi > r_lo > 0` is preserved by construction. The SLERP gate
   collapses sub-threshold channels to the silent reference `1 + 0im` and
   passes through phase on resonant channels, with a sigmoid blend in the
-  transition. See `soft_normalize_to_unit_circle` and `demos/resonant_stft_behavior.ipynb`.
+  transition. See `soft_normalize_to_unit_circle`.
 
 - **Legacy fixed activation (`activation::Function` passed positionally)** —
   applies the supplied function to `Z` with no trainable threshold params.
