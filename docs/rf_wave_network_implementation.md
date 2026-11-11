@@ -49,7 +49,7 @@ biophysical spec maps onto algebra we already have:
 
 ### 2.1 Conduction delays become complex weights — no DDE solver
 
-The architecture is phase-locked to one carrier `ω` (the per-channel-ω rule in
+The architecture is phase-locked to one carrier `ω` (the shared-ω ideal in
 `CLAUDE.md`). On that carrier a delay `τ` is *exactly* a phase rotation
 `e^{-iωτ}`. So the plan's `s_j(t − τ_ij)` collapses to `e^{-iωτ_ij}` multiplying a
 complex coupling weight. Delays stay inside the **linear complex SSM** — no
@@ -57,7 +57,7 @@ complex coupling weight. Delays stay inside the **linear complex SSM** — no
 discrete and ODE modes.
 
 This is only available *because* of the shared-ω discipline, so the wave sheet is
-consistent with — not an exception to — the per-channel-ω rule. Spatial diversity
+consistent with — not an exception to — the shared-ω ideal. Spatial diversity
 lives in `λ` and the coupling kernel, exactly as `CLAUDE.md` specifies.
 
 > **Caveat.** `e^{-iωτ}` is the exact delay only *on* the carrier `ω`. Broadband

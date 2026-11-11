@@ -29,6 +29,28 @@ function network_layers_tests()
         variance_scaling_tests()
         dense_onehot_tests()
         attend_tests()
+        shared_omega_ideal_tests()
+    end
+end
+
+# The ideal layers share one carrier ω (CLAUDE.md "Shared-ω ideal",
+# docs/devices.md). Device frequency spread is modelled separately, so no
+# ideal layer accepts an init mode that spreads ω or stores ω per channel.
+function shared_omega_ideal_tests()
+    @testset "Shared-ω ideal" begin
+        for ctor in (() -> PhasorDense(4 => 3; init_mode = :uniform),
+                     () -> PhasorConv((3, 3), 2 => 2; init_mode = :uniform),
+                     () -> PhasorFixed(4 => 3; init_mode = :uniform))
+            err = try ctor(); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("docs/devices.md", sprint(showerror, err))
+        end
+        rng = Xoshiro(1)
+        for layer in (PhasorDense(4 => 3; init_mode = :hippo), PhasorFixed(4 => 3))
+            ps, st = Lux.setup(rng, layer)
+            @test !haskey(ps, :omega)
+            @test !haskey(st, :omega)
+        end
     end
 end
 

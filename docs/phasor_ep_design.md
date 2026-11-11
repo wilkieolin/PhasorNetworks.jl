@@ -162,7 +162,7 @@ structural sources:
    saturating function.
 2. ~~**Per-channel oscillation** via `K_l`.~~ **Struck.** This said the
    `iω` part rotates "each channel at its own frequency". Two problems:
-   ω is a single shared scalar, not per-channel (the per-channel ω rule
+   ω is a single shared scalar, not per-channel (the shared-ω ideal
    in `CLAUDE.md` — phase-locked communication needs one carrier), and a
    global rotation is not a source of nonlinearity at all. It cancels
    exactly in the co-rotating frame, so it contributes nothing to the
@@ -251,7 +251,7 @@ energy explicit just lets us also compute the EP nudge.
 * **Trainable `K`?** `λ` is always trainable (via `log_neg_lambda`).
   `ω` is **not** a parameter any more — it was removed from
   `PhasorDense`'s params and state and is derived from
-  `spk_args.t_period` (per-channel ω rule). Nor could EP train it if it
+  `spk_args.t_period` (shared-ω ideal). Nor could EP train it if it
   were: the self-energy is `½Σλ_j|z_j|²`, so `∂Φ/∂ω = 0` identically
   and there is no Hebbian to derive. Only the `λ` half of `K` is
   reachable this way; a rotating substrate would have to learn ω by

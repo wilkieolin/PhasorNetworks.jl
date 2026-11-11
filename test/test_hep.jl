@@ -271,7 +271,7 @@ function hep_aligned_training_tests()
 
         # Use ω=0 for EP settling (no carrier oscillation) by setting
         # spk_args.t_period = Inf, so period_to_angfreq(Inf) = 0.
-        # The per-channel ω rule (CLAUDE.md) made ω derive from
+        # The shared-ω ideal (CLAUDE.md) made ω derive from
         # layer.spk_args.t_period, so we no longer hack it via state.
         # extract_hep_params reads the layer's spk_args at gradient time.
         spk0 = SpikingArgs(t_period = Float32(Inf))

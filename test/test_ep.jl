@@ -421,7 +421,7 @@ function ep_kmode_stored_tests()
         # (derived from spk_args.t_period = 1.0 via period_to_angfreq)
         # would give per-step rotations dt·ω that destabilize the damped
         # iteration at dt = 0.5. ω was removed from PhasorDense
-        # params/state by the per-channel ω rule (see CLAUDE.md), so the
+        # params/state by the shared-ω ideal (see CLAUDE.md), so the
         # override is now a per-call kwarg rather than a state hack.
         n1 = length(ps.layer_1.log_neg_lambda)
         n2 = length(ps.layer_2.log_neg_lambda)

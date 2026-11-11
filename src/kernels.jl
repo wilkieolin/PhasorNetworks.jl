@@ -268,9 +268,10 @@ arrives at time `t_s = (θ/2 + 0.5)·T` within the period, leaving
 start, `dt = T`; see [`_spike_dt`](@ref)).  The neuron with
 eigenvalue k_c responds as `exp(k_c · dt)`.
 
-All neurons in a layer share the same resonant frequency — spikes carry
-phase information via timing, and the receiving neuron's response depends
-only on its own dynamics k_c and the elapsed time dt.
+In the ideal layers all neurons share the same resonant frequency (the
+shared-ω ideal, `docs/devices.md`) — spikes carry phase information via
+timing, and the receiving neuron's response depends only on its own dynamics
+k_c and the elapsed time dt. The kernel itself accepts any per-channel `ω`.
 
 # Arguments
 - `phases::AbstractArray{<:Real, 3}` — (C_in, L, B) phases in [-1, 1]
@@ -620,13 +621,13 @@ horizons simultaneously — short (recent detail) through long (a memory tape).
 Tuple `(λ, ω)` of Float32 vectors of length N.  Caller must map to the
 log-parameterization (`log_neg_lambda = log.(-λ)`).
 
-!!! note "Per-channel ω rule"
+!!! note "Shared-ω ideal"
     The returned `ω` carries a HiPPO-style per-channel frequency spread
     that is meaningful in *frequency-decomposition* contexts (i.e.
     [`ResonantSTFT`](@ref)). Phase-locked layers — `PhasorDense`,
     `PhasorConv`, `PhasorFixed`, `PhasorResonant` — discard it and use
-    a single shared `ω = 2π` so output phases remain commensurable for
-    HD-VSA downstream operations. Only `λ` from this function is used
+    a single shared `ω = 2π` (the ideal the derivations assume) so output
+    phases remain commensurable for HD-VSA downstream operations. Only `λ` from this function is used
     by those layers' `:hippo` init mode.
 """
 function hippo_legs_diagonal(N::Int; tau_max::Union{Nothing, Real}=nothing,

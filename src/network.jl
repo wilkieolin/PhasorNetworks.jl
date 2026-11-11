@@ -297,15 +297,17 @@ is not part of the documented forward-pass surface.
 Empty — `ω` and `T` are derived on demand from `spk_args.t_period` via
 [`period_to_angfreq`](@ref). No per-layer `omega` is stored.
 
-# Per-channel ω rule
+# Shared-ω ideal
 Every channel in this layer carries the same carrier frequency
-`ω = period_to_angfreq(spk_args.t_period)` (`2π` by default).
-Per-channel ω diversity would desynchronize the phase carrier and break
-HD-VSA invariance with downstream phase-locked layers. Cross-channel
-diversity comes from `λ` and the weight matrix, not from `ω`. Use
-[`ResonantSTFT`](@ref) when channel-dependent ω is genuinely the goal
-(frequency decomposition); it re-encodes its outputs at the same shared
-`ω` so the rest of the network can resume phase-locked operation.
+`ω = period_to_angfreq(spk_args.t_period)` (`2π` by default). This is the
+theoretical ideal the derivations assume: phase comparisons with downstream
+phase-locked layers are exact only when the carrier is shared. Cross-channel
+diversity comes from `λ` and the weight matrix, not from `ω`. Real devices
+have frequency spread; that is modelled as a non-ideality on top of this
+layer, not by changing it (see `docs/devices.md`). Use
+[`ResonantSTFT`](@ref) when channel-dependent ω is the design goal
+(frequency decomposition); it re-encodes its outputs at one shared `ω` so the
+rest of the network can resume phase-locked operation.
 
 # Init Modes
 - `:default` — `log_neg_lambda = fill(log(0.2), out)`, single timescale
@@ -385,7 +387,8 @@ function PhasorDense(shape::Pair{<:Integer,<:Integer},
     init_mode in (:default, :hippo) ||
         throw(ArgumentError("init_mode must be :default or :hippo (got :$init_mode). " *
                             "The :uniform mode was removed because it spread ω across " *
-                            "channels, which breaks the per-channel ω rule. For multi-" *
+                            "channels; the ideal layers share one ω, and device frequency " *
+                            "spread is modelled separately (docs/devices.md). For multi-" *
                             "timescale dynamics use :hippo."))
     out = shape[2]
     lnl_vec = if init_log_neg_lambda === nothing
@@ -668,8 +671,8 @@ end
 A [`PhasorDense`](@ref)-style diagonal-SSM layer with **`n_modes` complex modes
 per output channel** — the S5/S4D "state expansion" knob. Each output channel `c`
 carries `M = n_modes` internal modes with **distinct log-spaced time-constants**
-`τ ∈ [hippo_tau_min, hippo_tau_max]` (all sharing the single carrier `ω = 2π`, per
-the per-channel-ω rule), whose trajectories are combined by a **block-diagonal
+`τ ∈ [hippo_tau_min, hippo_tau_max]` (all sharing the single carrier `ω = 2π`, the
+shared-ω ideal), whose trajectories are combined by a **block-diagonal
 complex mix-down** `C[c, m]` into one output per channel:
 
     state (out·M, L, B)  =  causal_conv_dirac(x, weight, λ(out·M), ω, T)
@@ -843,9 +846,9 @@ trainable frequency decomposition); use `PhasorResonant` everywhere else.
   short-circuited because angle is magnitude-independent).
 - `spk_args::SpikingArgs`: shared dynamics. The carrier frequency is
   derived as `ω = period_to_angfreq(spk_args.t_period) = 2π/t_period`
-  (`2π` for the default `t_period = 1`). Constant across channels by
-  design — per-channel ω would desynchronize the phase carrier and break
-  HD-VSA invariance with downstream layers.
+  (`2π` for the default `t_period = 1`). Constant across channels: the
+  shared-ω ideal that keeps output phases commensurable with downstream
+  layers (see `docs/devices.md` for device frequency spread).
 - `use_bias`: optional complex bias treated as a **constant complex
   current** (continuous-signal / ZOH semantics). Per-period
   contribution is `b · B · G[c, m]` where `B = (exp(k·T)−1)/k` is the
@@ -1369,8 +1372,8 @@ Flat structure with per-channel oscillator dynamics, matching PhasorDense.
 - `_conv` — internal Conv layer state.
 
 `ω` and `T` are derived on demand from `spk_args.t_period` via
-[`period_to_angfreq`](@ref); shared across all output channels by the
-per-channel ω rule. See [`PhasorDense`](@ref) for the full rationale.
+[`period_to_angfreq`](@ref); shared across all output channels (the
+shared-ω ideal). See [`PhasorDense`](@ref) for the full rationale.
 
 !!! note "Discrete vs ODE behavior"
     Unlike [`PhasorDense`](@ref), `PhasorConv`'s discrete path does **not**
@@ -1405,7 +1408,8 @@ function PhasorConv(k::Tuple{Vararg{Integer}}, chs::Pair{<:Integer,<:Integer}, a
     init_mode in (:default, :hippo) ||
         throw(ArgumentError("init_mode must be :default or :hippo (got :$init_mode). " *
                             "The :uniform mode was removed because it spread ω across " *
-                            "channels, which breaks the per-channel ω rule."))
+                            "channels; the ideal layers share one ω, and device frequency " *
+                            "spread is modelled separately (docs/devices.md)."))
     return PhasorConv(conv,
                       activation,
                       use_bias,
@@ -1654,8 +1658,8 @@ Weights and bias are stored in state, dynamics parameters in params.
 - `bias_real`, `bias_imag` — bias (when `use_bias=true`)
 
 `ω` and `T` are derived on demand from `spk_args.t_period` via
-[`period_to_angfreq`](@ref); shared across all channels by the
-per-channel ω rule.
+[`period_to_angfreq`](@ref); shared across all channels (the shared-ω
+ideal, see [`PhasorDense`](@ref)).
 """
 struct PhasorFixed <: Lux.AbstractLuxLayer
     in_dims::Int
@@ -1680,7 +1684,8 @@ function PhasorFixed(shape::Pair{<:Integer,<:Integer}, activation = normalize_to
     init_mode in (:default, :hippo) ||
         throw(ArgumentError("init_mode must be :default or :hippo (got :$init_mode). " *
                             "The :uniform mode was removed because it spread ω across " *
-                            "channels, which breaks the per-channel ω rule."))
+                            "channels; the ideal layers share one ω, and device frequency " *
+                            "spread is modelled separately (docs/devices.md)."))
     return PhasorFixed(shape[1], shape[2],
                        activation,
                        use_bias,
