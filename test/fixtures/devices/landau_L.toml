@@ -1,0 +1,20 @@
+# Synthetic class-L (limit-cycle) card.
+schema = "phasor-device-card/1"
+
+[identity]
+name  = { value = "Stuart-Landau oscillator (synthetic)", type = "assumed" }
+class = { value = "L", type = "assumed" }
+
+[unit]
+f0_Hz    = { value = 1.0e8, type = "assumed" }
+mu_per_s = { value = 6.0e7, type = "assumed" }
+r0       = { value = 1.0, type = "assumed" }
+
+[noise]
+linewidth_Hz = { value = 3.0e5, type = "meas", src = "fixture" }
+
+[orbit]
+nu = { value = 3.0, type = "meas" }
+
+[coupling]
+K_rel = { value = 0.02, type = "assumed" }

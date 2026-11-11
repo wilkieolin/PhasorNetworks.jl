@@ -1,0 +1,15 @@
+# Synthetic class-R card equal to the library's ideal neuron at the test defaults
+# (t_period = 1, leakage = -0.2): f0 = 1, lambda = -0.2/s, Q = pi/0.2.
+schema = "phasor-device-card/1"
+
+[identity]
+name = "ideal resonator (synthetic)"
+class = { value = "R", type = "assumed" }
+
+[unit]
+f0_Hz        = { value = 1.0, type = "assumed" }
+lambda_per_s = { value = -0.2, type = "assumed" }
+Q            = { value = 15.707963267948966, type = "derived", note = "pi / 0.2" }
+
+[spread]
+sigma_omega_rel = { value = 0.0, type = "assumed" }

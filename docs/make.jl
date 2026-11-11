@@ -28,6 +28,7 @@ makedocs(;
             "Attractor SSM" => "api/attractor_ssm.md",
             "Fractional Power Encoding" => "api/fpe.md",
             "Wave Sheets" => "api/wave.md",
+            "Device Cards" => "api/devices.md",
             "Datasets" => "api/datasets.md",
             "Backend" => "api/backend.md",
             "Equilibrium Propagation" => "api/ep.md",

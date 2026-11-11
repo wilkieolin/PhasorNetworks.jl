@@ -27,5 +27,6 @@ using AbstractFFTs: fft, ifft
 using Base: @kwdef
 using Zygote: withgradient, Buffer, checkpointed
 using Random: Xoshiro
+import TOML
 
 import LuxLib: dropout

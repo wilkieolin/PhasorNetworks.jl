@@ -1,0 +1,21 @@
+# Deliberately broken card for validation tests.
+schema = "phasor-device-card/1"
+
+[identity]
+name  = { value = "broken", type = "assumed" }
+class = { value = "X", type = "assumed" }
+
+[unit]
+f0_Hz        = 1000.0
+lambda_per_s = { value = 5.0, type = "meas" }
+Q            = { value = 2.0, type = "meas" }
+
+[spread]
+sigma_omega_rel = { value = -0.1, type = "meas" }
+sigma_lambda_rel = { value = 0.2, type = "unknown" }
+
+[orbit]
+G_table = { file = "missing.csv", type = "sim" }
+
+[mystery]
+thing = { value = 1, type = "tk" }
