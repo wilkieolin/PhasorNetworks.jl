@@ -47,3 +47,80 @@ validate_device_card
 card_value
 card_class
 ```
+
+## Device specs
+
+[`device_spec`](@ref) turns a card into a [`DeviceSpec`](@ref): the same
+device in dimensionless simulation units (`docs/devices.md` C1). Times are in
+the device's own period `1/f₀`, rates are multiplied by it, and frequencies
+are relative to `ω₀`, so one spec runs at any `spk_args.t_period`. Every
+sub-spec defaults to the shared-ω ideal, so a spec only describes how the
+device departs from it, and `is_ideal(IdealDevice())` holds.
+
+```julia
+card = load_device_card("cards/vo2.toml")
+spec = device_spec(card, SpikingArgs(); op = :above_threshold)
+spec.unknown      # fields the card marks unknown, replaced by the ideal
+spec.provenance   # each card field used, with its value type
+spec.notes        # table fits and their residuals, unit conversions
+
+# Or by hand, e.g. for a sweep:
+spec = DeviceSpec(spread = SpreadSpec(sigma_omega = 0.02),
+                  trim = TrimSpec(freq = :quantised, freq_bits = 4))
+```
+
+`set = Dict("section.field" => value)` overrides card values before
+conversion, in the card's units, which is how a sweep varies a value the
+card does not know. Orbit tables become a [`FourierFn`](@ref) by default
+(smooth, differentiable, GPU-friendly). Their fit residual goes into
+`spec.notes`. Pass `tables = :table` for exact [`TableFn`](@ref) interpolation
+instead.
+
+```@docs
+DeviceSpec
+IdealDevice
+device_spec
+is_ideal
+UnitSpec
+SpreadSpec
+OrbitSpec
+NoiseSpec
+EmitSpec
+SynapseSpec
+WireSpec
+TrimSpec
+ClockSpec
+ReaderSpec
+CostSpec
+```
+
+### Orbit functions
+
+```@docs
+PeriodicFn
+FourierFn
+TableFn
+nharmonics
+fourier_fit
+speed_distortion
+kick_distortion
+mean_inverse_speed
+```
+
+### Non-isochrony
+
+```@docs
+AmpFn
+amp_beta
+beta_from_nu
+beta_from_e4
+beta_from_iso
+```
+
+### Phase noise
+
+```@docs
+diffusion_from_linewidth
+diffusion_from_phase_noise
+diffusion_from_jitter
+```
