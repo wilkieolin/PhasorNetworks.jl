@@ -231,7 +231,19 @@ tpr_fpr,
 interpolate_roc,
 
 #datasets
-fashion_mnist_data
+fashion_mnist_data,
+
+#device cards
+DEVICE_CARD_SCHEMA,
+DEVICE_CARD_FIELDS,
+DeviceCard,
+CardValue,
+CardIssue,
+load_device_card,
+parse_device_card,
+validate_device_card,
+card_value,
+card_class
 
 include("imports.jl")
 include("constants.jl")
@@ -253,6 +265,7 @@ include("velocity_bank.jl")
 include("velocity_bank_hw.jl")
 include("metrics.jl")
 include("datasets.jl")
+include("device_card.jl")
 include("hep.jl")
 include("ep.jl")
 

@@ -1787,7 +1787,7 @@ weakdeps = ["StatsBase"]
     StatsBaseExt = "StatsBase"
 
 [[deps.PhasorNetworks]]
-deps = ["AbstractFFTs", "Adapt", "ArgParse", "Atomix", "ChainRulesCore", "CodecZlib", "ComponentArrays", "DifferentialEquations", "Distributions", "Downloads", "FFTW", "GPUArraysCore", "Interpolations", "KernelAbstractions", "LinearAlgebra", "Lux", "LuxCore", "LuxLib", "MLDataDevices", "MLUtils", "NNlib", "OneHotArrays", "Optimisers", "Random", "SciMLSensitivity", "Scratch", "Statistics", "Zygote"]
+deps = ["AbstractFFTs", "Adapt", "ArgParse", "Atomix", "ChainRulesCore", "CodecZlib", "ComponentArrays", "DifferentialEquations", "Distributions", "Downloads", "FFTW", "GPUArraysCore", "Interpolations", "KernelAbstractions", "LinearAlgebra", "Lux", "LuxCore", "LuxLib", "MLDataDevices", "MLUtils", "NNlib", "OneHotArrays", "Optimisers", "Random", "SciMLSensitivity", "Scratch", "Statistics", "TOML", "Zygote"]
 path = "../.."
 uuid = "c32d742c-e486-48f1-8804-9f6fb4d3f42c"
 version = "1.0.3-DEV"

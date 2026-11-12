@@ -1,0 +1,37 @@
+# Synthetic class-R card with spread, noise, an orbit table and two operating points.
+schema = "phasor-device-card/1"
+
+[identity]
+name     = { value = "spread resonator (synthetic)", type = "assumed" }
+platform = { value = "synthetic_r", type = "assumed" }
+class    = { value = "R", type = "assumed" }
+
+[unit]
+f0_Hz        = { value = 1.0e3, type = "fit", src = "test fixture" }
+lambda_per_s = { value = -1000.0, type = "fit" }
+Q            = { value = 3.14159, type = "derived" }
+
+[spread]
+sigma_omega_rel  = { value = 0.02, type = "meas", cond = "n = 14", src = "fixture", sd = 0.005 }
+sigma_lambda_rel = { value = 0.1, type = "assumed" }
+
+[noise]
+jitter_rel  = { value = 0.01, type = "data" }
+flicker_rel = { type = "unknown" }
+
+[orbit]
+beta    = { value = 0.11, type = "fit" }
+F_shape = { value = "loglinear", type = "assumed" }
+G_table = { file = "orbit_G.csv", type = "sim" }
+
+[emission]
+threshold       = { value = 0.05, type = "assumed" }
+threshold_units = { value = "dirac", type = "assumed" }
+hill_n          = { value = 4.0, type = "assumed" }
+
+[operating_points.small_signal]
+orbit = { beta = { value = 0.01, type = "fit", cond = "r_op = 0.03" } }
+
+[operating_points.above_threshold]
+identity = { class = { value = "L", type = "assumed" } }
+unit     = { mu_per_s = { value = 500.0, type = "assumed" }, r0 = { value = 1.0, type = "assumed" } }
