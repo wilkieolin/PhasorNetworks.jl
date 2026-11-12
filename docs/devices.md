@@ -1,7 +1,8 @@
 # The shared-ω ideal and real devices
 
-> **Status:** the conventions here are fixed, but the device API is not in the library yet. It lands in stages: card
-> format, per-unit draws, class-R and class-L unit dynamics, per-unit ω on the discrete path, then EP. Until then the
+> **Status:** the conventions here are fixed, and the device API lands in stages. In the library now: the card
+> format (`load_device_card`) and the dimensionless device spec built from it (`device_spec`, `DeviceSpec`). Still to
+> come: per-unit draws, class-R and class-L unit dynamics, per-unit ω on the discrete path, then EP. Until then the
 > layers implement only the ideal described in §1.
 
 ## 1. The ideal: one shared carrier

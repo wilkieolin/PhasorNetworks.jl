@@ -243,7 +243,45 @@ load_device_card,
 parse_device_card,
 validate_device_card,
 card_value,
-card_class
+card_class,
+
+#device specs
+DeviceSpec,
+IdealDevice,
+device_spec,
+is_ideal,
+UnitSpec,
+SpreadSpec,
+OrbitSpec,
+NoiseSpec,
+EmitSpec,
+SynapseSpec,
+WireSpec,
+TrimSpec,
+ClockSpec,
+ReaderSpec,
+CostSpec,
+PeriodicFn,
+FourierFn,
+TableFn,
+nharmonics,
+fourier_fit,
+speed_distortion,
+kick_distortion,
+mean_inverse_speed,
+AmpFn,
+IsoAmp,
+LogLinearAmp,
+LinearAmp,
+QuadraticAmp,
+TableAmp,
+amp_beta,
+beta_from_nu,
+beta_from_e4,
+beta_from_iso,
+diffusion_from_linewidth,
+diffusion_from_phase_noise,
+diffusion_from_jitter
 
 include("imports.jl")
 include("constants.jl")
@@ -266,6 +304,7 @@ include("velocity_bank_hw.jl")
 include("metrics.jl")
 include("datasets.jl")
 include("device_card.jl")
+include("device_spec.jl")
 include("hep.jl")
 include("ep.jl")
 
