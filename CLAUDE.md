@@ -74,7 +74,7 @@ families of layers share the same defining equation but differ in what
 input domain they accept:
 
 **Encoder layers** (Complex 3D in → Phase 3D out, fixed/trainable ω):
-- `PhasorResonant` — fixed shared ω (see *Per-channel ω rule*), ZOH SSM via
+- `PhasorResonant` — fixed shared ω (see *Shared-ω ideal*), ZOH SSM via
   `phasor_kernel + causal_conv`, then `complex_to_angle`. Use this to bring a
   sampled complex sequence into the phase domain.
 - `ResonantSTFT` — same shape as `PhasorResonant` but with **trainable**
@@ -118,22 +118,32 @@ Each layer has per-channel trainable dynamics:
 - `log_neg_lambda` — `(out,)` Float32, per-channel decay (always trainable, parameterized as `lambda = -exp(log_neg_lambda)`)
 - `weight` — `(out, in)` Float32, connection weights (in state for `PhasorFixed`, which trains only `log_neg_lambda`)
 
-`ω` is not a stored value on normal layers; see *Per-channel ω rule* below. Only `ResonantSTFT` has an `omega` parameter (`(n_freqs,)`, trainable).
+`ω` is not a stored value on normal layers; see *Shared-ω ideal* below. Only `ResonantSTFT` has an `omega` parameter (`(n_freqs,)`, trainable).
 
-### Per-channel ω rule
+### Shared-ω ideal (the reference device)
 
 The architecture is built on **phase-locked communication**: layer outputs
 encode information as relative phase, and downstream layers compare those
-phases via interference (similarity, binding, bundling). For the
-comparison to be well-defined, every channel within a layer must rotate
-its phasor at the same carrier frequency `ω`. Per-channel ω drift would
-desynchronize the carrier and break HD-VSA invariance.
+phases via interference (similarity, binding, bundling). The derivations
+(SSM/Dirac equivalence, the `−conj` frame correction, `unrotate_solution`,
+the EP rotating-frame theorem) assume every unit rotates at one carrier `ω`.
 
-So in `PhasorDense`, `PhasorConv`, `PhasorFixed`, `PhasorResonant`:
-**`ω` is a single shared scalar, identical for every channel, derived at each
-call from `period_to_angfreq(spk_args.t_period)` (`2π` by default)**. It is in
-neither parameters nor state. Cross-channel diversity comes from `λ`
-(multi-timescale memory) and from the weight matrix.
+**This is the theoretical ideal, not a property of hardware.** Physical
+oscillators always have frequency spread, noise and drift; supporting that
+variability, and methods that measure, correct or tolerate it (frequency
+and phase trims, frequency-locked loops, local demodulation references,
+device-aware training), is a goal of the package. `docs/devices.md` gives the
+consequences (class R: static lag `atan(Δω/|λ|)`; class L: Adler locking
+`|Δω| < K`), the mitigation results, and the conventions for device models.
+
+The ideal layers implement the shared carrier, and every device run is
+compared against this ideal twin. In `PhasorDense`, `PhasorConv`,
+`PhasorFixed`, `PhasorResonant`: **`ω` is a single shared scalar, identical for
+every channel, derived at each call from `period_to_angfreq(spk_args.t_period)`
+(`2π` by default)**. It is in neither parameters nor state. Cross-channel
+diversity comes from `λ` (multi-timescale memory) and from the weight matrix.
+Do not add per-channel ω to these layers as a trainable or init feature;
+device frequency spread is modelled as a non-ideality on top of them.
 
 The single architectural exception is `ResonantSTFT`, which is explicitly
 a frequency-decomposition front end: it carries per-channel trainable
@@ -145,8 +155,8 @@ Init modes for normal layers (`PhasorDense` / `PhasorConv` / `PhasorFixed`):
 - `:hippo`   — `log_neg_lambda` from log-spaced HiPPO-LegS spectrum
   (multi-timescale memory).
 
-(`:uniform` was removed — it spread ω across channels, which violates
-the per-channel ω rule.)
+(`:uniform` was removed — it spread ω across channels as a design choice,
+which the ideal layers do not do. Frequency spread belongs to device models.)
 
 ### Data Flow
 

@@ -87,9 +87,10 @@ co-rotating model is right. If it free-runs, the floor largely evaporates. Which
 one a device does is open — see `docs/ep_rotating_followups.md` §2. Gate F pins
 both halves of the equivariance boundary so this cannot quietly drift again.
 
-This is a strong validation of the per-channel ω rule (`CLAUDE.md`): the rule
-exists so phase-locked communication works, and exact carrier cancellation is
-what that buys.
+This is what the shared-ω ideal (`CLAUDE.md`, `docs/devices.md`) buys: with one
+carrier, cancellation is exact. Real devices detune, which leaves the
+non-variational residual described in the derivation's "Boundary of validity";
+`docs/devices.md` covers how that is modelled and corrected.
 
 ## Why the Hebbian's `adjoint` is load-bearing
 

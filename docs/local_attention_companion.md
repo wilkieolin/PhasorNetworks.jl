@@ -223,7 +223,7 @@ after the sanity tier passes.
 ## 6. Open questions
 
 - **Head sharing of λ.** The derivation says heads share `ω` (per
-  the per-channel-ω rule from CLAUDE.md) but may have distinct `λ`.
+  the shared-ω ideal from CLAUDE.md) but may have distinct `λ`.
   Whether per-head `λ` initialization should be HiPPO-style log-spaced
   *within* each head or shared *across* heads is an empirical
   question for §5.3.

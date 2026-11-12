@@ -29,7 +29,7 @@ extended to cover for the expert module. The concrete first experiment is in §6
 ## 1. The reframe: an expert is a bind that rides the carrier
 
 The wavesheet already carries information as **relative phase on a shared carrier
-`ω`** (the per-channel-ω rule in `CLAUDE.md`). Two facts make a "modulate the
+`ω`** (the shared-ω ideal in `CLAUDE.md`). Two facts make a "modulate the
 passing wave" module natural rather than bolted-on:
 
 - **Binding is a phase operation.** In the Fourier Holographic Reduced

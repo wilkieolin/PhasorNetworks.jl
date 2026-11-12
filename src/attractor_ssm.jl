@@ -54,7 +54,7 @@ the bare linear SSM cannot express.
   (exponentiated to `β ≈ 8.0` softmax sharpness).
 - `spk_args::SpikingArgs = SpikingArgs()` — shared dynamics. The discrete
   sample interval is `T = spk_args.t_period`, and the shared carrier is
-  `ω = period_to_angfreq(spk_args.t_period)` (per-channel ω rule).
+  `ω = period_to_angfreq(spk_args.t_period)` (shared-ω ideal).
 - `trainable_codes::Bool = true` — codes in `params` (true) or `state`
   (false).
 

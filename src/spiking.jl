@@ -456,7 +456,7 @@ function oscillator_bank(x::LocalCurrent, layer::AbstractLuxLayer, params::LuxPa
     end
 
     has_bias = use_bias && haskey(params, :bias_real)
-    # ω from layer.spk_args is the dynamics source (per-channel ω rule);
+    # ω from layer.spk_args is the dynamics source (shared-ω ideal);
     # spk_args (from the CurrentCall) drives the solver only.
     ω_val = period_to_angfreq(layer.spk_args.t_period)
 

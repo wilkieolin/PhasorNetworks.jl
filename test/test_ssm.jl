@@ -275,7 +275,7 @@ function dirac_discretization_tests()
             # The complex-3D ZOH path now lives in PhasorResonant; verify it
             # produces a same-shape Phase output from the same phase data
             # lifted to the unit circle. Both layers carry a single shared
-            # ω = 2π (per-channel ω rule).
+            # ω = 2π (shared-ω ideal).
             x_cmpx = angle_to_complex(phases)
             resonant = PhasorResonant(C_in => C_out, normalize_to_unit_circle;
                                       spk_args = layer_ssm.spk_args,
@@ -357,7 +357,7 @@ function phasor_ssm_layer_tests()
         # Parameter shapes
         @test size(ps.weight) == (out_dim, in_dim)
         @test size(ps.log_neg_lambda) == (out_dim,)
-        # Per-channel ω rule: ω is derived from spk_args.t_period (shared
+        # Shared-ω ideal: ω is derived from spk_args.t_period (shared
         # scalar across channels). State is empty after the refactor.
         @test st == NamedTuple()
         @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
@@ -386,7 +386,7 @@ function phasor_ssm_layer_tests()
         _, st_om = Lux.setup(rng, layer_om)
         @test st_om == NamedTuple()
 
-        # Default ω is 2π (per-channel ω rule, t_period = 1).
+        # Default ω is 2π (shared-ω ideal, t_period = 1).
         @test period_to_angfreq(layer.spk_args.t_period) ≈ Float32(2π)
 
         # Per-channel multi-timescale λ via init_log_neg_lambda vector.

@@ -463,14 +463,14 @@ end
     extract_hep_params(model, ps)
 
 Extract weights, biases, dynamics, and readout from Lux params/state.
-The `model` is the parent `Lux.Chain`; it's required because the per-channel
-ω rule (see `CLAUDE.md`) now stores ω on `layer.spk_args.t_period` rather
+The `model` is the parent `Lux.Chain`; it's required because the shared-ω
+ideal (see `CLAUDE.md`) now stores ω on `layer.spk_args.t_period` rather
 than in params/state. Each layer's scalar ω is broadcast to a per-channel
 vector matching `log_neg_lambda`'s shape so the existing `(lnl, omega)`
 k-array contract remains unchanged downstream.
 """
 # Resolve a layer's shared ω from its spk_args (single source of truth
-# per the per-channel ω rule). Returns the scalar; callers broadcast it
+# per the shared-ω ideal). Returns the scalar; callers broadcast it
 # to per-channel shape for k_arrays.
 _layer_omega_scalar(layer::PhasorDense) = period_to_angfreq(layer.spk_args.t_period)
 # Fallback: layer doesn't carry spk_args (e.g. HolomorphicReadout) — use
