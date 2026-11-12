@@ -231,6 +231,40 @@ function device_spec_card_tests()
                                          "orbit" => Dict("S_table" => Dict("file" => "bad.csv", "type" => "sim")));
                                     base_dir = dir)
             @test_throws ArgumentError device_spec(bad, spk)
+
+            # Real table layouts (SD1): one file with several named columns, and an
+            # angle grid on [0, 2π) instead of [−π, π).
+            open(joinpath(dir, "tables.csv"), "w") do io
+                println(io, "theta,S,G_re,G_im,Gamma_hat")
+                for t in grid; println(io, t, ",1.0,", 1 + 0.1cos(t), ",", 0.2sin(t), ",0.0"); end
+            end
+            open(joinpath(dir, "isf.csv"), "w") do io
+                println(io, "phi,Gamma,v1")
+                for j in 0:n-1; t = 2π * j / n; println(io, t, ",", cos(t) + 0.3, ",0.0"); end
+            end
+            lcard = parse_device_card(Dict("schema" => DEVICE_CARD_SCHEMA, "identity" => cls("L"),
+                "unit" => Dict("mu_per_s" => Dict("type" => "unknown")),
+                "orbit" => Dict("G_table" => Dict("file" => "tables.csv", "type" => "sim"),
+                                "S_table" => Dict("file" => "tables.csv", "type" => "sim"),
+                                "isf_table" => Dict("file" => "isf.csv", "type" => "sim")),
+                "clock" => Dict("zm_m" => Dict("value" => 2, "type" => "meas")),
+                "trim" => Dict("freq_bits" => Dict("value" => 5, "type" => "derived"))); base_dir = dir)
+            ls = device_spec(lcard, spk; tables = :table)
+            @test ls.orbit.G(0.0f0) ≈ 1.1 && ls.orbit.G(Float32(π / 2)) ≈ 1 + 0.2im
+            @test ls.orbit.isf(0.0f0) ≈ 1.3 && ls.orbit.isf(Float32(π)) ≈ -0.7      # rotated to start at −π
+            # Unknown μ for class L: the phase-only limit.
+            @test ls.unit.muT == Inf && "unit.mu_per_s" in ls.unknown
+            # Capabilities (trims, a Z_m reference) are applied only on request.
+            @test ls.emit.snap_m == 0 && is_ideal(ls.trim)
+            @test any(n -> occursin("not applied", n), ls.notes)
+            lm = device_spec(lcard, spk; mitigations = true)
+            @test lm.emit.snap_m == 2 && lm.trim.freq === :quantised && lm.trim.freq_bits == 5
+            # A missing (not unknown) μ is still an error; an unknown F table is the ideal.
+            @test_throws ArgumentError device_spec(base(Dict("identity" => cls("L"),
+                "unit" => Dict("f0_Hz" => Dict("value" => 1.0, "type" => "meas")))), spk)
+            ft = base(Dict("identity" => cls("R"), "orbit" => Dict("F_shape" => Dict("value" => "table", "type" => "fit"),
+                                                                     "F_table" => Dict("type" => "unknown"))))
+            @test device_spec(ft, spk).orbit.F === IsoAmp()
         end
     end
 end

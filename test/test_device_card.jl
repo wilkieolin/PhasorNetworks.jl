@@ -99,6 +99,11 @@ function device_card_validation_tests()
         d["unit"]["lambda_per_s"]["value"] = -2π / 20
         @test isempty(validate_device_card(parse_device_card(d)))
 
+        # The λ/Q check is a class R check: a class L operating point that inherits them is not an error.
+        dl = deepcopy(d); dl["identity"]["class"]["value"] = "L"
+        dl["unit"]["lambda_per_s"]["value"] = -1.0
+        @test !any(i -> i.field == "unit.Q" && i.level === :error, validate_device_card(parse_device_card(dl)))
+
         # Class-specific fields on the wrong class, and wrong units.
         d["unit"]["mu_per_s"] = Dict("value" => 1.0, "type" => "assumed")
         d["unit"]["f0_Hz"]["units"] = "kHz"

@@ -420,7 +420,7 @@ function _validate_physics!(issues, sections, prefix, class)
     if λ !== nothing && λ >= 0
         push!(issues, CardIssue(:error, prefix * "unit.lambda_per_s", "decay rate must be negative, got $λ"))
     end
-    if f0 !== nothing && Q !== nothing && λ !== nothing && Q > 0
+    if class !== :L && f0 !== nothing && Q !== nothing && λ !== nothing && Q > 0
         λ_from_Q = -2π * f0 / (2Q)
         rel = abs(λ - λ_from_Q) / abs(λ_from_Q)
         rel > 0.05 && push!(issues, CardIssue(:error, prefix * "unit.Q",
@@ -448,7 +448,7 @@ over it. An empty vector means the card is clean. Checks: the class is
 `"R"` or `"L"`; unknown values carry no number and other values carry one;
 units match the registry ([`DEVICE_CARD_FIELDS`](@ref)); table files exist;
 spreads, bits and rates are non-negative; λ is negative and agrees with
-`−ω₀/(2Q)` within 5 % when both are given; class-specific fields match the
+`−ω₀/(2Q)` within 5 % when both are given (class R); class-specific fields match the
 class. Fields outside the registry, untagged values and `TK` values are
 warnings.
 """

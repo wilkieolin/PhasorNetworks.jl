@@ -304,7 +304,8 @@ The phase unit's own dynamics, dimensionless (C1).
 - `omega_rel`: systematic frequency offset `ω_c/ω₀` shared by every unit.
 - `lambdaT`: decay rate `λ·T` (class R, negative); `nothing` keeps each
   layer's own trained `λ`.
-- `muT`, `r0`: class L growth rate `μ·T` and limit-cycle radius.
+- `muT`, `r0`: class L growth rate `μ·T` and limit-cycle radius; `muT = Inf`
+  is the phase-only limit (amplitude pinned on the limit cycle).
 - `input_tauT`: input low-pass time constant in periods (0 = none).
 """
 Base.@kwdef struct UnitSpec
@@ -739,14 +740,33 @@ function _read_csv_table(path::AbstractString)
     return header, reduce(hcat, rows)'           # (rows, columns)
 end
 
+# Columns of a periodic orbit table, by header name: the angle (first column,
+# `theta` or `phi`) and the value columns of each field. A table may carry
+# other columns too (SD1 writes S and G into one `theta,S,G_re,G_im` file).
+const _TABLE_COLUMNS = Dict("orbit.S_table" => ["S"], "orbit.G_table" => ["G_re", "G_im"],
+                            "orbit.isf_table" => ["Gamma"])
+
 function _periodic_table(path, ncols_value; field)
     header, M = _read_csv_table(path)
-    size(M, 2) == 1 + ncols_value ||
-        throw(ArgumentError("$field: expected $(1 + ncols_value) columns (theta + values), got $(join(header, ", "))"))
-    θ = M[:, 1]; n = length(θ)
-    maximum(abs.(θ .- _theta_grid(n))) < 1e-4 ||
-        throw(ArgumentError("$field: theta must be the uniform grid −π + 2π(j − 1)/n (n = $n)"))
-    return ncols_value == 1 ? M[:, 2] : complex.(M[:, 2], M[:, 3])
+    want = get(_TABLE_COLUMNS, field, String[])
+    cols = if !isempty(want) && all(in(header), want)
+        [findfirst(==(c), header) for c in want]
+    elseif size(M, 2) == 1 + ncols_value
+        collect(2:1 + ncols_value)                       # positional: angle, then the values
+    else
+        throw(ArgumentError("$field: expected columns $(join(want, ", ")) (or exactly $(1 + ncols_value) " *
+                            "columns: angle, values), got $(join(header, ", "))"))
+    end
+    θ = M[:, 1]; n = length(θ); h = 2π / n
+    maximum(abs.(diff(θ) .- h)) < 1e-4 ||
+        throw(ArgumentError("$field: the angle column must be a uniform grid of one period (step 2π/n, n = $n)"))
+    # A grid starting at θ₀ = −π + m·h is the standard grid rotated by m samples.
+    m = (θ[1] + π) / h
+    abs(m - round(m)) < 1e-4 ||
+        throw(ArgumentError("$field: the angle grid must contain −π (mod 2π) as a sample point"))
+    shift = mod(round(Int, m), n)
+    vals = ncols_value == 1 ? M[:, cols[1]] : complex.(M[:, cols[1]], M[:, cols[2]])
+    return circshift(vals, shift)
 end
 
 function _orbit_fn(v, tables, nharm, field, notes)
@@ -759,7 +779,7 @@ end
 """
     device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_unknown = :ideal,
                 set = Dict(), tables = :fourier, nharm = 8, normalize_speed = true,
-                lambda = :card) -> DeviceSpec
+                lambda = :card, mitigations = false) -> DeviceSpec
 
 Turn a [`DeviceCard`](@ref) (physical units) into a [`DeviceSpec`](@ref)
 (dimensionless, C1) at operating point `op`. The card's own period
@@ -768,7 +788,9 @@ Turn a [`DeviceCard`](@ref) (physical units) into a [`DeviceSpec`](@ref)
 threshold in the library's Dirac units (C3).
 
 - `on_unknown`: a field marked `unknown` is replaced by the ideal and listed
-  in `spec.unknown` (`:ideal`), or raises (`:error`).
+  in `spec.unknown` (`:ideal`), or raises (`:error`). For a class L unit an
+  unknown `unit.mu_per_s` becomes `muT = Inf`, the phase-only limit (the
+  amplitude pinned on the limit cycle, as for rails or thresholds).
 - `set`: overrides, `"section.field" => value` in the card's physical
   units, applied before conversion and recorded with type `:set`; use it to
   sweep a field the card does not know.
@@ -776,6 +798,11 @@ threshold in the library's Dirac units (C3).
   [`FourierFn`](@ref) with `nharm` harmonics (`:fourier`, the residual goes
   into `spec.notes`) or as exact [`TableFn`](@ref) (`:table`).
 - `normalize_speed`: rescale a speed table so `⟨1/S⟩ = 1` (C4).
+- `mitigations`: a card describes the hardware as it is. Its trims
+  (`trim.*`, `clock.shil_K_rel`) and a native `Z_m` reference
+  (`clock.zm_m`) are what the platform *can* do; they are applied only with
+  `mitigations = true`, and otherwise listed in `spec.notes`. An experiment
+  usually sets its trims on the spec directly.
 - `lambda`: a class R card's decay (`unit.lambda_per_s`, else `unit.Q`)
   sets `lambdaT` (`:card`), or each layer keeps its trained `λ` (`:layer`).
 
@@ -784,7 +811,7 @@ Errors are raised for values the spec cannot represent.
 """
 function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_unknown::Symbol = :ideal,
                      set::AbstractDict = Dict{String, Any}(), tables::Symbol = :fourier, nharm::Integer = 8,
-                     normalize_speed::Bool = true, lambda::Symbol = :card)
+                     normalize_speed::Bool = true, lambda::Symbol = :card, mitigations::Bool = false)
     _check_sym("on_unknown", on_unknown, (:ideal, :error))
     _check_sym("lambda", lambda, (:card, :layer))
     _check_sym("tables", tables, (:fourier, :table))
@@ -833,8 +860,16 @@ function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_u
         push!(notes, "unit: lambda = :layer, each layer keeps its trained λ; the card's decay is not used")
     end
     muT = cls === :L ? perT("unit.mu_per_s") : nothing
-    cls === :L && muT === nothing &&
-        throw(ArgumentError("device card \"$(card.name)\": a class L card needs unit.mu_per_s"))
+    if cls === :L && muT === nothing
+        # Real class L devices (rings, relaxation oscillators) pin their amplitude by rails or
+        # thresholds and restore it within a cycle; μ is rarely known. The ideal of that is the
+        # phase-only limit μ → ∞ (amplitude exactly on the limit cycle).
+        "unit.mu_per_s" in unknown ||
+            throw(ArgumentError("device card \"$(card.name)\": a class L card needs unit.mu_per_s " *
+                                "(mark it type = \"unknown\" for the phase-only limit μ → ∞)"))
+        muT = Inf
+        push!(notes, "unit.mu_per_s unknown: muT = Inf, the phase-only limit (amplitude pinned on the limit cycle)")
+    end
     unit = UnitSpec(class = cls, lambdaT = lambdaT, muT = something(muT, 0.0),
                     r0 = cls === :L ? numor("unit.r0", 1.0) : 1.0,
                     input_tauT = something(inT("unit.input_tau_s"), 0.0))
@@ -881,8 +916,11 @@ function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_u
         push!(notes, "orbit.beta from orbit.nu: β = −ν·μT/π = $(round(β, sigdigits = 4))")
     end
     Ftab = val("orbit.F_table")
-    F = if shape === :table || (Ftab !== nothing && β === nothing)
-        Ftab === nothing && throw(ArgumentError("device card \"$(card.name)\": F_shape = table needs orbit.F_table"))
+    F = if shape === :table && Ftab === nothing
+        "orbit.F_table" in unknown ||
+            throw(ArgumentError("device card \"$(card.name)\": F_shape = table needs orbit.F_table"))
+        IsoAmp()                                   # table marked unknown: the ideal
+    elseif shape === :table || (Ftab !== nothing && β === nothing)
         h, M = _read_csv_table(Ftab)
         size(M, 2) == 2 || throw(ArgumentError("orbit.F_table: expected columns (x, F), got $(join(h, ", "))"))
         TableAmp(M[:, 1], M[:, 2])
@@ -909,7 +947,8 @@ function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_u
         _orbit_fn(_periodic_table(isftab, 1; field = "orbit.isf_table"), tables, nharm, "orbit.isf_table", notes)
     orbit = OrbitSpec(S = S, G = G, F = F, r_ref = num("orbit.r_ref"), isf = isf)
 
-    # emission
+    # emission (a native Z_m reference is a mitigation: applied only with `mitigations = true`)
+    zm = Int(numor("clock.zm_m", 0.0))
     rule = str("emission.rule")
     rule_sym = rule === nothing ? (cls === :L ? :event : :sampled) :
                rule in ("sampled", "hill") ? :sampled : rule == "event" ? :event :
@@ -926,7 +965,7 @@ function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_u
     end
     emit = EmitSpec(rule = rule_sym, event_phase = numor("emission.event_phase_rad", 0.0), threshold = θ,
                     hill_n = numor("emission.hill_n", Inf), burst = Int(numor("emission.burst", 1.0)),
-                    snap_m = Int(numor("clock.zm_m", 0.0)))
+                    snap_m = mitigations ? zm : 0)
 
     # synapses and coupling
     K = num("coupling.K_rel")
@@ -961,6 +1000,11 @@ function device_spec(card::DeviceCard, spk_args::SpikingArgs; op = nothing, on_u
                     pin_K_rel = cls === :L ? numor("clock.shil_K_rel", 0.0) : 0.0,
                     lock_m = Int(numor("trim.lock_m", 0.0)),
                     lock_K_rel = numor("trim.lock_K_rel", 0.0))
+    if !mitigations
+        is_ideal(trim) || push!(notes, "trim: the card's trims are available but not applied (mitigations = false)")
+        zm > 0 && push!(notes, "clock.zm_m = $zm: a Z_m reference is available but not applied (mitigations = false)")
+        trim = TrimSpec()
+    end
 
     # clock and reader
     δ = num("clock.reader_clock_error_rel"); rj = num("clock.reader_jitter_rad")
