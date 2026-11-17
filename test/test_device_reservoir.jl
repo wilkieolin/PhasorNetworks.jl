@@ -5,8 +5,8 @@
 # each link's own fractional delay); the engine is cross-checked against
 # DeviceSheet by building a reservoir from a sheet's own links; and the nTron
 # path is checked against the reference toy network (transponder_model's CI
-# job `toy-tests`), whose click times are hard-coded below from
-# demos/device_studies/ntron_toy_reference.csv.
+# job `toy-tests`), whose click times are hard-coded below (from the
+# reference harness in the sibling experiments dir ../reservoir_scaleup).
 
 const _RS_CELL = RFTransponder()
 
@@ -117,7 +117,7 @@ end
 # raising node 3's and node 4's output biases fires it. Our timing differs by
 # ≤ 57 ps at node 5/6, where the loop current crosses threshold at a grazing
 # slope (≈0.05 µA/ns, so the two models' 0.1% current difference is ~25 ps) —
-# demos/device_studies/ntron_toy_validation.jl has the full comparison.
+# ../reservoir_scaleup/ntron_toy_validation/ has the full comparison.
 const _TOY_LINKS = [(1, 3, 5.0), (1, 7, 9.0), (2, 4, 5.0), (2, 8, 5.0), (3, 5, 5.0), (4, 5, 5.0), (5, 6, 5.0)]
 const _TOY_CASES = [
     (ib1 = Dict(3 => 13.0, 5 => 11.0), ib2 = Dict(5 => 22.6),
