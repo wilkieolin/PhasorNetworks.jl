@@ -176,6 +176,9 @@ nyquist_dt,
 AbstractDeviceCell,
 RFTransponder,
 RFStepper,
+NTronTransponder,
+NTronStepper,
+loop_time_constant,
 resonance_frequency,
 quality_factor,
 phasor_equivalent,
@@ -199,6 +202,13 @@ particle_drive,
 arrival_speed,
 front_anisotropy,
 link_lengths,
+DeviceReservoir,
+random_reservoir,
+reservoir_simulate,
+reservoir_input!,
+reservoir_bytes,
+in_degree,
+out_degree,
 train,
 soft_angle,
 default_bias,
@@ -276,6 +286,7 @@ include("velocity_bank.jl")
 include("velocity_bank_hw.jl")
 include("devices.jl")
 include("device_sheet.jl")
+include("device_reservoir.jl")
 include("metrics.jl")
 include("datasets.jl")
 include("hep.jl")

@@ -333,7 +333,7 @@ function sheet_simulate(sheet::DeviceSheet, nsteps::Integer; drive = nothing, s0
     cell = sheet.cell
     stp = stepper_to(cell_stepper(cell, dt), device)
     c1 = cell isa AbstractMatrix ? first(cell) : cell
-    s = device(s0 === nothing ? cell_state(c1, H, W) : s0)
+    s = device(s0 === nothing ? (cell isa AbstractMatrix ? cell_state(cell) : cell_state(cell, H, W)) : s0)
     links = device((; G = sheet.G, qi = sheet.qi, qf = sheet.qf, offs = sheet.offsets))
     buf = device(zeros(Float32, H, W, NB))
     buf[:, :, 1] .= cell_output(c1, s)               # sample m = 0 (slot mod(0,NB)+1)

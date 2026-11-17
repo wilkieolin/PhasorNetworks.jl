@@ -174,3 +174,35 @@ function gpu_kernel_compile_tests()
         end
     end
 end
+# DeviceReservoir on the GPU: the same random networks, CPU vs GPU_DEV — the
+# nTron cell (heterogeneous biases, fan-out split, forced sensors, gate drive)
+# and the RF cell. Spike sets must match and times agree to well under a step.
+function device_reservoir_gpu_tests()
+    @testset "DeviceReservoir CPU/GPU parity" begin
+        rng = Xoshiro(21)
+        N = 400
+        # one input click (≈1.45 µA of loop current) clears I2_sw − Ib2 ≈ 1.2 µA, so
+        # activity spreads from the 30 forced sensors through the graph (~440 spikes)
+        cells = [NTronTransponder(Ib1 = 15 + rand(rng), Ib2 = 18.8 + 0.3rand(rng), split = 0.6) for _ in 1:N]
+        r = random_reservoir(cells, N; k_in = 5, delay = (2000, 6000), fanout = :split,
+                             rng = Xoshiro(22), dt = 5.0)
+        kw = (; forced = (collect(1:30), 100 .+ 50 .* (0:29)), drive = t -> fill(3.5f0, N))
+        c = reservoir_simulate(r, 3_000; kw...)
+        g = reservoir_simulate(r, 3_000; kw..., device = GPU_DEV)
+        @test length(c.spike_time) > 100
+        @test c.n_spikes == g.n_spikes
+        # The nTron loop's propagator is formed every step from exp/cosh, whose
+        # device and host libm round differently, and slow (grazing) threshold
+        # crossings amplify that: measured median 0.1 ps, max 0.9 ps at dt = 5 ps
+        # over ~150 chained spikes. Same spike set; timing to a quarter step.
+        per_cell(o) = [sort(o.spike_time[o.spike_index .== i]) for i in 1:N]
+        @test maximum(maximum(abs.(a .- b); init = 0f0) for (a, b) in zip(per_cell(c), per_cell(g))) < 0.25 * r.dt
+        rf = random_reservoir(RFTransponder(), N; k_in = 8, delay = (5, 40), gain = 0.35, rng = Xoshiro(23))
+        kw = (; forced = (collect(1:10), fill(3.0, 10)))
+        c = reservoir_simulate(rf, 1_500; kw...)
+        g = reservoir_simulate(rf, 1_500; kw..., device = GPU_DEV)
+        @test c.n_spikes == g.n_spikes
+        fin = isfinite.(c.t_first)
+        @test maximum(abs.(c.t_first[fin] .- g.t_first[fin])) < 0.05
+    end
+end
