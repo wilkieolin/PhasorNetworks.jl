@@ -152,7 +152,7 @@ function test_reservoir_probes_and_random_ntron()
                          rng = Xoshiro(7), dt = 5.0)
     out = reservoir_simulate(r, 4_000; forced = (collect(1:20), fill(500.0, 20)),
                              drive = t -> fill(3.9f0, N), probe = [1, 50], probe_every = 10)
-    @test keys(out.probes) == (:inw, :iloop, :age_in, :age_out, :tail, :out)
+    @test keys(out.probes) == (:inw, :iloop, :age_in, :age_out, :tail, :out, :gate)
     @test size(out.probes.iloop) == (2, 400) && out.probe_t[end] == 20_000f0
     @test 1 in out.spike_index
     @test all(isfinite, out.t_first[1:20])

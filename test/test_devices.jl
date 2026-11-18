@@ -215,8 +215,11 @@ function _ntron_run(c, drive, dt, n; force_at = Float32[])
         t0 = Float32(k * dt)
         fk = [any(t -> t0 <= t < t0 + dt, force_at)]
         tk = [sum(t - t0 for t in force_at if t0 <= t < t0 + dt; init = 0f0)]
+        a_prev = s.age_in[1]
         s, f, tf = cell_step(stp, s, Float32(drive(t0 + dt / 2)); force = fk, t_force = tk)
-        s.age_in[1] <= dt && push!(in_t, t0 + dt - s.age_in[1])   # the input clock restarted this step
+        # the input clock restarted this step (it can restart up to dt/2 before the step start)
+        s.age_in[1] < min(a_prev + Float32(dt), PhasorNetworks._NT_LONG_AGO) - 1f-3 &&
+            push!(in_t, t0 + dt - s.age_in[1])
         f[1] && push!(out_t, t0 + tf[1])
         inw[k+1] = s.inw[1]; il[k+1] = s.iloop[1]; out[k+1] = s.out[1]
     end
@@ -266,6 +269,21 @@ function test_ntron_integrate_and_fire()
     @test double.iloop[k] < 0.5f0 * maximum(double.iloop) # the output nTron's hotspot dumped the loop
 end
 
+# A click caused by a RISING gate current is timed within the step: on a linear ramp through
+# the margin the input crossing is recovered to a small fraction of dt at any phase of the
+# step grid (it used to snap to the start of the step after the crossing).
+function test_ntron_input_timing()
+    c = NTronTransponder()
+    margin = c.I1_sw - c.Ib1
+    slope = 0.01f0                                        # µA/ps: crosses the margin in 400 ps
+    for dt in (1.0, 5.0), phase in (0.0, 0.3, 0.71)
+        tstar = 2000 + phase * dt                         # when I(t) reaches the margin
+        tr = _ntron_run(c, t -> max(0f0, Float32(margin + slope * (t - tstar))), dt, round(Int, 3000 / dt))
+        @test length(tr.in_t) >= 1
+        @test abs(tr.in_t[1] - tstar) < 0.05 * dt
+    end
+end
+
 # The emitted pulse is the reference OutputPulse, i_b2·split·σ((s−t_lead)/μ)e^{−(s−t_lead)/τ},
 # and a second pulse after the refractory period adds to the first's tail.
 function test_ntron_output_pulse()
@@ -305,6 +323,7 @@ function device_tests()
     @testset "Device cells (NTronTransponder)" begin
         test_ntron_exact_loop_step()
         test_ntron_integrate_and_fire()
+        test_ntron_input_timing()
         test_ntron_output_pulse()
         test_ntron_heterogeneous_stepper()
     end

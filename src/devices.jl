@@ -585,18 +585,19 @@ end
 end
 
 """
-    cell_state(cell::NTronTransponder, dims...) -> (; inw, iloop, age_in, age_out, tail, out)
+    cell_state(cell::NTronTransponder, dims...) -> (; inw, iloop, age_in, age_out, tail, out, gate)
     cell_state(cells::AbstractArray{NTronTransponder})
 
 Rest state: `inw = Ib1` (all bias in the input channel), empty loop. `age_in`,
 `age_out` are the times since each nTron last fired (ps; start "long ago"),
 `tail` the decaying remainder of earlier output pulses, `out` the emitted
-current. The array form takes each cell's own `Ib1`.
+current, `gate` the previous step's gate current (for sub-step input timing).
+The array form takes each cell's own `Ib1`.
 """
 function cell_state(c::NTronTransponder, dims::Integer...)
     z() = zeros(Float32, dims...)
     return (; inw = fill(c.Ib1, dims...), iloop = z(), age_in = fill(_NT_LONG_AGO, dims...),
-            age_out = fill(_NT_LONG_AGO, dims...), tail = z(), out = z())
+            age_out = fill(_NT_LONG_AGO, dims...), tail = z(), out = z(), gate = z())
 end
 function cell_state(cells::AbstractArray{NTronTransponder})
     s = cell_state(first(cells), size(cells)...)
@@ -664,7 +665,10 @@ nTron's gate (µA, held across the step). `fire` / `t_fire` report OUTPUT clicks
 1. The nTron resistances are evaluated at the step midpoint (R_nw from the
    input nTron's pulse, R_T + the output nTron's pulse), each only while that
    nTron is refractory, and the loop currents are stepped exactly.
-2. Input click: an armed input nTron whose `i_nw + I` passed `I1_sw`.
+2. Input click: an armed input nTron whose `i_nw + I` passed `I1_sw`. The crossing is
+   timed by interpolating between the previous and present midpoint samples of the gate
+   current (`s.gate`, `I`), so a click driven by a rising input is not snapped to the step
+   grid (it can land up to dt/2 before the step start).
 3. Output click: an armed output nTron whose `i_loop + Ib2` passed `I2_sw`, or
    any cell in `force` (a detector-driven sensor, firing at `t_force`).
 4. On an output click the previous pulse joins the exponential `tail` and a new
@@ -685,10 +689,14 @@ function cell_step(stp::NTronStepper, s, I; force = false, t_force = 0f0)
     age_out1 = min.(s.age_out .+ dt, _NT_LONG_AGO)
 
     # input click (resets the input nTron's clock; drives the loop from next step)
-    g0, g1 = s.inw .+ I, inw1 .+ I
+    # The gate current is sampled at step midpoints, so interpolate between the previous and
+    # present samples (t_n − dt/2 → t_n + dt/2): exact for a linear ramp, and never above
+    # the actual input (an extrapolation would overshoot on a step and fire falsely).
+    g0 = s.inw .+ s.gate
+    g1 = inw1 .+ I
     fire_in = .!refr_in .& (g1 .> stp.I1_sw)
     fin = clamp.((stp.I1_sw .- g0) ./ max.(g1 .- g0, 1f-12), 0f0, 1f0)
-    age_in2 = ifelse.(fire_in, dt .- fin .* dt, age_in1)
+    age_in2 = ifelse.(fire_in, 1.5f0 .* dt .- fin .* dt, age_in1)     # click at t_n + (fin − ½)·dt
 
     # output click
     h0, h1 = s.iloop .+ stp.Ib2, iloop1 .+ stp.Ib2
@@ -703,6 +711,7 @@ function cell_step(stp::NTronStepper, s, I; force = false, t_force = 0f0)
     age_out2 = ifelse.(fire, since, age_out1)
     out = tail .+ stp.amp .* _ntron_out_shape.(age_out2, stp.tau_out, stp.mu_out, stp.t_lead)
 
-    return (; inw = inw1, iloop = iloop1, age_in = age_in2, age_out = age_out2, tail, out),
+    return (; inw = inw1, iloop = iloop1, age_in = age_in2, age_out = age_out2, tail, out,
+              gate = zero(inw1) .+ I),
            fire, ifelse.(fire, t_fire, 0f0)
 end
