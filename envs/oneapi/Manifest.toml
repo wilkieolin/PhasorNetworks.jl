@@ -2552,9 +2552,9 @@ version = "1.64.0+1"
 
 [[deps.oneAPI]]
 deps = ["AbstractFFTs", "AcceleratedKernels", "Adapt", "CEnum", "ExprTools", "GPUArrays", "GPUCompiler", "GPUToolbox", "KernelAbstractions", "LLVM", "Libdl", "LinearAlgebra", "NEO_jll", "PrecompileTools", "Preferences", "Printf", "Random", "SPIRVIntrinsics", "SPIRV_LLVM_Backend_jll", "SPIRV_LLVM_Translator_jll", "SPIRV_Tools_jll", "SparseArrays", "SpecialFunctions", "StaticArrays", "oneAPI_Level_Zero_Headers_jll", "oneAPI_Level_Zero_Loader_jll", "oneAPI_Support_jll"]
-git-tree-sha1 = "c6af7ced0564f9731b7553010851222d2b8f29c2"
+git-tree-sha1 = "d9a1e73ae2f8736dd50d2f3e0d40e89e4ba03a8f"
 uuid = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
-version = "2.9.2"
+version = "2.9.3"
 
 [[deps.oneAPI_Level_Zero_Headers_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
